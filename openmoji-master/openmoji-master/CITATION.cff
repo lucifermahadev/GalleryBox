@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use OpenMoji in an academic context, please cite it using the metadata from this file."
+type: dataset
+title: "OpenMoji"
+abstract: >
+  OpenMoji is an open-source emoji and icon project. It provides over 4,000 carefully designed emojis and icons for designers, developers, and everyone else, covering the full Unicode emoji set plus many custom additions.
+  All graphics are released under the Creative Commons Attribution-ShareAlike 4.0 license.
+date-released: "2018-02-09"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.19704720"
+    description: "The concept DOI for all versions of OpenMoji"
+license: CC-BY-SA-4.0
+url: "https://openmoji.org"
+repository-code: "https://github.com/hfg-gmuend/openmoji"
+keywords:
+  - emoji
+  - unicode
+  - open source
+  - icons
+  - design
+  - openmoji
+authors:
+  - family-names: Groß
+    given-names: Benedikt
+    orcid: "https://orcid.org/0009-0007-5397-6348"
+    affiliation: "HfG Schwäbisch Gmünd"
+  - family-names: Utz
+    given-names: Daniel
+    affiliation: "HfG Schwäbisch Gmünd"
+  - name: "The OpenMoji Contributors"
+    website: "https://openmoji.org/about/#authors--team"

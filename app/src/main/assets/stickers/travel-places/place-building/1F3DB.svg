@@ -1,0 +1,33 @@
+<svg id="emoji" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg">
+  <g id="grid">
+    <path fill="#b3b3b3" d="M68,4V68H4V4H68m4-4H0V72H72V0Z"/>
+    <path fill="none" stroke="#00a5ff" stroke-miterlimit="10" stroke-width="0.1" d="M12.923,10.9583H59.0769A1.9231,1.9231,0,0,1,61,12.8814V59.0352a1.9231,1.9231,0,0,1-1.9231,1.9231H12.9231A1.9231,1.9231,0,0,1,11,59.0352V12.8813A1.923,1.923,0,0,1,12.923,10.9583Z"/>
+    <rect x="16" y="4" rx="2.2537" width="40" height="64" fill="none" stroke="#00a5ff" stroke-miterlimit="10" stroke-width="0.1"/>
+    <rect x="16" y="4" rx="2.2537" width="40" height="64" transform="translate(72) rotate(90)" fill="none" stroke="#00a5ff" stroke-miterlimit="10" stroke-width="0.1"/>
+    <circle cx="36" cy="36" r="29" fill="none" stroke="#00a5ff" stroke-miterlimit="10" stroke-width="0.1"/>
+  </g>
+  <g id="color">
+    <rect x="18.54" y="26" width="34.92" height="25.95" fill="#9b9b9a"/>
+    <rect x="12" y="56" width="48" height="4" fill="#fff" stroke-miterlimit="10"/>
+    <rect x="14.13" y="22" width="43.74" height="4" fill="#fff" stroke-miterlimit="10"/>
+    <rect x="15.72" y="52" width="40.55" height="4" fill="#fff" stroke-miterlimit="10"/>
+    <rect x="18.5" y="26" width="4" height="26" fill="#fff" stroke-miterlimit="10"/>
+    <rect x="27.35" y="26.15" width="4" height="26" fill="#fff" stroke-miterlimit="10"/>
+    <rect x="49.52" y="25.95" width="3.941" height="26" fill="#fff" stroke-miterlimit="10"/>
+    <polygon fill="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2" points="36 12 19 21.75 53 21.75"/>
+    <rect x="40.35" y="26.15" width="4" height="26" fill="#fff" stroke-miterlimit="10"/>
+  </g>
+  <g id="hair"/>
+  <g id="skin"/>
+  <g id="skin-shadow"/>
+  <g id="line">
+    <rect x="11.99" y="55.89" width="48.01" height="3.993" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"/>
+    <rect x="14.18" y="21.76" width="43.65" height="3.999" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2.001"/>
+    <rect x="15.27" y="51.76" width="41.47" height="3.993" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"/>
+    <rect x="18.35" y="25.61" width="4.298" height="26.3" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="1.702"/>
+    <rect x="27.35" y="25.61" width="4.298" height="26.3" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="1.702"/>
+    <rect x="49.35" y="25.61" width="4.298" height="26.3" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="1.702"/>
+    <polygon transform="matrix(1.091 0 0 .9982 -3.283 .098)" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="1.916" points="36 12 19 21.75 53 21.75"/>
+    <rect x="40.35" y="25.61" width="4.298" height="26.3" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="1.702"/>
+  </g>
+</svg>

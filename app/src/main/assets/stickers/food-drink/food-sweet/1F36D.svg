@@ -1,0 +1,23 @@
+<svg id="emoji" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg">
+  <g id="grid">
+    <path fill="#b3b3b3" d="M68,4V68H4V4H68m4-4H0V72H72V0Z"/>
+    <path fill="none" stroke="#00a5ff" stroke-miterlimit="10" stroke-width="0.1" d="M12.923,10.9583H59.0769A1.9231,1.9231,0,0,1,61,12.8814V59.0352a1.9231,1.9231,0,0,1-1.9231,1.9231H12.9231A1.9231,1.9231,0,0,1,11,59.0352V12.8813A1.923,1.923,0,0,1,12.923,10.9583Z"/>
+    <rect x="16" y="4" rx="2.2537" width="40" height="64" fill="none" stroke="#00a5ff" stroke-miterlimit="10" stroke-width="0.1"/>
+    <rect x="16" y="4" rx="2.2537" width="40" height="64" transform="translate(72) rotate(90)" fill="none" stroke="#00a5ff" stroke-miterlimit="10" stroke-width="0.1"/>
+    <circle cx="36" cy="36" r="29" fill="none" stroke="#00a5ff" stroke-miterlimit="10" stroke-width="0.1"/>
+  </g>
+  <g id="color">
+    <circle cx="8.627" cy="51.48" r="18" transform="rotate(-45)" fill="#ea5a47" stroke-width="1.2"/>
+  </g>
+  <g id="hair"/>
+  <g id="skin"/>
+  <g id="skin-shadow"/>
+  <g id="line">
+    <circle cx="8.675" cy="51.41" r="18.22" transform="rotate(-45)" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"/>
+    <line x1="12" x2="25.79" y1="60.7" y2="46.91" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"/>
+    <path fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.864" d="m42.69 30.99c0.1901-0.7095 1.05-0.09377 1.179 0.316 0.3497 1.11-0.8196 1.996-1.811 2.042-1.774 0.0823-2.992-1.659-2.906-3.306 0.1275-2.417 2.507-4.008 4.801-3.769 3.058 0.3191 5.032 3.357 4.632 6.297-0.5031 3.699-4.208 6.059-7.792 5.495-4.341-0.6831-7.089-5.059-6.359-9.287 0.8609-4.982 5.911-8.12 10.78-7.222 5.624 1.037 9.152 6.763 8.085 12.28-1.213 6.266-7.615 10.18-13.77 8.948-6.907-1.387-11.22-8.467-9.811-15.27 1.562-7.549 9.32-12.25 16.76-10.67"/>
+  </g>
+  <g id="color-foreground">
+    <path fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.864" d="m42.69 30.99c0.1901-0.7095 1.05-0.09377 1.179 0.316 0.3497 1.11-0.8196 1.996-1.811 2.042-1.774 0.0823-2.992-1.659-2.906-3.306 0.1275-2.417 2.507-4.008 4.801-3.769 3.058 0.3191 5.032 3.357 4.632 6.297-0.5031 3.699-4.208 6.059-7.792 5.495-4.341-0.6831-7.089-5.059-6.359-9.287 0.8609-4.982 5.911-8.12 10.78-7.222 5.624 1.037 9.152 6.763 8.085 12.28-1.213 6.266-7.615 10.18-13.77 8.948-6.907-1.387-11.22-8.467-9.811-15.27 1.562-7.549 9.32-12.25 16.76-10.67"/>
+  </g>
+</svg>

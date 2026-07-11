@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="-6 -6 958 970">
+	<title>Thumbs-Up Symbols</title>
+
+	<defs>
+		<filter id="Retlif" color-interpolation-filters="sRGB" height="1.5" y="-0.25">
+			<feGaussianBlur stdDeviation="5" result="v555"/>
+			<feComposite operator="atop" in="SourceGraphic" in2="v555" result="v666"/>
+			<feComposite operator="over" in="v666" in2="SourceAlpha" result="v777"/>
+			<feColorMatrix values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0" result="v888"/>
+			<feBlend mode="normal" in="v888" in2="v555"/>
+		</filter>
+
+		<symbol id="ThumbsUp" viewBox="-5 -5 1460 1530">
+			<title>Thumbs Up</title>
+			<path d="m0 848.9057c0-32.79 26.5814-59.371 59.3707-59.371l185.724 0c32.789 0 59.371 26.5811 59.371 59.371l0 579.105c0 32.7899-26.582 59.37-59.371 59.37l-185.724 0c-32.7893 0-59.3707-26.5801-59.3707-59.37zm867.206-848.483c89.45-7.31733 168.447 67.8533 178.567 154.76c18.25 93.412-12.1 187.411-58.7349 267.74c-24.835 55.204-62.136 113.96-48.687 176.84c46.812 12.947 105.142-1.59601 156.292 3.26898c83.64 1.948 169.32-3.62897 251.13 16.287c54.9601 25.792 90.9801 84.905 105.34 142.28c-3.5 52.644-84.51 95.832-30.02 149.36c47.38 46.553 21.64 103.302-22.49 140.412c-40.67 54.73 50.39 112.71 8.46997 168.84c-30.4301 42.42-90.6899 73.95-75.17 135.35c7.1001 61.6901-53.36 101.55-97.1899 133.04c-77.1801 38.53-167.56 28.5-251.255 30.49c-140.11-4.42004-281.42-6.18994-418.52-38.51c-65.784-12.46-131.88-23.51-197.46-36.9l-1.935-622.477c55.352 7.86603 99.96-31.753 129.24-74.413c64.804-87.312 99.96-191.1 146.391-288.1c43.382-65.348 127.94-96.117 153.269-175.12c36.043-83.668 39.88-176.1 49.535-265.38c-4.06201-11.536 31.4969-18.048 23.2209-17.7693z"/>
+		</symbol>
+	</defs>
+
+	<g id="Frame">
+		<title>Thumbs-Up Frame, by Adam Stanislav</title>
+		<desc>A frame made up from a number of thumbs-up symbols.</desc>
+
+		<g fill="#FDA" filter="url(#Retlif)">
+			<rect x="-4" y="-4" width="954" height="966"/>
+		</g>
+
+		<g fill="#000" stroke="none">
+			<title>Black Thumbs Up</title>
+			<use x="0" y="0" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="0" y="400" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="0" y="800" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="350" y="0" transform="rotate(90,450,100)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="745" y="0" transform="rotate(180,845,80)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="745" y="400" transform="rotate(180,845,480)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="745" y="800" transform="rotate(180,845,880)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="380" y="760" transform="rotate(-90,480,860)" width="146" height="153" xlink:href="#ThumbsUp"/>
+		</g>
+
+		<g fill="#F7F7F7" stroke="#000" stroke-width="11">
+			<title>White Thumbs Up</title>
+			<use x="0" y="200" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="0" y="600" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="150" y="0" transform="rotate(90,250,100)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="550" y="0" transform="rotate(90,650,100)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="745" y="200" transform="rotate(180,845,280)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="745" y="600" transform="rotate(180,845,680)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="180" y="760" transform="rotate(-90,280,860)" width="146" height="153" xlink:href="#ThumbsUp"/>
+			<use x="580" y="760" transform="rotate(-90,680,860)" width="146" height="153" xlink:href="#ThumbsUp"/>
+		</g>
+	</g>
+</svg>

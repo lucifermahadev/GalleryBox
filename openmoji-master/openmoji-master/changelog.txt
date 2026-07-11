@@ -1,0 +1,682 @@
++ new
+* changed
+- removed
+
+--------------------------------------------------------------------------------
+OpenMoji 18.0 - XX XXX 2026
+
+Improvements:
+  * Update blue color of Ukrainian flag by @asilichenko #653
+
+
+--------------------------------------------------------------------------------
+☮️🍀 OpenMoji 17.0 - 23 Apr 2026
+
+Many improvements, fixes and new OpenMojis:
+👉 Full support of Unicode Emoji 17.0.
+👉 Redesign of the Japanese ideographic emojis
+
+🙏 Special thanks to the mega contributors @nataliakeniganti and @cemoon95
+
+New:
+  + Ballet Dancer, Trombone, Distorted Face by @nataliakeniganti #625
+  + Fight cloud by @nataliakeniganti #636
+  + Treasure chest and hairy creatur by Daniel Utz #636
+  + E070 extras-openmoji Bluesky by @agriyakhetarpal #557
+  + E1DA extras-openmoji "ai hand" by @artlung Joe Crawford #561
+  + 20E3 extras-openmoji combining enclosing keycap by @nataliakeniganti #565
+  + E420 to E435 extras-openmoji 🏳️‍🌈 Queer symbols by @felifluid Feli Berner #588
+  + E06F extras-openmoji facetime by @nataliakeniganti #638
+  + E06E extras-openmoji ecosia browser by @nataliakeniganti #638
+  + Chess pieces by @nataliakeniganti #605
+  + Yucatan and Queretaro flag @memburg #596
+  + Ontario and Queretaro flag by @jj-marr #627 #628
+
+Improvements:
+  * Fixing Japanese emoji and correcting legibility issues: 1F21A 🈚,
+    1F22F 🈯, 1F23A 🈺, 1F201 🈁, 1F202 🈂, 1F232 🈲, 1F233 🈳, 1F234 🈴,
+    1F235 🈵, 1F236 🈶, 1F237 🈷, 1F238 🈸, 1F239 🈹, 1F250 🉐, 1F251 🉑,
+    3299 ㊙, 3297 ㊗ by @cemoon95 #609
+  * Big general overhaul of symbols by @cemoon95 #616
+  * Emoji 17.0 changes
+    Moved extras-openmoji/landslide E09D > 1F6D8 by @nataliakeniganti #624
+    Moved extras-openmoji/orca E005 > 1FACD by @nataliakeniganti #624
+  * 270D better fingers of drawing hand by Daniel Utz
+  * 1F383 removed unnecessary points by @yukal #555
+  * font/README.md: easy font usage via jsdelivr.com by @jjb #570
+  * Improved South Korean flag by @cemoon95 #632
+  * Improved 😲😧😞 by @nataliakeniganti #631
+
+Fix:
+  * Updates flag sequences of non rendering extras-openmoji/flags by @SoSeDiK #600
+    Berber Flag to use [ZWJ] between characters
+    True South Flag to use 🏳 + [VS-16] + [ZWJ]+ 🧊 + [ZWJ] + 💎
+    Browncoat Flag and colored Deep Flags to use RGI emoji versions of characters (⚑ -> 🏴, ★ -> ⭐)
+    non-waving White Flag to use 🏳 + [VS-16] + [ZWJ]+ ⬜
+  * Alabama & Washington DC flag codepoints by @SoSeDiK #639
+
+--------------------------------------------------------------------------------
+🏖😎 OpenMoji 16.0 - 8 Aug 2025
+
+Many improvements, fixes and new OpenMojis:
+👉 Full support of Unicode Emoji 16.0.
+👉 Update Node.js from v14 to v22 (current LTS) by @kili-ilo #536
+
+Fix:
+  * 1F1F8-1F1FE update the Syria flag to the new official flag #533
+  * Improvements for some white fills for dark backgrounds by @kili-ilo #538
+
+New:
+  + Emoji 16: 1FA89, 1FA8F, 1FABE, 1FAC6, 1FADC, 1FADF
+    and 1FAE9 by Daniel Utz
+
+Tech:
+  * Fix libxmljs 404s by bumping its patch version by @kili-ilo #535
+
+--------------------------------------------------------------------------------
+
+🎄🛷 OpenMoji 15.1 - 17 Dec 2024
+
+New:
+  + Emoji 15.1: head shaking horizontally/vertically,
+    more families, phoenix, lime, brown mushroom, broken chain
+    by Annika Raue, Vanessa Stoessinger and Daniel Utz
+  + Emoji 15.1: direction-specifying variations of
+    person-activities by Andrew Sachen @RealityRipple #521
+  + Washington DC subdivision flag by @Kirylchyk #489
+  + Colorado subdivision flag by @alexcochran #491
+  + Spain subdivision flags by @xavizardKnight #495
+  + More programming languages: .NET, Kotlin, Ruby
+    and Golang by @xavizardKnight #495 #498
+  + Alabama subdivision flag by @Kirylchyk #497
+
+Improvements:
+  * blue heart emoji should be blue not light blue #483
+  * fixed grid of Colorado subdivision flag by @xavizardKnight #496
+
+Fix:
+  * Correct versions of TTFs font files #486
+  * Lobster (1F99E) was missing some transparency #490
+  * Martinique flag to new official flag updated by @nataliakeniganti #517 #519
+
+--------------------------------------------------------------------------------
+
+🎄🥶 OpenMoji 15.0 - 21 Dec 2023
+
+Many improvements, fixes and new OpenMojis:
+👉 Full support of Unicode Emoji 15.0.
+👉 New font build system
+👉 Lots of fixes and redesigns
+👉 New (open source and programming languages) logos and symbols
+
+🙏 Special thanks to @RobertWinslow and @mavit for the epic colorfont build system!
+
+New:
+  + OpenMoji colorfonts for desktop and web by @RobertWinslow #422
+  + hyphen-minus symbol (codepoint 002D) by @RobertWinslow #93
+  + rounded Chinese folk symbols Fú Lù Shòu etc. by @RobertWinslow #431
+  + Element instant messaging brand logo by @SethFalco #451
+  + Jellyfin brand logo by @JenTheBluePanda #452
+  + glass and plastic (water) bottle by @BenediktSeidl #454 #447
+  + Artstation brand logo by @SethFalco #463
+  + Reddit and Discord brand logos by Allison Fister @alfister #470
+  + moose and black bird by Jasmin Fassler & Linda Hartmann
+  + windsurfing emoji by Mostafa Hussein Omar #469
+  + new Unicode v15 emojis by Anna Schneider, Ben Engelhardt, Charlotte Beha,
+    Christian Engler, Jasmin Fassler, Jennifer Zhu, Kathrin Gerold,
+    Kira Lehmann, Linda Hartmann, Paul Gabriel, Paul Mang,Raluca Maniu,
+    Simon Rutsch, Sonja Partheymüller, Katja Widmann
+  + 18 openmoji-extras from openmoji-xk-extensions by Xavier Martínez @xavizardKnight #479
+    Motorbike helmet and Guy Fawkes mask
+    subdivision flags: Valencian Community ES-VC, Balearic Islands ES-IB,
+    Aragon ES-AR and Murcia ES-MC
+    logos: C programming language, C++ programming language, C# programming language,
+    Chrome Canary, Firefox Developer, Firefox Canary, JavaScript programming language,
+    TypeScript programming language, WebAssembly, SVG, Markdown, WinRAR
+
+Improvements:
+  * fix symbol for ionising radiation to correct orientation by @RobertWinslow #421
+  * add black elements for Nepal's flag by @RobertWinslow #421
+  * various improvements/alterations of svg src files by @RobertWinslow #420
+  * clean up flag paths (reasonable rounding) by @samhocevar #411
+  * adjusting and cleaning up openmoji meta data by @waldyrious
+    #407 #406 #392 #391 #389 #388 #435 #432
+  * adjust openmoji tags of nature-related emoji by @waldyrious #427
+  * fix key emojis to not show color outside of the outlines by @rosseljost #448
+  * redesign of 1FAD6 teapot by Andrew Luckett
+  * 1F96F fix small spike on right side by @BenediktSeidl #455
+  * 1F567 fix short hand to be actually twelve-thirty by @jkaving #465
+  * fix regional indicators (ABC) in extras-unicode by Jasmin Fassler & Linda Hartmann
+  * optimized extras-openmoji for upcoming dark mode by Jasmin Fassler & Linda Hartmann
+  * optimized extras-unicode for upcoming dark mode by Jasmin Fassler & Linda Hartmann
+  * fix incorrect skin tone for kiss: man, man #456
+  * removed cross of coffin to make it better usable for non-Christians
+
+  #426 by @RobertWinslow
+  * Several paths have had superfluous colinear points removed (tophat and math symbols)
+  * Several math symbols were centered
+  * 1FAD7 (pouring liquid) was reworked to have thicker lines
+  * The lines in 1F6EB and 1F6EC (airplane takeoff and landing) were likewise thickened
+  * The post office symbol in 1F3E3 was made blockier and red
+  * 1F691 (ambulance) was updated to have the correct symbol, the Star of Life #419 #417
+  * The black version of the moon phases now has a black fill
+  * 1F5C2 and 1F4C7 have made more distinct
+  * 1F4C7 redesigned to be more similar to other emoji sets
+  * The black flag 1F3F4 has had a path closed and reversed.
+  * Lighten the background of 1F233
+  * The 'E' in 1F4E7 (e-mail) has been rounded and copied into the line-supplement layer.
+
+Fonts:
+  * new build chain (based on Nanoemoji) with colorfont outputs for desktop and web
+    by @RobertWinslow and Peter Oliver @mavit #422
+  * Fix generating combined COLR/SVG fonts by @999eagle #458
+  + New tests to check TTFs have expected tables by @mavit #464
+
+Tech:
+  + npm run show-extras-hexcodes: shows an overview of private use hexcodes of the openmoji-extras
+  * better Python code snippet in FAQ by @kolibril13 #405
+
+--------------------------------------------------------------------------------
+
+🏖🍦 OpenMoji 14.0 - 05 Jul 2022
+
+Emoji 14:
+  * 1F91D 🤝 Handshake changed to have multiple skintones
+  + 1FAD9 Jar by @fuddl #315
+  + 1FAE6 biting lip by @fuddl #364
+  + 1FAE7 bubbles by @fuddl #364
+  + 1F6DF, 1F979, 1FAA9, 1FAE0, 1FAE2, 1FAE4, 1FAE5 by Liz Bravo @lizbravob
+  + 1F6DD, 1F6DE, 1F7F0, 1F9CC, 1FA7B, 1FA7C, 1FAAA, 1FAAB, 1FAAC, 1FAB7,
+    1FAB8, 1FAB9, 1FABA, 1FAC3, 1FAC4, 1FAC5, 1FAD7, 1FAD8, 1FAE1, 1FAE3,
+    1FAF0, 1FAF1, 1FAF2, 1FAF3, 1FAF4, 1FAF5, 1FAF6
+    by Aileen Gedrat, Alan Seng, Alena Peichl, Jana Gerspach, Jana Junk,
+    Klara Schöninger, Max Isele, Natalie Siebler, Niklas Kuntz, Pia Stockhaus,
+    Robin Bauer, Tim Loose
+
+🙏 Special thanks to @stephanbogner for shiny old new website
+   and @lizbravob the generous contributions!
+
+New:
+  + E1D8 QR code OpenMoji by @loominade (try it on your mobile) #347
+  + E1D9 barcode OpenMoji by @loominade
+  + 1FAD9 Jar plus color by @fuddl #315
+  + 25AE black vertical rectangle by @fuddl #362
+  + 25C9 fisheye by @fuddl #362
+  + 25C9-FE0F-200D-1F534-200D-25AE-FE0F "HAL 9000" in Hommage to
+    "A Space Odyssey" movie by @fuddl #362
+  + 25C9-FE0F-200D-1F534 red eye of HAL 9000 by @fuddl #362
+  + More open source variants for brands in extras-openmoji/brand:
+    gitlab, mastodon, peertube, pixelfed, signal by Liz Bravo @lizbravob #240
+  + 1F1E6-1F1F6-1F48E true south (antarctica) flag by @SpangleLabs #366
+  + New category extras-unicode/regional-indicator holding A-Z Regional Indicators by Daniel Utz #351
+  + 1F3F3-1F7E6-1F7E9-1F7E8 Berber flag by Daniel Utz
+  + 1F9D1-200D-1FAA9 DJ (person, man, woman) by Liz Bravo @lizbravob #47
+  + E20F seven wonders of the ancient world by Niklas Kuntz
+
+Redesign / Improvements:
+  * 1F990, 1F422, 1F98B Redesign of shrimp, butterfly, and turtle by @RobertWinslow #383
+  * 1F458 changed color of Kimono
+  * 1FAD9 changed shape of jar and added label
+  * 1FAE2 changed shape of hand covering mouth
+  * 1FAE4 changed shape mouth
+  * 1F5FF changed to moyai and moved moai to extras-openmoji E216 by Liz Bravo @lizbravob #396
+
+Fix:
+  * 1F414 chicken: fixed white fill #359
+  * 1F97A pleading face: now more consistent with other platforms by @mincerafter42 #360
+  * E0A2 E0A3 E0A4 SOS, YES, NO: color shield was not correctly centered by @tmechen #367
+  * Remove problematic id attributes from certain SVG elements by @RobertWinslow #373
+  * E2C9 E2CA swapped polar explorer man/woman #390
+  * Improved/redesigned: 🏫 1F3EB, 👒 1F452, 🖐️ 1F590, 🥚 1F95A, 🧢 1F9E2, 🧬 1F9EC
+    by Jennifer Pätzold, Alan Seng, Niklas Kuntz, Aileen Gedrat
+
+Website:
+  * Is completly re-write! Now OpenMoji.org is build with Astro (static site generator)
+    by Stephan Bogner @stephanbogner
+
+--------------------------------------------------------------------------------
+
+⛱🍉 OpenMoji 13.1 - 29 Jun 2021
+
+Many improvements, fixes and new OpenMojis:
+👉 Full support of Unicode Emoji 13.1. Yay!
+👉 Lots of fixes and redesigns
+👉 New flags and misc emojis in extras-openmoji
+
+New:
+  + Colorful hexagons by @fuddl #278
+  + Annoyed face with tongue by Barkin Simsek @woswos #287
+  + Québec flag by Denis Blanchette @dblanchette #293
+  + Basque, Bretagne, and anarchist flag by Sam Hocevar @samhocevar #306
+  + Unicode 13.1: face in clouds, face-unwell, heart on fire, mending heart,
+    "man: beard" and "woman: beard" by Nelly Nieter
+  + Champignon Mushroom extras-openmoji/food-drink by Liz Bravo @lizbravob
+  + Boule bread extras-openmoji/food-drink by @fuddl
+
+Redesign:
+  * Amphora, Pile of Books, Dagger, Teddy Bear, Caterpillar, Lady Beetle, Microscope,
+    Mosquito, Cactus, Kimono, Old Man, Guardsaman, Moyai, Mosque, Train Car,
+    Bowl with Spoon, Serious Face with Symbols Covering Mouth, Sad but Relieved Face,
+    Fearful Face, Yawning Face, 🎄📦️🦀🦪🧇🪐 and 🍊🍎🍓🍝🍮🎎🎦🏧💐🛩️🥒✒️
+    by Liz Bravo @lizbravob
+  * Fog, Foggy by Nelly Nieter
+  * Moved old Fog to extras-openmoji/travel-places Foggy Mountain E20E
+  * Moved old 🍮 to extras-openmoji/food-drink Cake E0C7
+  * Moved old ✒️ to 1F58B
+
+Fix:
+  * Ferry contour on waves
+  * Bagel with schmear of cream cheese
+  * Fix wrong Unicode of Catalonia flag by Sam Hocevar @samhocevar #305
+  * Fix South Sudan flag star orientation by Sam Hocevar @samhocevar #301
+  * Fix the Tajikistan flag, it has 7 stars, not 8 by Sam Hocevar @samhocevar #302
+  * Fix East Timor flag star orientation by Sam Hocevar @samhocevar #303
+  * Fix crescent in Brunei flag by Sam Hocevar @samhocevar #298
+  * Fix white stripe of flag Slovakia #297
+  * Consistency of contours of black shapes by @fuddl #273
+  * Expression in Face with Hand Over Mouth
+    Colour of mouth in Exploding Head
+    by Liz Bravo #285
+  * Fix slightly broken carrot
+
+Website:
+  * openmoji.org/library/ support to display multi-skintone OpenMojis
+  * openmoji.org/library/ new sorting and filtering
+
+
+--------------------------------------------------------------------------------
+
+🥳 OpenMoji 13.0 - 13 Nov 2020
+
+Many improvements, fixes and new OpenMojis:
+👉 Full support of Unicode Emoji 13.0. Yay!
+👉 New Coronavirus related emojis by Guemil Project
+👉 Lots of fixes and redesigns
+👉 New logos and symbols
+
+🙏 Special thanks to @lizbravob and @fuddl for all the generous contributions!
+
+New:
+  + Emoji 13:
+    1F6D6 Hut, 1F6D7 Elevator, 1F9A3 Mammoth, 1F9A4 Dodo, 1F9AB Beaver, 1F9AC Bison,
+    1F9AD Seal, 1F9D1-200D-1F37C Person Feeding Baby, 1F9D1-200D-1F384 Mx Claus,
+    1F90C Pinched Fingers, 1F468-200D-1F37C Man Feeding Baby, 1F469-200D-1F37C Woman
+    Feeding Baby, 1F470 Person in Veil, 1F935 Person in Tuxedo, 1F977 Ninja,
+    1FA9C Ladder, 1FA96 Military Helmet, 1FAA2 Knot, 1FAA8 Rock, 1FAB2 Bettle,
+    1FAB3 Cock Roach, 1FAB5 Wood, 1F935-200D-2640-FE0F Woman with Tuxedo,
+    1F470-200D-2642-FE0F Man in Veil
+    by Liz Bravo @lizbravob
+  + New emergency and COVID related emojis by Guemil Project
+    E0AC, E0AD, E0AE, E0AF, E0B0, E0B1, E0B2, E0B3, E0B4
+  + E048 to E04B Logos of OpenData projects e.g. OpenStreetMap by @fuddl
+  + Black hole by @fuddl
+  + Horse jumping hurdles
+  + Catalonia flag by Joan Montané
+  + Asturies flag by Mikel González
+  + Browser vendor logos by @fuddl
+  + Stick figures by @fuddl
+  + Unicode 11 half stars + unicode 1.1 black star by @fuddl
+
+Redesign:
+  * Construction
+  * Animals:
+    Sloth, Skunk, Hippo, Raccoon, Monkey and Kangaroo
+    by @nicdiac
+  * Bee by @nicdiac
+  * E08B emergency exit by Guemil Project
+  * E0A8 evacuate fire by Guemil Project
+
+Fix:
+  * Add white stars around New Zealand Flag's stars - @jtothegriff
+  * Gender of mountain bikers
+  * Darkness of colours in Tomato, Garlic, Bell Pepper
+  * Shading in Grapes
+  * White fill in Russian Doll and Slot Machine
+  * Color of Hot Face
+
+
+--------------------------------------------------------------------------------
+
+🏝 OpenMoji 12.4 - 28 Jul 2020
+
+Many improvements, fixes and new OpenMojis:
+👉 More Emoji 13, only 20 missing
+👉 New set of gardening related things
+👉 Lots of fixes
+👉 New Code of Conduct
+
+New:
+  + Greta Thunberg
+  + Copyleft Symbol
+  + Sound Recording Copyright
+  + Service Mark Symbol
+  + Various gardening related things:
+    gardener, lawn mower, push cart, axe, spade
+  + Pigeon
+  + Macaw
+  + Bavaria subdivision flag by Manuel Strehl @Boldewyn
+  + Bubble Tea, Coin, Window, Fondue, Accordion
+    Bell Pepper, Teapot by Liz Bravo @lizbravob
+
+Redesign:
+  * Flags:
+    Argentina, Mozambique and Taiwan by @wayne-shih
+    Bahrain and New Calendonia by @carlinmack
+  * Eject Symbol
+  * Copyright
+  * Registered
+  * Trade Mark
+  * Microbe/Virus to accommodate COVID, moved existing one to E011
+
+Fix:
+  * number of fingers in Face with Hand Over Mouth, Yawning Face, Hugging Face
+  * size of hand in Thinking Face
+  * contour in Shushing Face
+    by @nicdiac
+  * which black used in geometric Unicode shapes
+  * number of keys in Keyboard
+  * colour of contour in Half Orange Fruit
+  * alignment of stars on US Flag
+  * Croatian flag #247
+  * size of Person Walking
+  * white fill in:
+        Carousel Horse, Foggy, High-Speed Train, Ballot Box, Chart Increasing, Chart
+        Decreasing
+  * handle in Megaphone
+  * size and fill of Bookmark Tabs
+  * size and fill of Roll of Paper
+  * resize:
+        Dove, Spider, Spider Web, Turtle, Pills, Medication, Plaster, Bagel,
+        Mechanical Arm, Mouth, OK Button, SOS Button
+
+Tech:
+  * NPM openmoji package: Removed "engines" property in package.json
+
+Misc:
+  + Added Code of Conduct
+
+--------------------------------------------------------------------------------
+
+🛠 OpenMoji 12.3 - 22 May 2020
+
+Many improvements, fixes and new OpenMojis:
+👉 More Emoji 13, ca. 2/3 of all new ones
+👉 New logos and symbols
+👉 New and consolidated animals
+👉 New flags and lots of fixes
+👉 New set of various coffee related things
+
+🙏 Special thanks to @kriskowal for making the new build system happen!
+
+New:
+  + Emoji 13:
+    1FAA0 Plunger, 1FA9A Carpentary Saw, 1FA9B Screwdriver, 1FAA1 Sewing Needle,
+    1FAA4 Mouse Trap, 1FAA7 Placard, 1FA9E Mirror, 1FA83 Boomerang, 1FAA3 Bucket,
+    1FAB6 Feather, 1FAB4 Potted Plant, 1FA9D Hook, 1FAA6 Headstone
+    by Liz Bravo @lizbravob
+  + Logos:
+    Android logo, Apple logo, Windows logo, Ubuntu logo by @fuddl
+    LinkedIn Logo
+    Creative Commons Symbols
+  + Symbols:
+    Web syndication/RSS, Tardis, Power symbols,
+    More geometric Unicode shapes in extras-unicode/symbol-other by @loominade
+    Improved face mask, no handshaking, dejected face
+  + Animals:
+    Narwhal, Beluga, Porpoise by @kriskowal
+    Orca and Spouting Orca by Selina Bauer
+    Doe
+  + Flags:
+    Generic monochrome flags, California, Berlin, Texas, Esperanto, Nail and Gear,
+    United Federation of Planets (Star Trek),
+  + Various coffee related things:
+    Coffee machines and appliances, Baristas, Symbols by @fuddl
+
+Redesign:
+  * Dolphin by @kriskowal
+  * Whale and Spouting Whale with blue whales by @kriskowal
+  * Llama
+  * Cross Mark
+  * Lab Coat
+  * Cursor
+  * Loudly Crying
+  * Check Mark
+  * Keyboard
+  * Hot Beverage
+  * Closed Umberella
+
+Fix:
+  * Exploding Head by @taralynnconnelly
+  * size of Record Button by @fuddl
+  * signs and align Aries, Gemini, Virgo, Scorpio, Capricorn, Libra, Sagittarius, Om,
+    Orthodox Cross, Wheel of Dharma, Taurus, Cancer, Leo, Aquarius, Pisces, Ophiuchus
+  * Flags:
+    Portugal, Afghanistan, Laos, Turkey, Kazakhstan, Maldives, Jersey, New Caledonia,
+    Niger, Antarctica, Mayotte, Hong Kong, Aruba, Pirate, Isle of Man, Iraq,
+    Bhutan, Czech Republic @mikiqex, Cuba
+  * contour in Cat
+  * contour in Victory Hand
+  * structure in Classical Building
+  * tongue in Hot Face
+  * drool in Drooling Face
+  * Question Mark, White Question Mark
+  * contour in Infinity
+  * all Prohibited Signs
+  * bed in Bed and Person in Bed
+  * skullcap in Person With Skullcap
+  * rainbow in Rainbow
+  * people in Restroom, Men's Room, Women's Room
+  * person in Wheelchair Symbol
+  * size of Oncoming Fist
+  * contours in Cafeteria
+  * orientation of Black Nib
+  * contour in Flamingo
+  * arm in Place of Worship
+  * size of Syringe
+  * size of Computer Mouse
+  * alignment of Trackball
+  * detail in Couch and Lamp
+  * mask in Medical Mask
+  * swirl in Lollipop
+  * size of Handshake
+
+Tech:
+  * Blazing fast new build system by Kris Kowal @kriskowal
+  * OpenMoji Black/Colorfont scale up by 1.3 to match emoji size of other vendors
+  * New cleanup script for figma svg export @fuddl
+  * Add test to remove white fills from black emojis
+  * Handy new overview index.html catalog
+  * Improved node.js package and added docs, see API.md
+
+
+--------------------------------------------------------------------------------
+
+🦠 OpenMoji 12.2 - 17 March 2020
+
+Many improvements, fixes and new OpenMojis:
+👉 First batch of Emoji 13, ca. 1/3 of all new ones
+👉 Unicode Emoji 12.1 complete, new gender neutral persons and person-roles
+👉 New extras-openmoji: healthcare
+👉 New extras-openmoji: climate-environment
+
+New:
++ Emoji 13:
+  1FAC0 anatomical heart, 1FAC1 lungs, 1FAC2 people hugging,
+  1F3F3 FE0F 200D 26A7 FE0F transgender flag, 1F43B polar bear,
+  1FAD0 blueberries, 1FAD3 flatbread, 1FAD4 tamale, 1FA85 piñata,
+  1FA98 long drum, 1F972 smiling face with tear, 1F978 disguised face,
+  1F6FB pickup truck, 1FAB0 fly, 1FAB1 worm, 1FAD2 olive, 1FA84 magic wand,
+  1F6FC roller skate, 1FA86 nesting dolls, 1FA74 thong sandal, 1FAA5 toothbrush,
+  26A7 transgender symbol, 1F408 black cat
+  by Liz Bravo @lizbravob and @carlinmack
++ Gender neutral persons and person-roles to fulfil Unicode Emoji 12.1:
+  1F9D1-200D-1F9B0, 1F9D1-200D-1F9B1, 1F9D1-200D-1F9B3, 1F9D1-200D-1F9B2,
+  1F9D1-200D-2695-FE0F, 1F9D1-200D-1F393, 1F9D1-200D-1F3EB, 1F9D1-200D-2696-FE0F,
+  1F9D1-200D-1F33E, 1F9D1-200D-1F373, 1F9D1-200D-1F527, 1F9D1-200D-1F3ED,
+  1F9D1-200D-1F4BC, 1F9D1-200D-1F52C, 1F9D1-200D-1F4BB, 1F9D1-200D-1F3A4,
+  1F9D1-200D-1F3A8, 1F9D1-200D-2708-FE0F, 1F9D1-200D-1F680, 1F9D1-200D-1F692,
+  1F9D1-200D-1F9AF, 1F9D1-200D-1F9BC, 1F9D1-200D-1F9BD
++ New extras-openmoji/healthcare emojis (41):
+  E30A, E30B, E30C, E30D, E30E, E30F, E31A, E31B, E31C, E31D, E31E, E31F, E32B,
+  E300, E301, E302, E303, E304, E305, E306, E307, E308, E309, E310, E311, E312,
+  E313, E314, E315, E316, E318, E319, E320, E321, E322, E324, E325, E326,
+  E327, E328, E329 by Tonia Reinhardt and Fanny Jung
++ New extras-openmoji/climate-environment (27):
+  E2C0, E2C1, E2C2, E2C3, E2C4, E2C5, E2C6, E2C7, E2C8, E2C9, E2CA, E2CB, E2CC,
+  E2CD, E2CE, E2CF, E2D0, E2D1, E2D2, E2D3, E2D4, E2D5, E2D6, E2D7, E2D8, E2D9,
+  E2DA by Sina Grund, Ricarda Krejci and Robin Kurz
++ Hacker Cat 1F431-200D-1F4BB, by suggestion of @alexkadis
++ Horse Riding
+
+Fix:
+  * finger height in Person Raising Hand
+  * black and white Pomegranate
+  * add leaf and stem in Poppy
+  * racing position in Horse Racing
+  * colours in Mate
+  * colour in Black Heart
+  * remove shadow from hearts in Kiss, Smiling Face with Hearts and Couple with Heart
+  * connect lines and colours in Authority Instruction
+  * remove eyebrows and change mouth in Confused Face and Confounded Face
+  * number of petals in Hibiscus
+  * screw thread in Lightbulb
+  * body in Flamingo
+  * mouth and eyes in Zany Face
+  * snowman in Snowman
+  * hind leg in Horse and Donkey
+  * background in Radioactive
+  * redesign Sari
+  * stroke weight of Gem Stone
+  * stroke weight of Swim Briefs
+  * number of candles in Menorah
+  * shape of Star of David and Dotted Six-Pointed Star
+  * grid in Bar Chart
+  * toppings on Burger
+  * number of falafel in Falafel
+  * improved shape of foot
+  * Changed Rocket Ship 1F680 from American space shuttle to the iconic vision of a
+  rocket ship styled imagined in SF of the 1960's, by Kris Kowal @kriskowal
+
+* Improved formatting of all SVG files with automated attributes sorting/cleaning
+
+
+--------------------------------------------------------------------------------
+
+🎄 OpenMoji 12.1 - 23 December 2019
+
+Happy Holidays release! Many improvements, fixes and a few new OpenMojis!
+Special thanks to Carlin Mackenzie @carlinmack for his great and plenty contributions!
+
++ Added Poppy (War Remembrance Day) by @carlinmack
+  suggested by @inferno986return
++ Added Youtube and Github logo, contributed by Romain Bazile @gromain
++ Added pomegranate, poppy, exhausted, incredulous face to extra emojis @carlinmack
+
+* Improved "red hair" color of 1F9B0, 1F468-200D-1F9B0, 1F469-200D-1F9B0
+  to better distinct from other hair colors.
+* Fix OpenMojis with blond, red or white hair by @sourgift
+* Fix 1F471 'person: blond hair' to resemble '1F9D1 person' by @sourgift
+* Fix 1F1F2-1F1F7 flag Mauritania added red stripes by @jonpdixon
+* Fix 1F1F5-1F1FC flag Palau, increased size of yellow circle by @jonpdixon
+* Removed shadows from spade, heart, diamond and club suit (2660, 2663, 2665, 2666)
+* Removed shadows from all hearts in smileys-emotion/emotion/ (2764, 2763, 1F499,
+  1F498, 1F497, 1F496, 1F495, 1F494, 1F493, 1F90E, 1F90D, 1F49F, 1F49E, 1F49D, 1F49C,
+  1F49B, 1F49A, 1F48C, 1F9E1, 1F5A4)
+* Redesign pleading, flushed, tired and weary, dumpling emoji, face screaming with fear,
+  foot emoji by Carlin MacKenzie @carlinmack
+* Fix smirking, frowning with open mouth and unamused face, melon colours,
+  right speech bubble, thought balloon and speech ballon Seychelles flag,
+  bikini, banana by Carlin MacKenzie @carlinmack
+* Fix face and expression of 1F62C grimacing face
+* Improved wings of 1F47C baby angel
+* Fix 1F237 Japanese "monthly amount" added missing horizontal stroke
+* Improved 1F004 to better resemble a Mahjong Red Dragon tile by @sourgift
+  Change tile from square to rectangle
+* Fix 1F31A 1F31D moon emojis by Carlin Mackenzie @carlinmack
+  Same smile and face for both moon emojis
+  Change colour of full moon shadow
+* Fix 1F1E9-1F1F2 Dominica flag by @pyfisch
+* Fix 1F1FB-1F1EA by Jonathan Dixon @jonpdixon
+  Correct colour order and number of stars on Venezuelan flag
+* Fix 1F3F4-E0067-E0062-E0073-E0063-E0074-E007F by Carlin Mackenzie @carlinmack
+  Correct diagonal line on Scottish flag
+* Fix 1F473-200D-2640-FE0F Women wearing turban should not show hair #20
+  Thanks Gurmukh Panesar @gurmukhp
+* Fix 1F3F3-FE0F-200D-1F308 Rainbow flag now shows the right colors and
+  display as a country flag. By Romain Bazile @gromain, suggestion by
+  Pascal Eckmann @p4cx.
+* Small fixes for 1F4A9, 1F9B0, 1F9B1, 1F9B2, 1F9B3, 1F9B8, 1F9B9,
+  1F9CF-200D-2642-FE0F, 1F9D6, 1F9D9, 1F9DA, 1F9DB, 1F62C, 1F473-200D-2642-FE0F,
+  1F473, 1F534, 1F535, 1F601, 1F624, 26AA, 26AB.
+  Thanks Rifat Can Erdogan & Selina Lange
+
+
+--------------------------------------------------------------------------------
+
+✅ OpenMoji 12.0 - 15 May 2019
+
+Full support for all emojis of Unicode 12.0/Emoji 12.0 and 3030 new emojis,
+skin tones support, refactoring all source files from .ai to .svg, better
+quality assurance with ca. 17000+ automated unit test ...
+
++ Added 377 new emojis.
+  Contributions of the OpenMoji course at the HfG Schwäbisch Gmünd by
+  Benedikt Groß and Daniel Utz with Antonia Wagner, Evelyn Soos, Fanny Jung,
+  Florian Nagel, Jonas Dunkel, Laura Dworatschek, Laura Schießer, Nadine Bartel,
+  Ricarda Krejci, Rifat Erdogan, Sam Eckert, Selina Lange, Tonia Reinhardt
+  and Yasmin Abdullahi.
+
++ Added basic support for multiple skintone modifiers
+  e.g. 1F9D1-1F3FF-200D-1F91D-200D-1F9D1-1F3FB
+
++ Added 25A1 "missing glyph"
+
++ Added 261 flags from Andorra to Zimbabwe
+
++ Added 47 "emergency" related emojis contributed by the Guemil Project
+
++ Added 136 new emojis.
+  Contributions of the OpenMoji Workshop at the HfG Laborwoche 2018 by
+  Abby Esquivel, Aileen Gedrat, Anne Frauendorf, Daniel Quiros, Hend Hourani,
+  Lois Proksch, Louisa Mantsch, Marleen Heine, Nadja Grün, Sarah Mager,
+  Sina Chlod, Vincent Seitz
+
++ Added ca. 17000+ unit tests to ensure automated quality assurance
+
+
+* Refactored source files to follow Emoji v12 categories
+
+* Normalised "beautified" all svg source and production files
+
+* Updated 13 standard emojis with Guemil Project revisions
+
+* Fixed flags 1F3C1, 1F3F3, 1F3F3-FE0F-200D-1F308, 1F3F4 to ensure consistency
+
+* Converted source files from .ai to .svg
+
+* Refactored source files to follow new mandatory layer structure
+
+* Analysed, fixed and simplified all shape types for every emoji (e.g. removed mask shapes)
+
+* Fixed every emoji to follow the OpenMoji color palette
+
+* Added property contribution date (hfg_date) to the openmoji json/csv "data" files
+
+* Fixed hour glasses to obey the laws of gravity
+
+
+- Ditched .ai source files in favour of .svg! Yay!
+
+
+--------------------------------------------------------------------------------
+
+🚀 OpenMoji 1.0 - 18 April 2018
+
+Initial public release
+
+
+--------------------------------------------------------------------------------
+
+👋 OpenMoji pre - Feb 15 2018
+
+Pre-release for the HfG Exhibition Semester WS17/18

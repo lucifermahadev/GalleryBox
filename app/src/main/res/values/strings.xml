@@ -1,0 +1,55 @@
+<resources>
+    <string name="app_name">GalleryBox</string>
+    <string name="full_app_name">GalleryBox</string>
+
+    <string name="tab_editor">Editor</string>
+    <string name="tab_photos">Photos</string>
+    <string name="tab_albums">Albums</string>
+    <string name="tab_stories">Stories</string>
+    <string name="tab_music">Music</string>
+
+    <string name="header_essential">Essential albums</string>
+    <string name="header_other">Other albums</string>
+    <string name="album_favorites">Favorites</string>
+    <string name="album_recent">Recent</string>
+    <string name="album_empty">Empty</string>
+    <string name="msg_no_albums">No albums found</string>
+    <string name="msg_no_media">No media found</string>
+    <string name="channel_name">Music Player</string>
+    <string name="channel_desc">Notifications for music playback</string>
+
+    <string name="menu_hide_albums">Hide albums</string>
+    <string name="menu_secure_folder">Secure Folder</string>
+    <string name="title_hide_albums">Hide albums</string>
+    <string name="desc_hide_albums">Hidden albums will not appear in the main list, but files are not deleted.</string>
+
+    <string name="music_title">Music Player</string>
+    <string name="music_library">Library</string>
+    <string name="music_folders">Folders</string>
+    <string name="music_favorites">Favorites</string>
+    <string name="music_recent">History</string>
+    <string name="music_added">New Added</string>
+    <string name="music_unknown_artist">Unknown Artist</string>
+    <string name="music_now_playing">Now Playing</string>
+
+    <string name="settings_title">Settings</string>
+    <string name="pref_autoplay">Auto play videos</string>
+    <string name="pref_trash">Trash Bin</string>
+    <string name="default_web_client_id">421144237882-3e9mfdqj9322algd2u14iomp64q0cbvr.apps.googleusercontent.com</string>
+
+    <string name="action_create">Create</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_move">Move</string>
+    <string name="action_copy">Copy</string>
+    <string name="action_share">Share</string>
+    <string name="action_search">Search</string>
+    <string name="dialog_create_album">Create Album</string>
+    <string name="label_album_name">Album Name</string>
+    <string name="storage_internal">Internal Storage</string>
+    <string name="storage_sd">SD Card</string>
+    <string name="editor_title">Video Editor</string>
+    <string name="exporting_video">Processing video...</string>
+    <string name="export_success">Video Saved to Movies!</string>
+    <string name="export_failed">Export Failed</string>
+</resources>
