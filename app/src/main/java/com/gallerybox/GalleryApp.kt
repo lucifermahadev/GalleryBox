@@ -17,11 +17,9 @@ class GalleryApp : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
-        // Initialize Notification Channels
         createNotificationChannel()
     }
 
-    // --- 1. Coil Image Loader Configuration ---
     override fun newImageLoader(): ImageLoader {
         return ImageLoader.Builder(this)
             .components {
@@ -35,11 +33,8 @@ class GalleryApp : Application(), ImageLoaderFactory {
             .crossfade(true)
             .build()
     }
-
-    // --- 2. Notification Channels ---
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // FIX: This ID must match the one in MusicService.kt
             val channelId = "music_channel"
             val channelName = "Music Playback"
             val importance = NotificationManager.IMPORTANCE_LOW

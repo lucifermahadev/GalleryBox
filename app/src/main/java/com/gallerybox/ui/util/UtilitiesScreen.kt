@@ -56,8 +56,7 @@ fun UtilitiesScreen(
 
     val allMedia by viewModel.media.collectAsState()
 
-    // --- Storage Calculation (Async) ---
-    var storageInfo by remember { mutableStateOf(Pair(0L, 0L)) } // (Total, Free)
+    var storageInfo by remember { mutableStateOf(Pair(0L, 0L)) }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
@@ -94,7 +93,6 @@ fun UtilitiesScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. Storage Overview Card
             item {
                 StorageCard(
                     usedBytes = usedStorage,
@@ -103,7 +101,6 @@ fun UtilitiesScreen(
                 )
             }
 
-            // 2. Section: Organization
             item { SectionTitle("Organize") }
 
             item {
@@ -131,12 +128,11 @@ fun UtilitiesScreen(
                     title = "Favorites",
                     subtitle = "Quick access to loved items",
                     icon = Icons.Rounded.FolderSpecial,
-                    color = Color(0xFFFFB300), // Amber
+                    color = Color(0xFFFFB300),
                     onClick = onNavigateToFavorites
                 )
             }
 
-            // 3. Section: Maintenance
             item { SectionTitle("Maintenance") }
 
             item {
@@ -164,7 +160,7 @@ fun UtilitiesScreen(
                     title = "Clean Cache",
                     subtitle = "Clear temporary thumbnails and logs",
                     icon = Icons.Rounded.AutoFixHigh,
-                    color = Color(0xFF4CAF50), // Green
+                    color = Color(0xFF4CAF50),
                     onClick = {
                         scope.launch {
                             val bytesCleared = withContext(Dispatchers.IO) {
@@ -183,8 +179,6 @@ fun UtilitiesScreen(
         }
     }
 }
-
-// --- SUB-COMPONENTS ---
 
 @Composable
 fun StorageCard(usedBytes: Long, totalBytes: Long, percentage: Float) {
@@ -287,8 +281,6 @@ fun SectionTitle(title: String) {
     )
 }
 
-// --- BACKGROUND CACHE CLEANING IO CORE ---
-
 private fun clearApplicationCache(context: Context): Long {
     var totalDeletedBytesBytes = 0L
 
@@ -314,8 +306,6 @@ private fun getFolderSizeAndClean(file: File): Long {
     file.delete()
     return size
 }
-
-// --- FILE OPENER UTILITY ---
 
 object FileOpener {
     fun openFile(context: Context, file: File) {

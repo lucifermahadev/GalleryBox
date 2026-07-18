@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
-  
-</PreferenceScreen>
+<wallpaper xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/app_name"
+    android:thumbnail="@mipmap/ic_launcher"
+    android:settingsActivity="com.gallerybox.ui.screens.wallpaper.WallpaperSettingsActivity"
+    android:supportsAmbientMode="true"
+    android:showMetadataInPreview="true" />

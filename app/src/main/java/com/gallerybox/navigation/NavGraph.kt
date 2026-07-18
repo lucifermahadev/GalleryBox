@@ -1,6 +1,7 @@
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 
 package com.gallerybox.navigation
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -54,6 +55,7 @@ import com.gallerybox.ui.screens.vault.VaultSecureScreen
 import com.gallerybox.ui.screens.videoplayer.VideoPlayerScreen
 import com.gallerybox.ui.screens.wallpaper.WallpaperScreen
 import com.gallerybox.viewmodel.*
+
 sealed interface Route {
     // Gallery Main
     @Serializable data object Pictures : Route
@@ -61,6 +63,7 @@ sealed interface Route {
     @Serializable data object Videos : Route
     @Serializable data object Stories : Route
     @Serializable data object Music : Route
+
     // Camera Shortcut
     @Serializable data object Camera : Route
 
@@ -87,15 +90,39 @@ sealed interface Route {
     @Serializable data class MoveCopy(val mode: String, val ids: String, val sourceAlbumId: String? = null) : Route
     @Serializable data class Wallpaper(val uri: String, val mediaId: Long? = null) : Route
 }
-fun Context.findActivity(): Activity? { var c = this; while (c is ContextWrapper) { if (c is Activity) return c; c = c.baseContext }; return null }
+
+fun Context.findActivity(): Activity? {
+    var c = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
 fun String.toSafeRouteArgs() = Base64.encodeToString(this.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-fun String.fromSafeRouteArgs() = try { String(Base64.decode(this, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)) } catch (e: Exception) { this }
-data class BottomTab(val route: Route, val routeClass: KClass<out Route>, val selectedIcon: ImageVector, val unselectedIcon: ImageVector, val label: String)
+
+fun String.fromSafeRouteArgs() = try {
+    String(Base64.decode(this, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING))
+} catch (e: Exception) {
+    this
+}
+
+data class BottomTab(
+    val route: Route,
+    val routeClass: KClass<out Route>,
+    val selectedIcon: ImageVector,
+    val unselectedIcon: ImageVector,
+    val label: String
+)
+
 enum class AppLockState { Initializing, Locked, Unlocked }
+
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
 @Composable
 fun GalleryNavHost(securityVM: SecurityViewModel = hiltViewModel()) {
     var appState by remember { mutableStateOf(AppLockState.Initializing) }
+
     LaunchedEffect(Unit) {
         val appLockEnabled = withContext(Dispatchers.IO) { securityVM.isAppLockEnabled() }
         appState = if (appLockEnabled) {
@@ -108,8 +135,19 @@ fun GalleryNavHost(securityVM: SecurityViewModel = hiltViewModel()) {
 
     AnimatedContent(targetState = appState, label = "AppLockTransition") { state ->
         when (state) {
-            AppLockState.Initializing -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
-            AppLockState.Locked -> VaultSecureScreen(isGlobalAppGuard = true, onBack = {}, onUnlockGlobalSuccess = { appState = AppLockState.Unlocked })
+            AppLockState.Initializing -> Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            }
+            AppLockState.Locked -> VaultSecureScreen(
+                isGlobalAppGuard = true,
+                onBack = {},
+                onUnlockGlobalSuccess = { appState = AppLockState.Unlocked }
+            )
             AppLockState.Unlocked -> GalleryAppContent {
                 securityVM.lock()
                 appState = AppLockState.Locked
@@ -117,11 +155,22 @@ fun GalleryNavHost(securityVM: SecurityViewModel = hiltViewModel()) {
         }
     }
 }
+
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
 @Composable
 fun GalleryAppContent(onLockApp: () -> Unit) {
-    val navController = rememberNavController(); val context = LocalContext.current; val sharedPrefs = remember { context.getSharedPreferences("app_nav_prefs", Context.MODE_PRIVATE) }
-    val initialStartDestination = remember { when (sharedPrefs.getString("last_main_tab", "Albums")) { "Pictures" -> Route.Pictures; "Music" -> Route.Music; else -> Route.Albums } }
+    val navController = rememberNavController()
+    val context = LocalContext.current
+    val sharedPrefs = remember { context.getSharedPreferences("app_nav_prefs", Context.MODE_PRIVATE) }
+
+    val initialStartDestination = remember {
+        when (sharedPrefs.getString("last_main_tab", "Albums")) {
+            "Pictures" -> Route.Pictures
+            "Music" -> Route.Music
+            else -> Route.Albums
+        }
+    }
+
     LaunchedEffect(navController) {
         navController.addOnDestinationChangedListener { _, dest, _ ->
             when {
@@ -132,11 +181,31 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
         }
     }
 
-    val tabs = remember { listOf(BottomTab(Route.Pictures, Route.Pictures::class, Icons.Filled.Photo, Icons.Outlined.Photo, "Photos"), BottomTab(Route.Albums, Route.Albums::class, Icons.Filled.PhotoAlbum, Icons.Outlined.PhotoAlbum, "Albums"), BottomTab(Route.Stories, Route.Stories::class, Icons.Filled.AutoStories, Icons.Outlined.AutoStories, "Stories"), BottomTab(Route.Music, Route.Music::class, Icons.Filled.MusicNote, Icons.Outlined.MusicNote, "Music")) }
-    val navBackStackEntry by navController.currentBackStackEntryAsState(); val currentDestination = navBackStackEntry?.destination
+    val tabs = remember {
+        listOf(
+            BottomTab(Route.Pictures, Route.Pictures::class, Icons.Filled.Photo, Icons.Outlined.Photo, "Photos"),
+            BottomTab(Route.Albums, Route.Albums::class, Icons.Filled.PhotoAlbum, Icons.Outlined.PhotoAlbum, "Albums"),
+            BottomTab(Route.Stories, Route.Stories::class, Icons.Filled.AutoStories, Icons.Outlined.AutoStories, "Stories"),
+            BottomTab(Route.Music, Route.Music::class, Icons.Filled.MusicNote, Icons.Outlined.MusicNote, "Music")
+        )
+    }
+
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentDestination = navBackStackEntry?.destination
     var isFullScreenMediaOpen by remember { mutableStateOf(false) }
 
-    val showBottomBar by remember(currentDestination, isFullScreenMediaOpen) { derivedStateOf { if (isFullScreenMediaOpen) false else currentDestination?.hasRoute(Route.Pictures::class) == true || currentDestination?.hasRoute(Route.Albums::class) == true || currentDestination?.hasRoute(Route.Stories::class) == true || currentDestination?.hasRoute(Route.Music::class) == true } }
+    val showBottomBar by remember(currentDestination, isFullScreenMediaOpen) {
+        derivedStateOf {
+            if (isFullScreenMediaOpen) {
+                false
+            } else {
+                currentDestination?.hasRoute(Route.Pictures::class) == true ||
+                        currentDestination?.hasRoute(Route.Albums::class) == true ||
+                        currentDestination?.hasRoute(Route.Stories::class) == true ||
+                        currentDestination?.hasRoute(Route.Music::class) == true
+            }
+        }
+    }
 
     val navigateToVideo = remember(navController) {
         { rawUriString: String, _: List<String> ->
@@ -147,11 +216,22 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
         }
     }
 
-// Step 1 - Create one shared MusicViewModel
+    // Step 1 - Create one shared MusicViewModel
     val sharedMusicViewModel: MusicViewModel = hiltViewModel()
 
-    Scaffold(containerColor = MaterialTheme.colorScheme.background, bottomBar = { if (showBottomBar) BottomNavigationBar(tabs, currentDestination, navController) }) { padding ->
-        NavHost(navController = navController, startDestination = initialStartDestination, modifier = Modifier.padding(padding)) {
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        bottomBar = {
+            if (showBottomBar) {
+                BottomNavigationBar(tabs, currentDestination, navController)
+            }
+        }
+    ) { padding ->
+        NavHost(
+            navController = navController,
+            startDestination = initialStartDestination,
+            modifier = Modifier.padding(padding)
+        ) {
             // Step 2 & 3 - Pass the shared view model to mainTabs
             mainTabs(navController, context, navigateToVideo, onLockApp, { isFullScreenMediaOpen = it }, sharedMusicViewModel)
             albumGraphs(navController, navigateToVideo, onLockApp) { isFullScreenMediaOpen = it }
@@ -161,6 +241,7 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
         }
     }
 }
+
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
 private fun NavGraphBuilder.mainTabs(
     nav: NavHostController,
@@ -192,13 +273,51 @@ private fun NavGraphBuilder.mainTabs(
             onNavigateToMoveCopy = { m, ids, src -> nav.navigate(Route.MoveCopy(m, ids, src?.toSafeRouteArgs())) }
         )
     }
-    composable<Route.Albums> { AlbumScreen(viewModel = hiltViewModel(), trashViewModel = hiltViewModel(), onViewerStateChanged = onViewerStateChanged, actions = AlbumActions(onAlbumClick = { a -> nav.navigate(Route.AlbumView(a.id.toSafeRouteArgs())) }, onNavigateToFavorites = { nav.navigate(Route.AlbumView("virtual_favorites".toSafeRouteArgs())) }, onNavigateToTrash = { nav.navigate(Route.Trash) }, onNavigateToHidden = { nav.navigate(Route.Hidden) }, onLockApp = onLock, onNavigateToSettings = { nav.navigate(Route.Settings) }, onNavigateToDuplicates = { nav.navigate(Route.Duplicates) }, onNavigateToScan = { nav.navigate(Route.ScanLibrary) })) }
-    composable<Route.Stories> { StoriesScreen(viewModel = hiltViewModel(), trashViewModel = hiltViewModel()) }
-// Step 3 - Use the shared view model here
-    composable<Route.Music> { MusicScreen(viewModel = musicViewModel, onViewerStateChanged = onViewerStateChanged, onNavigateToEqualizer = { nav.navigate(Route.Equalizer) }, onNavigateToRadio = { nav.navigate(Route.Radio) }, onNavigateToDuoPlayer = { nav.navigate(Route.DuoMusic) }) }
+
+    composable<Route.Albums> {
+        AlbumScreen(
+            viewModel = hiltViewModel(),
+            trashViewModel = hiltViewModel(),
+            onViewerStateChanged = onViewerStateChanged,
+            actions = AlbumActions(
+                onAlbumClick = { a -> nav.navigate(Route.AlbumView(a.id.toSafeRouteArgs())) },
+                onNavigateToFavorites = { nav.navigate(Route.AlbumView("virtual_favorites".toSafeRouteArgs())) },
+                onNavigateToTrash = { nav.navigate(Route.Trash) },
+                onNavigateToHidden = { nav.navigate(Route.Hidden) },
+                onLockApp = onLock,
+                onNavigateToSettings = { nav.navigate(Route.Settings) },
+                onNavigateToDuplicates = { nav.navigate(Route.Duplicates) },
+                onNavigateToScan = { nav.navigate(Route.ScanLibrary) }
+            )
+        )
+    }
+
+    composable<Route.Stories> {
+        StoriesScreen(
+            viewModel = hiltViewModel(),
+            trashViewModel = hiltViewModel()
+        )
+    }
+
+    // Step 3 - Use the shared view model here
+    composable<Route.Music> {
+        MusicScreen(
+            viewModel = musicViewModel,
+            onViewerStateChanged = onViewerStateChanged,
+            onNavigateToEqualizer = { nav.navigate(Route.Equalizer) },
+            onNavigateToRadio = { nav.navigate(Route.Radio) },
+            onNavigateToDuoPlayer = { nav.navigate(Route.DuoMusic) }
+        )
+    }
 }
+
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
-private fun NavGraphBuilder.albumGraphs(nav: NavHostController, navToVid: (String, List<String>) -> Unit, onLock: () -> Unit, onViewerStateChanged: (Boolean) -> Unit) {
+private fun NavGraphBuilder.albumGraphs(
+    nav: NavHostController,
+    navToVid: (String, List<String>) -> Unit,
+    onLock: () -> Unit,
+    onViewerStateChanged: (Boolean) -> Unit
+) {
     composable<Route.AlbumView> { backStack ->
         AlbumDetailScreen(
             albumId = backStack.toRoute<Route.AlbumView>().albumId.fromSafeRouteArgs(),
@@ -219,6 +338,7 @@ private fun NavGraphBuilder.albumGraphs(nav: NavHostController, navToVid: (Strin
         )
     }
 }
+
 private fun NavGraphBuilder.editorGraphs(nav: NavHostController) {
     composable<Route.MediaEditor> { backStack ->
         val args = backStack.toRoute<Route.MediaEditor>()
@@ -235,6 +355,7 @@ private fun NavGraphBuilder.editorGraphs(nav: NavHostController) {
         }
     }
 }
+
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
 private fun NavGraphBuilder.toolsAndUtilityGraphs(
     nav: NavHostController,
@@ -248,7 +369,7 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     composable<Route.DuoMusic> { DuoMusicScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
     composable<Route.Settings> { SettingScreen(onBack = { nav.popBackStack() }) }
 
-// Consolidated Document Graph
+    // Consolidated Document Graph
     composable<Route.DocumentReader> {
         AllDocumentReaderScreen(
             onBack = { nav.popBackStack() },
@@ -281,9 +402,30 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
 
     composable<Route.Trash> { TrashScreen(onBack = { nav.popBackStack() }) }
     composable<Route.Duplicates> { DuplicatesScreen(viewModel = hiltViewModel(), trashViewModel = hiltViewModel(), onBack = { nav.popBackStack() }) }
-    composable<Route.ScanLibrary> { ScanLibraryScreen(onBack = { nav.popBackStack() }, galleryViewModel = hiltViewModel(), musicViewModel = hiltViewModel(), onLockApp = onLock) }
-    composable<Route.Slideshow> { SlideshowScreen(albumId = it.toRoute<Route.Slideshow>().albumId?.fromSafeRouteArgs(), viewModel = hiltViewModel(), onBack = { nav.popBackStack() }) }
-    composable<Route.Vault> { VaultSecureScreen(onBack = { nav.navigateUp() }, onNavigateToPicker = { nav.navigate(Route.Pictures) }) }
+
+    composable<Route.ScanLibrary> {
+        ScanLibraryScreen(
+            onBack = { nav.popBackStack() },
+            galleryViewModel = hiltViewModel(),
+            musicViewModel = hiltViewModel(),
+            onLockApp = onLock
+        )
+    }
+
+    composable<Route.Slideshow> {
+        SlideshowScreen(
+            albumId = it.toRoute<Route.Slideshow>().albumId?.fromSafeRouteArgs(),
+            viewModel = hiltViewModel(),
+            onBack = { nav.popBackStack() }
+        )
+    }
+
+    composable<Route.Vault> {
+        VaultSecureScreen(
+            onBack = { nav.navigateUp() },
+            onNavigateToPicker = { nav.navigate(Route.Pictures) }
+        )
+    }
 
     composable<Route.MoveCopy> {
         val args = it.toRoute<Route.MoveCopy>()
@@ -309,17 +451,79 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
         )
     }
 }
+
 @Composable
-fun BottomNavigationBar(tabs: List<BottomTab>, currentDest: androidx.navigation.NavDestination?, nav: NavHostController) {
-    Surface(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f), tonalElevation = 10.dp, shadowElevation = 4.dp, shape = RoundedCornerShape(topStart = 34.dp, topEnd = 34.dp)) {
-        Row(modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).padding(horizontal = 14.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+fun BottomNavigationBar(
+    tabs: List<BottomTab>,
+    currentDest: androidx.navigation.NavDestination?,
+    nav: NavHostController
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        tonalElevation = 10.dp,
+        shadowElevation = 4.dp,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             tabs.forEach { tab ->
                 val selected = currentDest?.hierarchy?.any { it.hasRoute(tab.routeClass) } == true
-                Box(modifier = Modifier.weight(1f).clip(RoundedCornerShape(24.dp)).clickable(interactionSource = remember { MutableInteractionSource() }, indication = ripple(bounded = false, radius = 36.dp)) { if (!selected) nav.navigate(tab.route) { popUpTo(nav.graph.findStartDestination().id) { inclusive = false }; launchSingleTop = true } }.padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                    Text(text = tab.label, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = ripple(bounded = true, radius = 36.dp)
+                        ) {
+                            if (!selected) {
+                                nav.navigate(tab.route) {
+                                    popUpTo(nav.graph.findStartDestination().id) { inclusive = false }
+                                    launchSingleTop = true
+                                }
+                            }
+                        }
+                        .padding(vertical = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                            contentDescription = tab.label,
+                            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(24.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Text(
+                            text = tab.label,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
                 }
             }
         }
     }
 }
-fun safeLaunchCamera(context: Context) { try { context.startActivity(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)) } catch (_: Exception) { Toast.makeText(context, "Unable to launch camera", Toast.LENGTH_SHORT).show() } }
+
+fun safeLaunchCamera(context: Context) {
+    try {
+        context.startActivity(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))
+    } catch (_: Exception) {
+        Toast.makeText(context, "Unable to launch camera", Toast.LENGTH_SHORT).show()
+    }
+}

@@ -49,6 +49,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.gallerybox.viewmodel.AudioTrack
 import com.gallerybox.viewmodel.MusicViewModel
+import kotlinx.coroutines.isActive
 import java.util.Locale
 import kotlin.math.log2
 import kotlin.math.roundToInt
@@ -217,30 +218,36 @@ fun PremiumDJDivider(
     p1Color: Color, p2Color: Color, isPlaying: Boolean, isLinked: Boolean,
     onSync: () -> Unit, onLink: () -> Unit, onCrossfade: () -> Unit
 ) {
-    val transition = rememberInfiniteTransition(label = "DJDividerTransition")
-    val animatedPulse by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "PulseAnimation"
-    )
+    // OPTIMIZATION: Removed infinite transition. Uses Animatable triggered only when actively playing.
+    // Saves battery and GPU tick loop on low-end devices.
+    val animatedPulse = remember { Animatable(0.35f) }
 
-    val activePulse = if (isPlaying) animatedPulse else 0.35f
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            while (isActive) {
+                animatedPulse.animateTo(1f, animationSpec = tween(1400, easing = FastOutSlowInEasing))
+                animatedPulse.animateTo(0.35f, animationSpec = tween(1400, easing = FastOutSlowInEasing))
+            }
+        } else {
+            animatedPulse.animateTo(0.35f, animationSpec = tween(500, easing = FastOutSlowInEasing))
+        }
+    }
 
     Box(modifier = Modifier.fillMaxWidth().height(88.dp).background(MaterialTheme.colorScheme.background)) {
-        Box(modifier = Modifier.align(Alignment.Center).fillMaxWidth().height(4.dp).background(Brush.horizontalGradient(listOf(p1Color.copy(alpha = activePulse), p2Color.copy(alpha = activePulse)))))
+        Box(modifier = Modifier.align(Alignment.Center).fillMaxWidth().height(4.dp).background(Brush.horizontalGradient(listOf(p1Color.copy(alpha = animatedPulse.value), p2Color.copy(alpha = animatedPulse.value)))))
         Row(modifier = Modifier.fillMaxSize().padding(horizontal = 28.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             FilledIconButton(onClick = onSync, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) { Icon(Icons.Rounded.Sync, "Sync", tint = p1Color) }
-            Surface(modifier = Modifier.size(68.dp), shape = CircleShape, color = if (isLinked) p1Color else MaterialTheme.colorScheme.surfaceContainerHigh, shadowElevation = if (isLinked) 6.dp else 2.dp) {
+
+            // Reduced shadow elevation from 6.dp to 4.dp
+            Surface(modifier = Modifier.size(68.dp), shape = CircleShape, color = if (isLinked) p1Color else MaterialTheme.colorScheme.surfaceContainerHigh, shadowElevation = if (isLinked) 4.dp else 2.dp) {
                 Box(modifier = Modifier.fillMaxSize().clickable { onLink() }, contentAlignment = Alignment.Center) { Icon(if (isLinked) Icons.Default.Lock else Icons.Default.LockOpen, null, modifier = Modifier.size(28.dp), tint = if (isLinked) Color.White else MaterialTheme.colorScheme.onSurfaceVariant) }
             }
+
             FilledIconButton(onClick = onCrossfade, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) { Icon(Icons.Rounded.CompareArrows, "Crossfade", tint = p2Color) }
         }
     }
 }
+
 @Composable
 fun DuoPlayerHalf(
     label: String, color: Color, track: AudioTrack?, isPlaying: Boolean, position: Long,
@@ -252,10 +259,9 @@ fun DuoPlayerHalf(
     LaunchedEffect(track?.id) { showFx = false }
     val view = LocalView.current
 
-    val artRequest = rememberAlbumArtRequest(albumId = track?.albumId ?: -1L, size = 500, crossfade = true)
+    // OPTIMIZATION: Reduced size to 400 and disabled crossfade for immediate local image rendering
+    val artRequest = rememberAlbumArtRequest(albumId = track?.albumId ?: -1L, size = 400, crossfade = false)
 
-    // FIX 1: Added `isTop` to the key. This prevents state collisions if the user
-    // loads the exact same song onto both the Top and Bottom decks simultaneously.
     key(track?.id, isTop) {
         Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             if (track != null) AsyncImage(model = artRequest, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, alpha = 0.08f)
@@ -275,16 +281,24 @@ fun DuoPlayerHalf(
                 Spacer(modifier = Modifier.weight(0.5f))
 
                 if (track != null) {
-                    val transition = rememberInfiniteTransition(label = "DiscRotation")
-                    val rotation by transition.animateFloat(
-                        initialValue = 0f, targetValue = 360f,
-                        animationSpec = infiniteRepeatable(animation = tween(12000, easing = LinearEasing), repeatMode = RepeatMode.Restart),
-                        label = "Rotation"
-                    )
+                    // OPTIMIZATION: Rotates vinyl continuously but only consumes animation ticks when actively playing.
+                    // Acts like a physical record retaining its position when paused.
+                    val rotationAnimatable = remember { Animatable(0f) }
 
-                    // Applied Dynamic Seek Formula: max(10s, Duration * 0.01)
+                    LaunchedEffect(isPlaying) {
+                        if (isPlaying) {
+                            while (isActive) {
+                                rotationAnimatable.animateTo(
+                                    targetValue = rotationAnimatable.value + 360f,
+                                    animationSpec = tween(12000, easing = LinearEasing)
+                                )
+                            }
+                        }
+                    }
+
                     val dynamicSeekStep = maxOf(10000L, (track.duration * 0.01).toLong())
 
+                    // Reduced shadow elevation from 6.dp to 4.dp
                     Surface(
                         modifier = Modifier
                             .size(130.dp)
@@ -295,10 +309,10 @@ fun DuoPlayerHalf(
                                     onSeek((position + dynamicSeekStep).coerceAtMost(track.duration))
                                 })
                             },
-                        shape = CircleShape, color = Color.White, shadowElevation = 6.dp
+                        shape = CircleShape, color = Color.White, shadowElevation = 4.dp
                     ) {
                         Box {
-                            AsyncImage(model = artRequest, contentDescription = null, modifier = Modifier.fillMaxSize().graphicsLayer { rotationZ = if (isPlaying) rotation else 0f }, contentScale = ContentScale.Crop)
+                            AsyncImage(model = artRequest, contentDescription = null, modifier = Modifier.fillMaxSize().graphicsLayer { rotationZ = rotationAnimatable.value }, contentScale = ContentScale.Crop)
                             Box(modifier = Modifier.align(Alignment.Center).size(28.dp).clip(CircleShape).background(Color.White), contentAlignment = Alignment.Center) {
                                 Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color.Black))
                             }
@@ -318,16 +332,11 @@ fun DuoPlayerHalf(
 
                 Spacer(modifier = Modifier.weight(0.5f))
 
-                // --- FIX 2: UPDATED SLIDER LOGIC ---
-                // Removed `animateFloatAsState` from the draggable thumb value.
-                // That causes severe input latency and slider lag while being dragged.
                 val duration = (track?.duration ?: 1000L).toFloat().coerceAtLeast(1f)
                 val safePosition = if (track != null) position.toFloat().coerceIn(0f, duration) else 0f
 
                 var isDragging by remember { mutableStateOf(false) }
                 var sliderPos by remember { mutableFloatStateOf(0f) }
-
-                // Read direct state during drag to bypass sluggish animation
                 val displayPosition = if (isDragging) sliderPos else safePosition
 
                 Slider(
@@ -372,7 +381,6 @@ fun DuoPlayerHalf(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                // --- END UPDATED SLIDER LOGIC ---
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -381,7 +389,8 @@ fun DuoPlayerHalf(
                         Icon(Icons.Rounded.Tune, null, tint = if (showFx) Color.White else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                     }
 
-                    Surface(modifier = Modifier.size(56.dp).clip(CircleShape).pointerInput(track?.id) { detectTapGestures(onLongPress = { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); onSeek(0L) }, onTap = { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); onPlayPause() }) }, shape = CircleShape, color = color, shadowElevation = if (isPlaying) 6.dp else 2.dp) {
+                    // Reduced shadow elevation from 6.dp to 4.dp
+                    Surface(modifier = Modifier.size(56.dp).clip(CircleShape).pointerInput(track?.id) { detectTapGestures(onLongPress = { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); onSeek(0L) }, onTap = { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); onPlayPause() }) }, shape = CircleShape, color = color, shadowElevation = if (isPlaying) 4.dp else 2.dp) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(32.dp))
                         }
@@ -408,8 +417,6 @@ fun DuoPlayerHalf(
 
 @Composable
 fun FxSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, activeColor: Color, isPitch: Boolean, onValueChange: (Float) -> Unit) {
-
-    // Semitone calculation from Multiplier: n = 12 * log2(Multiplier)
     val displayValue = if (isPitch) {
         val semitones = (12 * log2(value)).roundToInt()
         if (semitones > 0) "+$semitones st" else "$semitones st"

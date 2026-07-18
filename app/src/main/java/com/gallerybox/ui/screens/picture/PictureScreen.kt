@@ -1,4 +1,6 @@
 @file:Suppress("UnsafeOptInUsageError", "UnstableApiUsage", "OPT_IN_USAGE", "unused", "DEPRECATION")
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.gallerybox.ui.screens.picture
 
 import android.app.Activity
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -73,7 +76,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem as Media3Item
 import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.paging.compose.collectAsLazyPagingItems
@@ -86,6 +88,7 @@ import com.gallerybox.ui.screens.album.formatDuration
 import com.gallerybox.viewmodel.GalleryEvent
 import com.gallerybox.viewmodel.GalleryViewModel
 import com.gallerybox.viewmodel.MediaTypeFilter
+import androidx.media3.common.util.UnstableApi
 import com.gallerybox.viewmodel.PhotoSort
 import com.gallerybox.viewmodel.TrashViewModel
 import com.gallerybox.viewmodel.GalleryViewerState
@@ -95,18 +98,32 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.cos
 
-// --- Helpers ---
 fun isValidUri(context: Context, uri: Uri?): Boolean = uri != null && uri != Uri.EMPTY
 fun getSmartName(item: MediaItem): String = item.name.lowercase().let { name -> when { "fdownloader" in name -> "Downloaded Video"; "instagram" in name -> "Instagram Video"; "whatsapp" in name -> "WhatsApp Media"; "screenshot" in name -> "Screenshot"; item.isDocument -> "Document"; item.isVideo -> "Video"; else -> "Photo" } }
 fun getFolderName(path: String): String = try { java.io.File(path).parentFile?.name ?: "Unknown Folder" } catch (e: Exception) { "Unknown Folder" }
 fun Context.findActivity(): Activity? { var context = this; while (context is ContextWrapper) { if (context is Activity) return context; context = context.baseContext }; return null }
+
+private val topBarFormatter = SimpleDateFormat("MMMM dd, yyyy  •  hh:mm a", Locale.getDefault())
 private val metadataFormatter = SimpleDateFormat("EEEE, MMMM dd, yyyy 'at' hh:mm a", Locale.getDefault())
+private val headerFormatter = SimpleDateFormat("MMMM dd, yyyy", Locale.getDefault())
 
-sealed class GalleryGridItem { data class Header(val id: String, val title: String, val count: Int) : GalleryGridItem(); data class Media(val item: MediaItem) : GalleryGridItem() }
-sealed class PictureUiDialog { data object None : PictureUiDialog(); data object GridSize : PictureUiDialog(); data object Sort : PictureUiDialog(); data class TrashConfirm(val mediaIds: List<Long>) : PictureUiDialog(); data class MetadataInfo(val item: MediaItem) : PictureUiDialog(); data class QuickAction(val item: MediaItem) : PictureUiDialog() }
+sealed class GalleryGridItem {
+    data class Header(val id: String, val title: String, val count: Int) : GalleryGridItem()
+    data class Media(val item: MediaItem) : GalleryGridItem()
+}
 
-// --- Main Screen ---
+sealed class PictureUiDialog {
+    data object None : PictureUiDialog()
+    data object GridSize : PictureUiDialog()
+    data object Sort : PictureUiDialog()
+    data class TrashConfirm(val mediaIds: List<Long>) : PictureUiDialog()
+    data class MetadataInfo(val item: MediaItem) : PictureUiDialog()
+    data class QuickAction(val item: MediaItem) : PictureUiDialog()
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun PictureScreen(
@@ -129,67 +146,219 @@ fun PictureScreen(
     onNavigateToEditor: (String, Long) -> Unit,
     onNavigateToMoveCopy: (String, String, String?) -> Unit
 ) {
-    val context = LocalContext.current; val scope = rememberCoroutineScope(); val snackbarHostState = remember { SnackbarHostState() }; val haptic = LocalHapticFeedback.current
-    val gridState = rememberLazyGridState(); val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
-    val isBusy by viewModel.isBusy.collectAsState(); val activeFilter by viewModel.activeFilter.collectAsState(); val activeSort by viewModel.activeSort.collectAsState(); val searchQuery by viewModel.searchQuery.collectAsState()
-    val viewerState by viewModel.viewerState.collectAsState(); val mediaMap by viewModel.mediaMap.collectAsState()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val haptic = LocalHapticFeedback.current
+    val gridState = rememberLazyGridState()
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
+
+    val isBusy by viewModel.isBusy.collectAsState()
+    val activeFilter by viewModel.activeFilter.collectAsState()
+    val activeSort by viewModel.activeSort.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
+    val viewerState by viewModel.viewerState.collectAsState()
+    val mediaMap by viewModel.mediaMap.collectAsState()
+    val favorites by viewModel.favoriteIds.collectAsState()
 
     val openViewerState = viewerState as? GalleryViewerState.Open
     val currentItem: MediaItem? = openViewerState?.mediaId?.let { id -> mediaMap[id] }
 
     val pagedMedia = viewModel.pagedMedia.collectAsLazyPagingItems()
-    val prefs = remember { context.getSharedPreferences("gallery_prefs", Context.MODE_PRIVATE) }; var columnCount by rememberSaveable { mutableIntStateOf(prefs.getInt("picture_grid_columns", 4)) }
-    var isSelectionMode by rememberSaveable { mutableStateOf(false) }; var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
-    var isSearchActive by rememberSaveable { mutableStateOf(false) }; var activeDialog by remember { mutableStateOf<PictureUiDialog>(PictureUiDialog.None) }
+    val prefs = remember { context.getSharedPreferences("gallery_prefs", Context.MODE_PRIVATE) }
+    var columnCount by rememberSaveable { mutableIntStateOf(prefs.getInt("picture_grid_columns", 4)) }
+    var isSelectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
+    var isSearchActive by rememberSaveable { mutableStateOf(false) }
+    var activeDialog by remember { mutableStateOf<PictureUiDialog>(PictureUiDialog.None) }
 
     val showScrollToTop by remember { derivedStateOf { gridState.firstVisibleItemIndex > 10 } }
-    val isScrolling = gridState.isScrollInProgress; val filters = remember { MediaTypeFilter.entries }; val pagerState = rememberPagerState(initialPage = filters.indexOf(activeFilter).coerceAtLeast(0), pageCount = { filters.size })
+    val isScrolling = gridState.isScrollInProgress
+    val filters = remember { MediaTypeFilter.entries }
+    val pagerState = rememberPagerState(initialPage = filters.indexOf(activeFilter).coerceAtLeast(0), pageCount = { filters.size })
 
-    val intentSenderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result -> val g = result.resultCode == Activity.RESULT_OK; trashViewModel.onPermissionResultGlobal(g); if (!g) Toast.makeText(context, "Permission Denied", Toast.LENGTH_SHORT).show() }
-    LaunchedEffect(trashViewModel) { trashViewModel.onRefreshGallery = { scope.launch { viewModel.forceSync() } }; trashViewModel.events.collect { event -> when (event) { is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build()); is GalleryEvent.OperationSuccess -> { activeDialog = PictureUiDialog.None; isSelectionMode = false; selectedIds = emptySet(); viewModel.closeViewer(); scope.launch { if (snackbarHostState.showSnackbar("Moved to Trash", "View Trash", duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed) onNavigateToTrash() } }; is GalleryEvent.ShowToast -> Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show(); else -> {} } } }
+    val intentSenderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        val g = result.resultCode == Activity.RESULT_OK
+        trashViewModel.onPermissionResultGlobal(g)
+        if (!g) Toast.makeText(context, "Permission Denied", Toast.LENGTH_SHORT).show()
+    }
+
+    LaunchedEffect(trashViewModel) {
+        trashViewModel.onRefreshGallery = { scope.launch { viewModel.forceSync() } }
+        trashViewModel.events.collect { event ->
+            when (event) {
+                is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
+                is GalleryEvent.OperationSuccess -> {
+                    activeDialog = PictureUiDialog.None
+                    isSelectionMode = false
+                    selectedIds = emptySet()
+                    viewModel.closeViewer()
+                    scope.launch {
+                        if (snackbarHostState.showSnackbar("Moved to Trash", "View Trash", duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed) onNavigateToTrash()
+                    }
+                }
+                is GalleryEvent.ShowToast -> Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
+                else -> {}
+            }
+        }
+    }
+
     LaunchedEffect(viewerState) { onViewerStateChanged(viewerState is GalleryViewerState.Open) }
-    LaunchedEffect(pagerState.currentPage) { val selectedFilter = filters[pagerState.currentPage]; if (activeFilter != selectedFilter) { viewModel.updateFilter(selectedFilter); gridState.scrollToItem(0) } }
-    LaunchedEffect(activeFilter) { val targetPage = filters.indexOf(activeFilter); if (targetPage != -1 && pagerState.currentPage != targetPage) pagerState.animateScrollToPage(targetPage) }
-    LaunchedEffect(activeFilter) { if (isSelectionMode) { isSelectionMode = false; selectedIds = emptySet() } }
+    LaunchedEffect(pagerState.currentPage) {
+        val selectedFilter = filters[pagerState.currentPage]
+        if (activeFilter != selectedFilter) {
+            viewModel.updateFilter(selectedFilter)
+            gridState.scrollToItem(0)
+        }
+    }
+    LaunchedEffect(activeFilter) {
+        val targetPage = filters.indexOf(activeFilter)
+        if (targetPage != -1 && pagerState.currentPage != targetPage) pagerState.animateScrollToPage(targetPage)
+    }
+    LaunchedEffect(activeFilter) {
+        if (isSelectionMode) {
+            isSelectionMode = false
+            selectedIds = emptySet()
+        }
+    }
 
     val selectedSizeStr by remember(selectedIds.size) { derivedStateOf { Formatter.formatShortFileSize(context, selectedIds.sumOf { mediaMap[it]?.size ?: 0L }) } }
-    val currentScrollDate by remember { derivedStateOf { if (pagedMedia.itemCount == 0) "" else { val index = gridState.firstVisibleItemIndex; if (index < 0 || index >= pagedMedia.itemCount) "" else when (val item = pagedMedia.peek(index)) { is GalleryGridItem.Header -> item.title; is GalleryGridItem.Media -> item.item.dateHeader; null -> "" } } } }
-    val dynamicThumbSize = remember(columnCount) { when (columnCount) { 1, 2 -> 512; 3 -> 256; else -> maxOf(160, 512 / columnCount) } }
-    val pulse = rememberInfiniteTransition(label = "pulse"); val alphaPulse by pulse.animateFloat(initialValue = 0.3f, targetValue = 0.7f, animationSpec = infiniteRepeatable(animation = tween(1000), repeatMode = RepeatMode.Reverse), label = "alpha")
 
-    fun shareMedia(items: List<MediaItem>) { if (items.isEmpty()) return; val uris = items.map { it.uri }; val intent = Intent().apply { action = if (uris.size > 1) Intent.ACTION_SEND_MULTIPLE else Intent.ACTION_SEND; val hasImage = items.any { !it.isVideo && !it.isDocument }; val hasVideo = items.any { it.isVideo }; val hasDocument = items.any { it.isDocument }; type = when { hasDocument && !hasImage && !hasVideo -> if (items.size == 1) items.first().mimeType.takeIf { it.isNotEmpty() } ?: "*/*" else "*/*"; hasVideo && !hasImage && !hasDocument -> "video/*"; hasImage && !hasVideo && !hasDocument -> "image/*"; else -> "*/*" }; addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION); if (uris.size > 1) putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris)) else putExtra(Intent.EXTRA_STREAM, uris.first()) }; try { context.startActivity(Intent.createChooser(intent, "Share via")) } catch (e: Exception) { Toast.makeText(context, "No app found to share", Toast.LENGTH_SHORT).show() } }
+    val currentScrollDate by remember {
+        derivedStateOf {
+            if (pagedMedia.itemCount == 0) "" else {
+                val index = gridState.firstVisibleItemIndex
+                if (index < 0 || index >= pagedMedia.itemCount) "" else {
+                    when (val item = pagedMedia.peek(index)) {
+                        is GalleryGridItem.Header -> item.title
+                        is GalleryGridItem.Media -> item.item.dateHeader
+                        null -> ""
+                    }
+                }
+            }
+        }
+    }
 
-    BackHandler(enabled = isSearchActive) { isSearchActive = false; viewModel.setSearchQuery("") }
-    BackHandler(enabled = isSelectionMode) { isSelectionMode = false; selectedIds = emptySet() }
+    val dynamicThumbSize = remember(columnCount) {
+        when (columnCount) {
+            1, 2 -> 512
+            3 -> 256
+            else -> maxOf(160, 512 / columnCount)
+        }
+    }
+
+    val pulse = rememberInfiniteTransition(label = "pulse")
+    val alphaPulse by pulse.animateFloat(initialValue = 0.3f, targetValue = 0.7f, animationSpec = infiniteRepeatable(animation = tween(1000), repeatMode = RepeatMode.Reverse), label = "alpha")
+
+    fun shareMedia(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        val uris = items.map { it.uri }
+        val intent = Intent().apply {
+            action = if (uris.size > 1) Intent.ACTION_SEND_MULTIPLE else Intent.ACTION_SEND
+            val hasImage = items.any { !it.isVideo && !it.isDocument }
+            val hasVideo = items.any { it.isVideo }
+            val hasDocument = items.any { it.isDocument }
+            type = when {
+                hasDocument && !hasImage && !hasVideo -> if (items.size == 1) items.first().mimeType.takeIf { it.isNotEmpty() } ?: "*/*" else "*/*"
+                hasVideo && !hasImage && !hasDocument -> "video/*"
+                hasImage && !hasVideo && !hasDocument -> "image/*"
+                else -> "*/*"
+            }
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (uris.size > 1) putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris)) else putExtra(Intent.EXTRA_STREAM, uris.first())
+        }
+        try {
+            context.startActivity(Intent.createChooser(intent, "Share via"))
+        } catch (e: Exception) {
+            Toast.makeText(context, "No app found to share", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    BackHandler(enabled = isSearchActive) {
+        isSearchActive = false
+        viewModel.setSearchQuery("")
+    }
+    BackHandler(enabled = isSelectionMode) {
+        isSelectionMode = false
+        selectedIds = emptySet()
+    }
     BackHandler(enabled = activeDialog != PictureUiDialog.None) { activeDialog = PictureUiDialog.None }
     BackHandler(enabled = viewerState is GalleryViewerState.Open) { viewModel.closeViewer() }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Scaffold(
-            modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection), containerColor = Color.Transparent, snackbarHost = { SnackbarHost(snackbarHostState) },
+            modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
+            containerColor = Color.Transparent,
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 Column {
                     AnimatedContent(targetState = isSelectionMode to isSearchActive, label = "TopBar") { (selection, search) ->
                         when {
                             selection -> MediaSelectionTopBar(selectedCount = selectedIds.size, selectedSizeStr = selectedSizeStr, totalCount = pagedMedia.itemCount, onClose = { isSelectionMode = false; selectedIds = emptySet() }, onSelectAll = { val mediaItems = pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>(); selectedIds = if (selectedIds.size == mediaItems.size && mediaItems.isNotEmpty()) emptySet() else mediaItems.map { it.item.id }.toSet().takeIf { set -> set.size < 5000 } ?: selectedIds })
                             search -> SearchTopBar(query = searchQuery, onQueryChange = { viewModel.setSearchQuery(it) }, onClose = { isSearchActive = false; viewModel.setSearchQuery("") })
-                            else -> ModernTopBar(title = "Photos", scrollBehavior = scrollBehavior, onSearchClick = { isSearchActive = true }, onSelectionClick = { isSelectionMode = true }, onMenuAction = { action -> when (action) { "grid" -> activeDialog = PictureUiDialog.GridSize; "sort" -> activeDialog = PictureUiDialog.Sort; "slideshow" -> onNavigateToSlideshow(); "duplicates" -> onNavigateToDuplicates(); "scan" -> onNavigateToScan(); "trash" -> onNavigateToTrash(); "hidden" -> onNavigateToHidden(); "lock_app" -> onLockApp(); "docs" -> onNavigateToDocs(); "settings" -> onNavigateToSettings() } })
+                            else -> ModernTopBar(title = "Pictures", scrollBehavior = scrollBehavior, onSearchClick = { isSearchActive = true }, onSelectionClick = { isSelectionMode = true }, onMenuAction = { action -> when (action) { "grid" -> activeDialog = PictureUiDialog.GridSize; "sort" -> activeDialog = PictureUiDialog.Sort; "slideshow" -> onNavigateToSlideshow(); "duplicates" -> onNavigateToDuplicates(); "scan" -> onNavigateToScan(); "trash" -> onNavigateToTrash(); "hidden" -> onNavigateToHidden(); "lock_app" -> onLockApp(); "docs" -> onNavigateToDocs(); "settings" -> onNavigateToSettings() } })
                         }
                     }
                     if (!isSelectionMode && !isSearchActive) ModernFilterRow(filters = filters, selectedIndex = pagerState.currentPage, onFilterSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } })
                 }
             },
-            floatingActionButton = { Box { androidx.compose.animation.AnimatedVisibility(visible = !isSelectionMode && (!isScrolling || showScrollToTop), enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) { if (showScrollToTop) FloatingActionButton(onClick = { scope.launch { gridState.animateScrollToItem(0) } }, containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer, shape = RoundedCornerShape(16.dp), elevation = FloatingActionButtonDefaults.elevation(8.dp)) { Icon(Icons.Rounded.ArrowUpward, "Scroll to Top") } } } }
+            floatingActionButton = {
+                Box {
+                    androidx.compose.animation.AnimatedVisibility(visible = !isSelectionMode && (!isScrolling || showScrollToTop), enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
+                        if (showScrollToTop) {
+                            FloatingActionButton(onClick = { scope.launch { gridState.animateScrollToItem(0) } }, containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer, shape = RoundedCornerShape(16.dp), elevation = FloatingActionButtonDefaults.elevation(8.dp)) {
+                                Icon(Icons.Rounded.ArrowUpward, "Scroll to Top")
+                            }
+                        }
+                    }
+                }
+            }
         ) { padding ->
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().padding(padding)) { page ->
                 Box(Modifier.fillMaxSize()) {
                     val isEmptyState = pagedMedia.itemSnapshotList.items.none { it is GalleryGridItem.Media }
-                    if (isBusy && pagedMedia.itemCount == 0) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                    else if (pagedMedia.itemCount == 0 || isEmptyState) EmptyMediaOverlay()
-                    else {
+                    if (isBusy && pagedMedia.itemCount == 0) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    } else if (pagedMedia.itemCount == 0 || isEmptyState) {
+                        EmptyMediaOverlay()
+                    } else {
                         LazyVerticalGrid(
-                            state = gridState, columns = GridCells.Fixed(columnCount), modifier = Modifier.fillMaxSize().pointerInput(isSelectionMode) { if (!isSelectionMode) return@pointerInput; var initialKey: Long? = null; detectDragGestures(onDragStart = { offset -> val itemInfo = gridState.layoutInfo.visibleItemsInfo.find { offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) && offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width) }; itemInfo?.let { val item = pagedMedia.peek(it.index) as? GalleryGridItem.Media; if (item != null) { initialKey = item.item.id; selectedIds = (selectedIds + item.item.id).takeIf { set -> set.size < 5000 } ?: selectedIds; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) } } }, onDrag = { change, _ -> val offset = change.position; val itemInfo = gridState.layoutInfo.visibleItemsInfo.find { offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) && offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width) }; itemInfo?.let { val item = pagedMedia.peek(it.index) as? GalleryGridItem.Media; if (item != null && item.item.id != initialKey && !selectedIds.contains(item.item.id)) { selectedIds = (selectedIds + item.item.id).takeIf { set -> set.size < 5000 } ?: selectedIds; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) } } }, onDragEnd = { initialKey = null }, onDragCancel = { initialKey = null }) },
-                            contentPadding = PaddingValues(top = 3.dp, bottom = 120.dp, start = 3.dp, end = 3.dp), verticalArrangement = Arrangement.spacedBy(3.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            state = gridState,
+                            columns = GridCells.Fixed(columnCount),
+                            modifier = Modifier.fillMaxSize()
+                                .pointerInput(isSelectionMode) {
+                                    if (!isSelectionMode) return@pointerInput
+                                    var initialKey: Long? = null
+                                    detectDragGestures(
+                                        onDragStart = { offset ->
+                                            val itemInfo = gridState.layoutInfo.visibleItemsInfo.find { offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) && offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width) }
+                                            itemInfo?.let {
+                                                val item = pagedMedia.peek(it.index) as? GalleryGridItem.Media
+                                                if (item != null) {
+                                                    initialKey = item.item.id
+                                                    selectedIds = (selectedIds + item.item.id).takeIf { set -> set.size < 5000 } ?: selectedIds
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                }
+                                            }
+                                        },
+                                        onDrag = { change, _ ->
+                                            val offset = change.position
+                                            val itemInfo = gridState.layoutInfo.visibleItemsInfo.find { offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) && offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width) }
+                                            itemInfo?.let {
+                                                val item = pagedMedia.peek(it.index) as? GalleryGridItem.Media
+                                                if (item != null && item.item.id != initialKey && !selectedIds.contains(item.item.id)) {
+                                                    selectedIds = (selectedIds + item.item.id).takeIf { set -> set.size < 5000 } ?: selectedIds
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                }
+                                            }
+                                        },
+                                        onDragEnd = { initialKey = null },
+                                        onDragCancel = { initialKey = null }
+                                    )
+                                },
+                            contentPadding = PaddingValues(top = 3.dp, bottom = 120.dp, start = 3.dp, end = 3.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
                             items(
                                 count = pagedMedia.itemCount,
@@ -198,12 +367,25 @@ fun PictureScreen(
                                 contentType = { index -> if (pagedMedia.peek(index) is GalleryGridItem.Header) "header" else "media" }
                             ) { index ->
                                 when (val gridItem = pagedMedia[index]) {
-                                    is GalleryGridItem.Header -> ModernDateHeader(title = gridItem.title, count = gridItem.count, onSelectAllForDate = { val snapshot = pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>().filter { it.item.dateHeader == gridItem.title }; selectedIds = (selectedIds + snapshot.map { it.item.id }.toSet()).takeIf { set -> set.size < 5000 } ?: selectedIds; isSelectionMode = true; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) })
+                                    is GalleryGridItem.Header -> ModernDateHeader(
+                                        title = gridItem.title,
+                                        count = gridItem.count,
+                                        onSelectAllForDate = {
+                                            val snapshot = pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>().filter { it.item.dateHeader == gridItem.title }
+                                            selectedIds = (selectedIds + snapshot.map { it.item.id }.toSet()).takeIf { set -> set.size < 5000 } ?: selectedIds
+                                            isSelectionMode = true
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
+                                    )
                                     is GalleryGridItem.Media -> {
                                         val mediaItem = mediaMap[gridItem.item.id] ?: gridItem.item
                                         if (isValidUri(context, mediaItem.uri)) {
                                             ModernMediaGridTile(
-                                                item = mediaItem, thumbSize = dynamicThumbSize, isSelected = selectedIds.contains(mediaItem.id), isSelectionMode = isSelectionMode, isScrolling = isScrolling,
+                                                item = mediaItem,
+                                                thumbSize = dynamicThumbSize,
+                                                isSelected = selectedIds.contains(mediaItem.id),
+                                                isSelectionMode = isSelectionMode,
+                                                isScrolling = isScrolling,
                                                 onClick = {
                                                     try {
                                                         if (isSelectionMode) {
@@ -216,27 +398,75 @@ fun PictureScreen(
                                                         }
                                                     } catch (e: Exception) { Log.e("GalleryBox", "Open Error", e) }
                                                 },
-                                                onLongClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); if (isSelectionMode) { selectedIds = if (selectedIds.contains(mediaItem.id)) selectedIds - mediaItem.id else (selectedIds + mediaItem.id).takeIf { set -> set.size < 5000 } ?: selectedIds } else activeDialog = PictureUiDialog.QuickAction(mediaItem) }
+                                                onLongClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    if (isSelectionMode) {
+                                                        selectedIds = if (selectedIds.contains(mediaItem.id)) selectedIds - mediaItem.id else (selectedIds + mediaItem.id).takeIf { set -> set.size < 5000 } ?: selectedIds
+                                                    } else {
+                                                        activeDialog = PictureUiDialog.QuickAction(mediaItem)
+                                                    }
+                                                }
                                             )
                                         }
                                     }
-                                    null -> Box(modifier = Modifier.aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = alphaPulse)))
+                                    null -> Box(modifier = Modifier.aspectRatio(1f).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = alphaPulse)))
                                 }
                             }
                         }
                     }
-                    androidx.compose.animation.AnimatedVisibility(visible = isScrolling && currentScrollDate.isNotEmpty(), enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.CenterEnd).padding(end = 16.dp)) { Box(Modifier.background(MaterialTheme.colorScheme.primary, RoundedCornerShape(20.dp)).padding(horizontal = 16.dp, vertical = 8.dp)) { Text(currentScrollDate, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp) } }
+
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = isScrolling && currentScrollDate.isNotEmpty(),
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                        modifier = Modifier.align(Alignment.CenterEnd).padding(end = 16.dp)
+                    ) {
+                        Box(Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), RoundedCornerShape(20.dp)).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            Text(currentScrollDate, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    }
                 }
             }
         }
 
         when (val dialog = activeDialog) {
-            is PictureUiDialog.TrashConfirm -> AlertDialog(onDismissRequest = { activeDialog = PictureUiDialog.None }, icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Move to Trash?") }, text = { Text("These items will be moved to the Trash. You can restore or permanently delete them from there within 30 days.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { val itemsToTrash = dialog.mediaIds.mapNotNull { mediaMap[it] }; if (itemsToTrash.isNotEmpty()) trashViewModel.confirmPendingGalleryTrash(itemsToTrash) }) { Text("Move to Trash") } }, dismissButton = { TextButton(onClick = { activeDialog = PictureUiDialog.None }) { Text("Cancel") } })
+            is PictureUiDialog.TrashConfirm -> {
+                AlertDialog(
+                    onDismissRequest = { activeDialog = PictureUiDialog.None },
+                    icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    title = { Text("Move to Trash?") },
+                    text = { Text("These items will be moved to the Trash. You can restore or permanently delete them from there within 30 days.") },
+                    confirmButton = {
+                        Button(
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            onClick = {
+                                val itemsToTrash = dialog.mediaIds.mapNotNull { mediaMap[it] }
+                                if (itemsToTrash.isNotEmpty()) trashViewModel.confirmPendingGalleryTrash(itemsToTrash)
+                            }
+                        ) { Text("Move to Trash") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { activeDialog = PictureUiDialog.None }) { Text("Cancel") }
+                    }
+                )
+            }
             is PictureUiDialog.QuickAction -> {
-                val item = dialog.item; val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true); var showMoreExpanded by remember { mutableStateOf(false) }
-                ModalBottomSheet(onDismissRequest = { activeDialog = PictureUiDialog.None }, sheetState = sheetState, containerColor = MaterialTheme.colorScheme.surface) {
+                val item = dialog.item
+                val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                var showMoreExpanded by remember { mutableStateOf(false) }
+
+                ModalBottomSheet(
+                    onDismissRequest = { activeDialog = PictureUiDialog.None },
+                    sheetState = sheetState,
+                    containerColor = MaterialTheme.colorScheme.surface
+                ) {
                     Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp).padding(bottom = 24.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) { Column { Text(getSmartName(item), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis); Text(getFolderName(item.path), color = Color.Gray, style = MaterialTheme.typography.bodySmall) } }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column {
+                                Text(getSmartName(item), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(getFolderName(item.path), color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                         Spacer(Modifier.height(24.dp))
                         LazyRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                             item { ActionItem(Icons.Outlined.Edit, "Edit") { activeDialog = PictureUiDialog.None; onNavigateToEditor(item.uri.toString(), item.id) } }
@@ -244,7 +474,17 @@ fun PictureScreen(
                             item { ActionItem(Icons.Outlined.Delete, "Delete", isDestructive = true) { activeDialog = PictureUiDialog.TrashConfirm(listOf(item.id)) } }
                             item { ActionItem(Icons.Default.MoreVert, "More") { showMoreExpanded = true } }
                         }
-                        AnimatedVisibility(visible = showMoreExpanded) { Column(Modifier.padding(top = 16.dp)) { HorizontalDivider(Modifier.padding(vertical = 8.dp)); ListItem(headlineContent = { Text("Details", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.Info, null) }, modifier = Modifier.clickable { activeDialog = PictureUiDialog.None; activeDialog = PictureUiDialog.MetadataInfo(item) }); ListItem(headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) }, modifier = Modifier.clickable { activeDialog = PictureUiDialog.None; onNavigateToMoveCopy("MOVE", item.id.toString(), null) }); ListItem(headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.FileCopy, null) }, modifier = Modifier.clickable { activeDialog = PictureUiDialog.None; onNavigateToMoveCopy("COPY", item.id.toString(), null) }); ListItem(headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.Wallpaper, null) }, modifier = Modifier.clickable { activeDialog = PictureUiDialog.None; onNavigateToWallpaper(item.uri.toString(), item.id) }) } }
+                        AnimatedVisibility(visible = showMoreExpanded) {
+                            Column(Modifier.padding(top = 16.dp)) {
+                                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                                ListItem(headlineContent = { Text("Details", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.Info, null) }, modifier = Modifier.clickable { activeDialog = PictureUiDialog.None; activeDialog = PictureUiDialog.MetadataInfo(item) })
+                                ListItem(headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) }, modifier = Modifier.clickable { activeDialog = PictureUiDialog.None; onNavigateToMoveCopy("MOVE", item.id.toString(), null) })
+                                ListItem(headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.FileCopy, null) }, modifier = Modifier.clickable { activeDialog = PictureUiDialog.None; onNavigateToMoveCopy("COPY", item.id.toString(), null) })
+                                if (!item.isDocument && !item.isVideo) {
+                                    ListItem(headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.Wallpaper, null) }, modifier = Modifier.clickable { activeDialog = PictureUiDialog.None; onNavigateToWallpaper(item.uri.toString(), item.id) })
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -254,7 +494,6 @@ fun PictureScreen(
             PictureUiDialog.None -> {}
         }
 
-        // VIEWER OVERLAY
         AnimatedVisibility(visible = viewerState is GalleryViewerState.Open, enter = fadeIn(tween(200)), exit = fadeOut(tween(200))) {
             if (currentItem?.isDocument == true) {
                 LaunchedEffect(currentItem.id) {
@@ -267,21 +506,19 @@ fun PictureScreen(
                     .map { mediaMap[it.item.id] ?: it.item }
                     .filter { !it.isDocument }
 
-                // FIX 5: Calculate reliable start index
                 val stableStartIndex = stableMediaList.indexOfFirst {
                     it.id == currentItem.id
                 }.coerceAtLeast(0)
 
-                // FIX 1: Wrapping Pager in key block to recreate state on a new session
                 key(currentItem.id) {
                     FullscreenMediaPager(
                         initialIndex = stableStartIndex,
                         mediaList = stableMediaList,
-                        mediaMap = mediaMap,
-                        sharedPlayer = viewModel.getPlayer(), // FIX 2: Passing shared player
+                        favorites = favorites,
+                        sharedPlayer = viewModel.getPlayer(),
                         onClose = { viewModel.closeViewer() },
                         onEdit = { item -> viewModel.closeViewer(); onNavigateToEditor(item.uri.toString(), item.id) },
-                        onDelete = { item: MediaItem -> activeDialog = PictureUiDialog.TrashConfirm(listOf(item.id)) },
+                        onDelete = { item -> activeDialog = PictureUiDialog.TrashConfirm(listOf(item.id)) },
                         onNavigateToDocViewer = { id -> viewModel.closeViewer(); onNavigateToDocViewer(id) },
                         onNavigateToVideoPlayer = { uri ->
                             viewModel.closeViewer()
@@ -290,7 +527,9 @@ fun PictureScreen(
                         },
                         onMove = { item -> viewModel.closeViewer(); onNavigateToMoveCopy("MOVE", item.id.toString(), null) },
                         onCopy = { item -> viewModel.closeViewer(); onNavigateToMoveCopy("COPY", item.id.toString(), null) },
-                        onWallpaper = { item -> viewModel.closeViewer(); onNavigateToWallpaper(item.uri.toString(), item.id) }
+                        onWallpaper = { item -> viewModel.closeViewer(); onNavigateToWallpaper(item.uri.toString(), item.id) },
+                        onToggleFavorite = { id -> viewModel.toggleFavorite(id) },
+                        onShowDetails = { item -> activeDialog = PictureUiDialog.MetadataInfo(item) }
                     )
                 }
             }
@@ -298,13 +537,106 @@ fun PictureScreen(
     }
 }
 
-// --- Viewers ---
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ModernMediaGridTile(
+    modifier: Modifier = Modifier,
+    item: MediaItem,
+    thumbSize: Int,
+    isSelected: Boolean,
+    isSelectionMode: Boolean,
+    isScrolling: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    val cornerRadius = if (isScrolling) { if (isSelected) 16.dp else 12.dp } else { animateDpAsState(targetValue = if (isSelected) 16.dp else 12.dp, label = "cornerRadius").value }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val targetScale = when { isPressed -> 0.96f; isSelected -> 0.92f; else -> 1f }
+    val scale = if (isScrolling) targetScale else animateFloatAsState(targetValue = targetScale, animationSpec = spring(stiffness = 400f), label = "tileScale").value
+
+    Box(
+        modifier = modifier.fillMaxWidth().aspectRatio(1f).graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+            clip = true
+            shape = RoundedCornerShape(cornerRadius)
+        }.combinedClickable(
+            interactionSource = interactionSource,
+            indication = androidx.compose.material3.ripple(),
+            onClick = onClick,
+            onLongClick = onLongClick
+        )
+    ) {
+        if (item.isDocument) {
+            val ext = item.name.substringAfterLast('.', "").uppercase(Locale.ROOT)
+            val tintColor = when (ext) {
+                "PDF" -> Color(0xFFE53935)
+                "DOC", "DOCX" -> Color(0xFF1E88E5)
+                "XLS", "XLSX", "CSV" -> Color(0xFF43A047)
+                "PPT", "PPTX" -> Color(0xFFFFB300)
+                "TXT", "JSON", "XML", "HTML", "MD" -> Color(0xFF757575)
+                "KT", "JAVA", "CPP", "C", "H", "PY", "JS", "TS", "CSS", "PHP", "SQL", "SH" -> Color(0xFF00897B)
+                else -> MaterialTheme.colorScheme.primary
+            }
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.size(74.dp).clip(CircleShape).background(tintColor.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.InsertDriveFile, null, tint = tintColor, modifier = Modifier.size(36.dp))
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text("Document", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (ext.isNotEmpty()) {
+                Box(Modifier.align(Alignment.TopStart).padding(8.dp).background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 3.dp)) {
+                    Text(text = ext, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+                }
+            }
+        } else {
+            val requestBuilder = ImageRequest.Builder(LocalContext.current)
+                .data(item.uri)
+                .size(thumbSize)
+                .allowRgb565(true)
+                .bitmapConfig(Bitmap.Config.RGB_565)
+                .memoryCacheKey("thumb_${item.id}")
+                .diskCacheKey("thumb_${item.id}")
+                .networkCachePolicy(CachePolicy.ENABLED)
+                .memoryCachePolicy(CachePolicy.ENABLED)
+                .diskCachePolicy(CachePolicy.ENABLED)
+                .precision(Precision.INEXACT)
+                .allowHardware(!item.isVideo)
+                .crossfade(false)
+                .error(android.R.drawable.ic_menu_report_image)
+                .fallback(android.R.drawable.ic_menu_report_image)
+                .apply { if (item.isVideo) decoderFactory(coil.decode.VideoFrameDecoder.Factory()) }
+
+            AsyncImage(
+                model = requestBuilder.build(),
+                placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceContainerHigh),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.Low,
+                modifier = Modifier.fillMaxSize(),
+                onError = { state -> Log.e("GalleryBox", "GridTile error: ${item.uri}", state.result.throwable) }
+            )
+        }
+        if (!item.isDocument && item.isVideo) {
+            Box(Modifier.fillMaxSize().drawWithCache { val brush = Brush.verticalGradient(0.5f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.75f)); onDrawBehind { drawRect(brush) } })
+            Surface(modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp), shape = RoundedCornerShape(8.dp), color = Color.Black.copy(alpha = 0.6f)) {
+                Text("▶ ${formatDuration(item.duration)}", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+            }
+        }
+        SelectionOverlay(isSelected, isSelectionMode, cornerRadius)
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun FullscreenMediaPager(
     initialIndex: Int,
     mediaList: List<MediaItem>,
-    mediaMap: Map<Long, MediaItem>,
+    favorites: List<Long>,
     sharedPlayer: Player,
     onClose: () -> Unit,
     onEdit: (MediaItem) -> Unit,
@@ -313,23 +645,21 @@ fun FullscreenMediaPager(
     onNavigateToVideoPlayer: (String) -> Unit,
     onMove: (MediaItem) -> Unit,
     onCopy: (MediaItem) -> Unit,
-    onWallpaper: (MediaItem) -> Unit
+    onWallpaper: (MediaItem) -> Unit,
+    onToggleFavorite: (Long) -> Unit,
+    onShowDetails: (MediaItem) -> Unit
 ) {
     if (mediaList.isEmpty()) return
     val context = LocalContext.current
     val view = LocalView.current
     val pagerState = rememberPagerState(initialPage = initialIndex, pageCount = { mediaList.size })
     var showControls by remember { mutableStateOf(true) }
-    var showMetadataSheet by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
 
     val activity = remember { context.findActivity() }
     val zoomedPages = remember { mutableStateMapOf<Int, Boolean>() }
     val isCurrentPageZoomed = zoomedPages[pagerState.currentPage] ?: false
 
-    var currentRotation by remember(pagerState.currentPage) { mutableFloatStateOf(0f) }
-
-    // FIX 1: Sync pager strictly to initialIndex
     LaunchedEffect(initialIndex, mediaList.size) {
         if (pagerState.currentPage != initialIndex && initialIndex in mediaList.indices) {
             pagerState.scrollToPage(initialIndex)
@@ -356,14 +686,13 @@ fun FullscreenMediaPager(
     BackHandler(enabled = !showControls) { showControls = true }
     BackHandler(enabled = showControls) { onClose() }
 
-    val currentPageId = mediaList.getOrNull(pagerState.currentPage)?.id
-    LaunchedEffect(currentPageId) { if (currentPageId == null && mediaList.isNotEmpty()) { onClose() } }
-    val liveCurrentItem = currentPageId?.let { mediaMap[it] }
+    val currentItem = mediaList.getOrNull(pagerState.currentPage)
+    LaunchedEffect(currentItem) { if (currentItem == null && mediaList.isNotEmpty()) onClose() }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         HorizontalPager(
             state = pagerState,
-            pageSpacing = 20.dp,
+            pageSpacing = 16.dp,
             userScrollEnabled = !isCurrentPageZoomed,
             key = { index -> mediaList[index].id },
             modifier = Modifier.fillMaxSize()
@@ -381,85 +710,284 @@ fun FullscreenMediaPager(
                         onPlay = { onNavigateToVideoPlayer(item.uri.toString()) }
                     )
                 }
-                else -> ZoomableImagePage(
+                else -> SamsungZoomableImage(
                     item = item,
-                    mediaRotation = if (pagerState.currentPage == page) currentRotation else 0f,
                     onTap = { showControls = !showControls },
                     onDismiss = onClose,
-                    onZoomChanged = { isZoomed -> zoomedPages[page] = isZoomed },
-                    onControlsVisibilityChange = { visible -> showControls = visible }
+                    onZoomChanged = { isZoomed -> zoomedPages[page] = isZoomed }
                 )
             }
         }
 
-        val topGradientBrush = remember { Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent)) }
-        val bottomGradientBrush = remember { Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))) }
-
-        AnimatedVisibility(visible = showControls, modifier = Modifier.align(Alignment.TopCenter), enter = fadeIn(), exit = fadeOut()) {
-            Box(Modifier.fillMaxWidth().background(topGradientBrush).statusBarsPadding().padding(horizontal = 18.dp, vertical = 16.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        AnimatedVisibility(visible = showControls, modifier = Modifier.align(Alignment.TopCenter), enter = fadeIn(tween(150)), exit = fadeOut(tween(150))) {
+            Box(Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.5f), Color.Transparent))).statusBarsPadding()) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onClose) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                     }
-                    Row {
-                        IconButton(onClick = { currentRotation += 90f }) {
-                            Icon(Icons.Rounded.ScreenRotation, contentDescription = "Rotate", tint = Color.White)
+
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                        currentItem?.let { item ->
+                            Text(
+                                text = item.name,
+                                color = Color.White,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = topBarFormatter.format(Date(item.dateAdded * 1000)),
+                                color = Color.White.copy(alpha = 0.7f),
+                                style = MaterialTheme.typography.labelSmall
+                            )
                         }
-                        IconButton(onClick = { showControls = false }) {
-                            Icon(Icons.Rounded.Visibility, contentDescription = "Hide Controls", tint = Color.White)
-                        }
+                    }
+
+                    IconButton(onClick = { showMoreMenu = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "More", tint = Color.White)
                     }
                 }
             }
         }
 
-        AnimatedVisibility(visible = showControls, modifier = Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            val currentItem = liveCurrentItem ?: return@AnimatedVisibility
-            var isFavorite by remember(currentItem.id) { mutableStateOf(false) }
+        AnimatedVisibility(visible = showControls, modifier = Modifier.align(Alignment.BottomCenter), enter = fadeIn(tween(150)), exit = fadeOut(tween(150))) {
+            Column(Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)))).navigationBarsPadding()) {
 
-            Column(Modifier.fillMaxWidth().background(bottomGradientBrush).navigationBarsPadding().padding(bottom = 18.dp)) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    PremiumViewerAction(
-                        icon = if (isFavorite) Icons.Default.Favorite else Icons.Outlined.FavoriteBorder,
-                        label = "Fav",
-                        showLabel = false
-                    ) {
-                        isFavorite = !isFavorite
+                Text(
+                    text = "${pagerState.currentPage + 1} / ${mediaList.size}",
+                    color = Color.White.copy(alpha = 0.8f),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 12.dp)
+                )
+
+                val listState = rememberLazyListState(initialFirstVisibleItemIndex = maxOf(0, pagerState.currentPage - 3))
+                val coroutineScope = rememberCoroutineScope()
+
+                LaunchedEffect(pagerState.currentPage) {
+                    coroutineScope.launch {
+                        listState.animateScrollToItem(maxOf(0, pagerState.currentPage - 3))
                     }
-                    PremiumViewerAction(icon = Icons.Outlined.Edit, label = "Edit", showLabel = false) {
-                        onEdit(currentItem)
+                }
+
+                LazyRow(
+                    state = listState,
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.fillMaxWidth().height(48.dp).padding(bottom = 8.dp)
+                ) {
+                    itemsIndexed(mediaList) { index, item ->
+                        val isSelected = index == pagerState.currentPage
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .border(if (isSelected) 2.dp else 0.dp, if (isSelected) Color.White else Color.Transparent, RoundedCornerShape(4.dp))
+                                .clickable {
+                                    coroutineScope.launch { pagerState.animateScrollToPage(index) }
+                                }
+                        ) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context).data(item.uri).size(150).allowHardware(true).build(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = if (isSelected) 1f else 0.5f }
+                            )
+                        }
                     }
-                    PremiumViewerAction(icon = Icons.Outlined.Share, label = "Share", showLabel = false) {
-                        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                            type = if (currentItem.isVideo) "video/*" else "image/*"
-                            putExtra(Intent.EXTRA_STREAM, currentItem.uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }, "Share Media"))
-                    }
-                    PremiumViewerAction(icon = Icons.Outlined.Delete, label = "Delete", tint = Color.Red, showLabel = false) {
-                        onDelete(currentItem)
-                    }
-                    PremiumViewerAction(icon = Icons.Default.MoreVert, label = "More", showLabel = false) {
-                        showMoreMenu = true
+                }
+
+                currentItem?.let { item ->
+                    val isFavorite = favorites.contains(item.id)
+                    Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { onToggleFavorite(item.id) }) {
+                            Icon(if (isFavorite) Icons.Default.Favorite else Icons.Outlined.FavoriteBorder, contentDescription = "Favorite", tint = if (isFavorite) Color.Red else Color.White)
+                        }
+                        IconButton(onClick = {
+                            context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                                type = if (item.isVideo) "video/*" else "image/*"
+                                putExtra(Intent.EXTRA_STREAM, item.uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }, "Share Media"))
+                        }) {
+                            Icon(Icons.Outlined.Share, contentDescription = "Share", tint = Color.White)
+                        }
+                        IconButton(onClick = { onEdit(item) }) {
+                            Icon(Icons.Outlined.Edit, contentDescription = "Edit", tint = Color.White)
+                        }
+                        IconButton(onClick = { onDelete(item) }) {
+                            Icon(Icons.Outlined.Delete, contentDescription = "Delete", tint = Color.White)
+                        }
                     }
                 }
             }
         }
     }
 
-    if (showMetadataSheet) liveCurrentItem?.let { MediaMetadataSheet(item = it) { showMetadataSheet = false } }
     if (showMoreMenu) {
-        val currentItem = liveCurrentItem ?: return
-        ModalBottomSheet(onDismissRequest = { showMoreMenu = false }, containerColor = MaterialTheme.colorScheme.surface) {
-            Column(Modifier.padding(bottom = 32.dp)) {
-                ListItem(headlineContent = { Text("Details", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.Info, null) }, modifier = Modifier.clickable { showMoreMenu = false; showMetadataSheet = true })
-                ListItem(headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) }, modifier = Modifier.clickable { showMoreMenu = false; onMove(currentItem) })
-                ListItem(headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.FileCopy, null) }, modifier = Modifier.clickable { showMoreMenu = false; onCopy(currentItem) })
-                if (!currentItem.isDocument && !currentItem.isVideo) { ListItem(headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.Wallpaper, null) }, modifier = Modifier.clickable { showMoreMenu = false; onWallpaper(currentItem) }) }
+        currentItem?.let { item ->
+            ModalBottomSheet(onDismissRequest = { showMoreMenu = false }, containerColor = MaterialTheme.colorScheme.surface) {
+                Column(Modifier.padding(bottom = 32.dp)) {
+                    ListItem(headlineContent = { Text("Details", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.Info, null) }, modifier = Modifier.clickable { showMoreMenu = false; onShowDetails(item) })
+                    ListItem(headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) }, modifier = Modifier.clickable { showMoreMenu = false; onMove(item) })
+                    ListItem(headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.FileCopy, null) }, modifier = Modifier.clickable { showMoreMenu = false; onCopy(item) })
+                    if (!item.isDocument && !item.isVideo) {
+                        ListItem(headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Outlined.Wallpaper, null) }, modifier = Modifier.clickable { showMoreMenu = false; onWallpaper(item) })
+                    }
+                }
             }
         }
     }
 }
+
+@Composable
+fun SamsungZoomableImage(
+    item: MediaItem,
+    onTap: () -> Unit,
+    onDismiss: () -> Unit,
+    onZoomChanged: (Boolean) -> Unit
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+
+    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    val wPx = with(density) { screenWidth.toPx() }
+    val hPx = with(density) { screenHeight.toPx() }
+
+    val dismissThreshold = hPx * 0.25f
+
+    val scale = remember { Animatable(1f) }
+    val offsetX = remember { Animatable(0f) }
+    val offsetY = remember { Animatable(0f) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(scale.value) { onZoomChanged(scale.value > 1.05f) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = (1f - (abs(dragOffsetY) / 850f)).coerceIn(0.2f, 1f)))
+            .offset { IntOffset(0, dragOffsetY.roundToInt()) }
+            .graphicsLayer {
+                val dismissScale = 1f - (abs(dragOffsetY) / 2500f)
+                scaleX = scale.value * dismissScale
+                scaleY = scaleX
+                translationX = offsetX.value
+                translationY = offsetY.value
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onDoubleTap = { tapOffset ->
+                        scope.launch {
+                            val currentScale = scale.value
+                            if (currentScale > 1.5f) {
+                                launch { offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
+                                launch { offsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
+                                launch { scale.animateTo(1f, spring(stiffness = Spring.StiffnessMediumLow)) }
+                            } else {
+                                val targetScale = 3f
+                                val targetX = -(tapOffset.x - wPx / 2) * (targetScale - 1)
+                                val targetY = -(tapOffset.y - hPx / 2) * (targetScale - 1)
+
+                                val limitX = ((wPx * targetScale - wPx) / 2f).coerceAtLeast(0f)
+                                val limitY = ((hPx * targetScale - hPx) / 2f).coerceAtLeast(0f)
+
+                                launch { offsetX.animateTo(targetX.coerceIn(-limitX, limitX), spring(stiffness = Spring.StiffnessMediumLow)) }
+                                launch { offsetY.animateTo(targetY.coerceIn(-limitY, limitY), spring(stiffness = Spring.StiffnessMediumLow)) }
+                                launch { scale.animateTo(targetScale, spring(stiffness = Spring.StiffnessMediumLow)) }
+                            }
+                        }
+                    }
+                )
+            }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var lastDragAmount = Offset.Zero
+
+                    do {
+                        val event = awaitPointerEvent()
+                        val zoom = event.calculateZoom()
+                        val pan = event.calculatePan()
+
+                        scope.launch {
+                            scale.snapTo((scale.value * zoom).coerceIn(1f, 5f))
+                        }
+
+                        if (scale.value > 1.05f) {
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+
+                            val limitX = ((wPx * scale.value - wPx) / 2f).coerceAtLeast(0f)
+                            val limitY = ((hPx * scale.value - hPx) / 2f).coerceAtLeast(0f)
+
+                            var nextX = offsetX.value + pan.x
+                            var nextY = offsetY.value + pan.y
+
+                            if (nextX > limitX) nextX = limitX + (nextX - limitX) * 0.3f
+                            else if (nextX < -limitX) nextX = -limitX + (nextX + limitX) * 0.3f
+
+                            if (nextY > limitY) nextY = limitY + (nextY - limitY) * 0.3f
+                            else if (nextY < -limitY) nextY = -limitY + (nextY + limitY) * 0.3f
+
+                            scope.launch {
+                                offsetX.snapTo(nextX)
+                                offsetY.snapTo(nextY)
+                            }
+                            dragOffsetY = 0f
+                            lastDragAmount = pan
+                        } else {
+                            val isVerticalDrag = abs(pan.y) > abs(pan.x)
+                            if (isVerticalDrag && event.changes.size == 1) {
+                                dragOffsetY += pan.y
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+
+                    if (scale.value <= 1.05f) {
+                        if (abs(dragOffsetY) > dismissThreshold) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onDismiss()
+                        } else {
+                            dragOffsetY = 0f
+                        }
+                    } else {
+                        scope.launch {
+                            val limitX = ((wPx * scale.value - wPx) / 2f).coerceAtLeast(0f)
+                            val limitY = ((hPx * scale.value - hPx) / 2f).coerceAtLeast(0f)
+
+                            val targetX = (offsetX.value + lastDragAmount.x * 10).coerceIn(-limitX, limitX)
+                            val targetY = (offsetX.value + lastDragAmount.y * 10).coerceIn(-limitY, limitY)
+
+                            launch { offsetX.animateTo(targetX, spring(dampingRatio = 0.8f, stiffness = 400f)) }
+                            launch { offsetY.animateTo(targetY, spring(dampingRatio = 0.8f, stiffness = 400f)) }
+                        }
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(item.uri)
+                .allowHardware(true)
+                .precision(Precision.INEXACT)
+                .networkCachePolicy(CachePolicy.ENABLED)
+                .memoryCachePolicy(CachePolicy.ENABLED)
+                .crossfade(true)
+                .build(),
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -473,7 +1001,6 @@ fun VideoPreviewPage(
 ) {
     var muted by rememberSaveable(item.id) { mutableStateOf(true) }
 
-    // FIX 4: Only prepare and set item when item id changes inside LaunchedEffect
     LaunchedEffect(item.id) {
         sharedPlayer.setMediaItem(Media3Item.fromUri(item.uri))
         sharedPlayer.prepare()
@@ -489,7 +1016,6 @@ fun VideoPreviewPage(
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // FIX 3: Reusing PlayerView via update instead of recreating
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
@@ -504,105 +1030,18 @@ fun VideoPreviewPage(
             modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onTap = { onTap() }) }
         )
 
-        AnimatedVisibility(visible = showControls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
-            Box(modifier = Modifier.fillMaxWidth().padding(bottom = 90.dp)) {
-                Surface(
-                    modifier = Modifier.align(Alignment.Center),
-                    shape = RoundedCornerShape(50),
-                    color = Color.Black.copy(alpha = 0.45f)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .clickable { onPlay() }
-                            .padding(horizontal = 18.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.PlayArrow, null, tint = Color.White)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Play video", color = Color.White)
-                    }
-                }
-
-                FilledIconButton(
-                    onClick = { muted = !muted },
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .padding(end = 20.dp)
-                        .size(32.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.Black.copy(alpha = 0.55f))
-                ) {
-                    Icon(if (muted) Icons.Default.VolumeOff else Icons.Default.VolumeUp, "Toggle Volume", tint = Color.White, modifier = Modifier.size(18.dp))
+        AnimatedVisibility(visible = showControls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
+            Surface(
+                modifier = Modifier.size(72.dp),
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.5f),
+                onClick = onPlay
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(40.dp))
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun PremiumViewerAction(
-    icon: ImageVector,
-    label: String,
-    tint: Color = Color.White,
-    showLabel: Boolean = true,
-    onClick: () -> Unit
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Surface(
-            modifier = Modifier.size(58.dp).clip(CircleShape).clickable(onClick = onClick),
-            shape = CircleShape,
-            color = Color.White.copy(alpha = 0.12f),
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(24.dp))
-            }
-        }
-        if (showLabel) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(text = label, color = Color.White, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun ModernMediaGridTile(modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, isScrolling: Boolean, onClick: () -> Unit, onLongClick: () -> Unit){
-    val cornerRadius = if (isScrolling) { if (isSelected) 16.dp else 12.dp } else { animateDpAsState(targetValue = if (isSelected) 16.dp else 12.dp, label = "cornerRadius").value }
-    val interactionSource = remember { MutableInteractionSource() }; val isPressed by interactionSource.collectIsPressedAsState(); val targetScale = when { isPressed -> 0.96f; isSelected -> 0.92f; else -> 1f }; val scale = if (isScrolling) targetScale else animateFloatAsState(targetValue = targetScale, animationSpec = spring(stiffness = 400f), label = "tileScale").value
-    Box(modifier = modifier.fillMaxWidth().aspectRatio(1f).graphicsLayer { scaleX = scale; scaleY = scale; clip = true; shape = RoundedCornerShape(cornerRadius) }.combinedClickable(interactionSource = interactionSource, indication = androidx.compose.material3.ripple(), onClick = onClick, onLongClick = onLongClick)) {
-        if (item.isDocument) {
-            val ext = item.name.substringAfterLast('.', "").uppercase(Locale.ROOT)
-            val tintColor = when (ext) {
-                "PDF" -> Color(0xFFE53935)
-                "DOC", "DOCX" -> Color(0xFF1E88E5)
-                "XLS", "XLSX", "CSV" -> Color(0xFF43A047)
-                "PPT", "PPTX" -> Color(0xFFFFB300)
-                "TXT", "JSON", "XML", "HTML", "MD" -> Color(0xFF757575)
-                "KT", "JAVA", "CPP", "C", "H", "PY", "JS", "TS", "CSS", "PHP", "SQL", "SH" -> Color(0xFF00897B)
-                else -> MaterialTheme.colorScheme.primary
-            }
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Box(Modifier.size(74.dp).clip(CircleShape).background(tintColor.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.InsertDriveFile, null, tint = tintColor, modifier = Modifier.size(36.dp)) }; Spacer(Modifier.height(10.dp)); Text("Document", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
-            if (ext.isNotEmpty()) { Box(Modifier.align(Alignment.TopStart).padding(8.dp).background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 3.dp)) { Text(text = ext, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold) } }
-        } else {
-            val requestBuilder = ImageRequest.Builder(LocalContext.current).data(item.uri).size(thumbSize).allowRgb565(true).bitmapConfig(Bitmap.Config.RGB_565).memoryCacheKey("thumb_${item.id}").diskCacheKey("thumb_${item.id}").networkCachePolicy(CachePolicy.ENABLED).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).precision(Precision.INEXACT).allowHardware(!item.isVideo).crossfade(false).error(android.R.drawable.ic_menu_report_image).fallback(android.R.drawable.ic_menu_report_image).apply { if (item.isVideo) decoderFactory(coil.decode.VideoFrameDecoder.Factory()) }
-            AsyncImage(model = requestBuilder.build(), placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceContainerHigh), contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low, modifier = Modifier.fillMaxSize(), onError = { state -> Log.e("GalleryBox", "GridTile error: ${item.uri}", state.result.throwable) })
-        }
-        if (!item.isDocument && item.isVideo) {
-            Box(Modifier.fillMaxSize().drawWithCache { val brush = Brush.verticalGradient(0.5f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.75f)); onDrawBehind { drawRect(brush) } })
-            Surface(modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp), shape = RoundedCornerShape(8.dp), color = Color.Black.copy(alpha = 0.6f)) { Text("▶ ${formatDuration(item.duration)}", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)) }
-        }
-        SelectionOverlay(isSelected, isSelectionMode, cornerRadius)
-    }
-}
-
-@Composable
-fun ZoomableImagePage(item: MediaItem, mediaRotation: Float = 0f, onTap: () -> Unit, onDismiss: () -> Unit, onZoomChanged: (Boolean) -> Unit, onControlsVisibilityChange: (Boolean) -> Unit) {
-    val context = LocalContext.current; val density = LocalDensity.current; val haptic = LocalHapticFeedback.current; val scope = rememberCoroutineScope(); val screenHeight = LocalConfiguration.current.screenHeightDp.dp; val dismissThreshold = remember { with(density) { screenHeight.toPx() * 0.25f } }
-    val scale = remember { Animatable(1f) }; var offset by remember { mutableStateOf(Offset.Zero) }; var dragOffsetY by remember { mutableFloatStateOf(0f) }; var backgroundAlpha by remember { mutableFloatStateOf(1f) }
-    LaunchedEffect(scale.value) { onZoomChanged(scale.value > 1.05f) }
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = backgroundAlpha)).offset { IntOffset(0, dragOffsetY.roundToInt()) }.graphicsLayer { val dismissScale = 1f - (abs(dragOffsetY) / 2200f); scaleX = scale.value * dismissScale; scaleY = scaleX; alpha = (1f - (abs(dragOffsetY) / 850f)).coerceIn(0f, 1f); translationX = offset.x; translationY = offset.y; rotationZ = mediaRotation }.pointerInput(Unit) { detectTapGestures(onTap = { onTap() }, onDoubleTap = { scope.launch { val currentScale = scale.value; val target = when { currentScale < 1.5f -> 2.5f; currentScale < 3.5f -> 4f; else -> 1f }; scale.animateTo(target, spring(stiffness = Spring.StiffnessLow)) }; offset = Offset.Zero }, onLongPress = { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }) }.pointerInput(Unit) { awaitEachGesture { awaitFirstDown(requireUnconsumed = false); do { val event = awaitPointerEvent(); val zoom = event.calculateZoom(); val pan = event.calculatePan(); scope.launch { scale.snapTo((scale.value * zoom).coerceIn(1f, 4f)) }; if (scale.value > 1.05f) { event.changes.forEach { if (it.positionChanged()) it.consume() }; val maxX = (size.width * (scale.value - 1)) / 2f; val maxY = (size.height * (scale.value - 1)) / 2f; offset = Offset(x = (offset.x + pan.x).coerceIn(-maxX, maxX), y = (offset.y + pan.y).coerceIn(-maxY, maxY)); dragOffsetY = 0f } else { offset = Offset.Zero; val isVerticalDrag = abs(pan.y) > abs(pan.x); if (isVerticalDrag && event.changes.size == 1) { dragOffsetY += pan.y; backgroundAlpha = (1f - abs(dragOffsetY) / 900f).coerceIn(0.35f, 1f); if (abs(dragOffsetY) > 50f) onControlsVisibilityChange(false); event.changes.forEach { if (it.positionChanged()) it.consume() } } } } while (event.changes.any { it.pressed }); if (scale.value <= 1.05f) { if (abs(dragOffsetY) > dismissThreshold) { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onDismiss() } else { dragOffsetY = 0f; backgroundAlpha = 1f } } } }, contentAlignment = Alignment.Center) {
-        val requestBuilder = ImageRequest.Builder(context).data(item.uri).allowHardware(true).precision(Precision.INEXACT).networkCachePolicy(CachePolicy.ENABLED).memoryCachePolicy(CachePolicy.ENABLED).crossfade(true).error(android.R.drawable.ic_menu_report_image)
-        AsyncImage(model = requestBuilder.build(), placeholder = ColorPainter(Color.Black), contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
     }
 }
 
@@ -611,7 +1050,38 @@ fun DocumentPage(item: MediaItem, onNavigateToDocViewer: (Long) -> Unit) { Box(M
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) { val context = LocalContext.current; val dateStr = remember(item) { metadataFormatter.format(Date(item.dateAdded * 1000)) }; val formattedSize = remember(item) { Formatter.formatFileSize(context, item.size) }; ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { Box(Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f))) }) { Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 34.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(58.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.Info, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp)) }; Spacer(Modifier.width(16.dp)); Column { Text("Media Details", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text("Information & metadata", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } }; Spacer(Modifier.height(28.dp)); Surface(shape = RoundedCornerShape(30.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) { Column(Modifier.padding(18.dp)) { MetadataRow(Icons.Outlined.Title, "Name", item.name); MetadataRow(Icons.Outlined.Folder, "Path", item.path); MetadataRow(Icons.Outlined.CalendarToday, "Date", dateStr); MetadataRow(Icons.Outlined.Storage, "Size", formattedSize); if (item.width > 0 && item.height > 0) MetadataRow(Icons.Outlined.AspectRatio, "Resolution", "${item.width} × ${item.height}"); if (item.isVideo && item.duration > 0L) MetadataRow(Icons.Outlined.Timer, "Duration", formatDuration(item.duration)) } } } } }
+fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val dateStr = remember(item) { metadataFormatter.format(Date(item.dateAdded * 1000)) }
+    val formattedSize = remember(item) { Formatter.formatFileSize(context, item.size) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { Box(Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f))) }) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 34.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(58.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.Info, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text("Media Details", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Information & metadata", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Spacer(Modifier.height(28.dp))
+            Surface(shape = RoundedCornerShape(30.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                Column(Modifier.padding(18.dp)) {
+                    MetadataRow(Icons.Outlined.Title, "Name", item.name)
+                    MetadataRow(Icons.Outlined.Folder, "Path", item.path)
+                    MetadataRow(Icons.Outlined.CalendarToday, "Date", dateStr)
+                    MetadataRow(Icons.Outlined.Storage, "Size", formattedSize)
+                    if (item.width > 0 && item.height > 0) MetadataRow(Icons.Outlined.AspectRatio, "Resolution", "${item.width} × ${item.height}")
+                    if (item.isVideo && item.duration > 0L) MetadataRow(Icons.Outlined.Timer, "Duration", formatDuration(item.duration))
+                }
+            }
+        }
+    }
+}
 
 @Composable
 fun MetadataRow(icon: ImageVector, label: String, value: String) { Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalAlignment = Alignment.Top) { Box(Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp)) }; Spacer(Modifier.width(16.dp)); Column(Modifier.weight(1f)) { Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.height(4.dp)); Text(value, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium) } } }
@@ -631,20 +1101,31 @@ fun ModernSortSheet(activeSort: PhotoSort, onDismiss: () -> Unit, onSortSelected
 fun ModernGridSheet(currentColumns: Int, max: Int = 6, onDismiss: () -> Unit, onUpdate: (Int) -> Unit) { var sliderValue by remember { mutableFloatStateOf(currentColumns.toFloat()) }; ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { Box(Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f))) }) { Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 34.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(58.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(Icons.Rounded.GridView, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp)) }; Spacer(Modifier.width(16.dp)); Column { Text("Grid Layout", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text("${sliderValue.toInt()} Columns", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } }; Spacer(Modifier.height(28.dp)); Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(30.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) { Column(Modifier.padding(22.dp)) { repeat(2) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) { repeat(sliderValue.toInt()) { Box(Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))) } }; Spacer(Modifier.height(8.dp)) } } }; Spacer(Modifier.height(28.dp)); Slider(value = sliderValue, onValueChange = { sliderValue = it }, valueRange = 1f..max.toFloat(), steps = (max - 2).coerceAtLeast(0), onValueChangeFinished = { onUpdate(sliderValue.toInt()) }, colors = SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary, inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))); Spacer(Modifier.height(10.dp)); Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("Compact", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant); Text("Comfortable", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } } } }
 
 @Composable
-fun ModernDateHeader(title: String, count: Int, onSelectAllForDate: () -> Unit = {}) { Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 14.dp)) { Text(text = title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onBackground) } }
+fun ModernDateHeader(title: String, count: Int, onSelectAllForDate: () -> Unit = {}) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 24.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground)
+        TextButton(onClick = onSelectAllForDate) {
+            Text("Select All", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernTopBar(title: String, scrollBehavior: TopAppBarScrollBehavior, onSearchClick: () -> Unit, onSelectionClick: () -> Unit, onMenuAction: (String) -> Unit) {
     var showMenu by remember { mutableStateOf(false) }
     CenterAlignedTopAppBar(
-        title = { Text(title, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface) },
+        title = { Text(title, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
         actions = {
             IconButton(onClick = onSearchClick) { Icon(Icons.Outlined.Search, "Search", tint = MaterialTheme.colorScheme.onSurface) }
             IconButton(onClick = onSelectionClick) { Icon(Icons.Outlined.Checklist, "Select", tint = MaterialTheme.colorScheme.onSurface) }
             Box {
                 IconButton(onClick = { showMenu = true }) { Icon(Icons.Rounded.MoreVert, "More", tint = MaterialTheme.colorScheme.onSurface) }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surface)) {
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface)) {
                     PremiumMenuItem("Grid Size", Icons.Rounded.GridView) { onMenuAction("grid"); showMenu = false }
                     PremiumMenuItem("Sort Media", Icons.AutoMirrored.Filled.Sort) { onMenuAction("sort"); showMenu = false }
                     PremiumMenuItem("Slideshow", Icons.Rounded.Slideshow) { onMenuAction("slideshow"); showMenu = false }
@@ -666,20 +1147,279 @@ fun ModernTopBar(title: String, scrollBehavior: TopAppBarScrollBehavior, onSearc
         colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = MaterialTheme.colorScheme.surface)
     )
 }
-
 @Composable
-private fun PremiumMenuItem(text: String, icon: ImageVector, onClick: () -> Unit) { DropdownMenuItem(text = { Text(text, fontWeight = FontWeight.SemiBold) }, onClick = onClick, leadingIcon = { Box(Modifier.size(34.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp)) } }) }
+private fun PremiumMenuItem(
+    text: String,
+    icon: ImageVector,
+    onClick: () -> Unit
+) {
+    DropdownMenuItem(
+        text = {
+            Text(
+                text = text,
+                fontWeight = FontWeight.SemiBold
+            )
+        },
+        onClick = onClick,
+        leadingIcon = {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    )
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit) { Surface(Modifier.fillMaxWidth(), tonalElevation = 6.dp, shadowElevation = 10.dp, color = MaterialTheme.colorScheme.surface) { Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface) }; Spacer(Modifier.width(14.dp)); Surface(Modifier.weight(1f), shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) { Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Rounded.Search, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp)); Spacer(Modifier.width(10.dp)); TextField(value = query, onValueChange = onQueryChange, modifier = Modifier.weight(1f), placeholder = { Text("Search photos, videos...", color = MaterialTheme.colorScheme.onSurfaceVariant) }, singleLine = true, textStyle = MaterialTheme.typography.bodyLarge, colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, disabledContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, focusedTextColor = MaterialTheme.colorScheme.onSurface, unfocusedTextColor = MaterialTheme.colorScheme.onSurface, cursorColor = MaterialTheme.colorScheme.primary)); AnimatedVisibility(visible = query.isNotEmpty()) { IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Close, "Clear", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp)) } } } } } } }
+fun SearchTopBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        tonalElevation = 6.dp,
+        shadowElevation = 10.dp,
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onClose) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Spacer(Modifier.width(14.dp))
+
+            Surface(
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+
+                    Spacer(Modifier.width(10.dp))
+
+                    TextField(
+                        value = query,
+                        onValueChange = onQueryChange,
+                        modifier = Modifier.weight(1f),
+                        placeholder = {
+                            Text(
+                                text = "Search photos, videos...",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyLarge,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            cursorColor = MaterialTheme.colorScheme.primary
+                        )
+                    )
+
+                    AnimatedVisibility(visible = query.isNotEmpty()) {
+                        IconButton(
+                            onClick = { onQueryChange("") },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Clear",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MediaSelectionTopBar(selectedCount: Int, selectedSizeStr: String, totalCount: Int, onClose: () -> Unit, onSelectAll: () -> Unit) { val isAllSelected = selectedCount == totalCount && totalCount > 0; Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.background) { Column(Modifier.fillMaxWidth().statusBarsPadding().padding(vertical = 12.dp)) { Box(Modifier.fillMaxWidth()) { Text("$selectedCount selected", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground, modifier = Modifier.align(Alignment.Center)) }; Spacer(Modifier.height(16.dp)); Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.clip(CircleShape).clickable { onSelectAll() }.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(if (isAllSelected) Icons.Rounded.CheckCircle else Icons.Outlined.RadioButtonUnchecked, null, tint = if (isAllSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp)); Spacer(Modifier.height(4.dp)); Text("All", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface) } } } } }
+fun MediaSelectionTopBar(
+    selectedCount: Int,
+    selectedSizeStr: String,
+    totalCount: Int,
+    onClose: () -> Unit,
+    onSelectAll: () -> Unit
+) {
+    val isAllSelected = selectedCount == totalCount && totalCount > 0
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(vertical = 12.dp)
+        ) {
+            Box(Modifier.fillMaxWidth()) {
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close"
+                    )
+                }
+
+                Text(
+                    text = "$selectedCount selected",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+
+                IconButton(
+                    onClick = onSelectAll,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 8.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isAllSelected) Icons.Rounded.SelectAll else Icons.Outlined.SelectAll,
+                        contentDescription = "Select All",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+    }
+}
 
 @Composable
-fun ModernFilterRow(filters: List<MediaTypeFilter>, selectedIndex: Int, onFilterSelected: (Int) -> Unit) { LazyRow(Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) { itemsIndexed(filters, key = { _, filter -> filter.name }) { index, filter -> val isSelected = selectedIndex == index; val backgroundColor by animateColorAsState(targetValue = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh, label = "filterBg"); val textColor by animateColorAsState(targetValue = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, label = "filterText"); val borderColor by animateColorAsState(targetValue = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else Color.Transparent, label = "filterBorder"); Surface(Modifier.clip(RoundedCornerShape(50)).clickable { onFilterSelected(index) }, shape = RoundedCornerShape(50), color = backgroundColor, border = BorderStroke(1.dp, borderColor), tonalElevation = if (isSelected) 4.dp else 0.dp, shadowElevation = if (isSelected) 3.dp else 0.dp) { Row(Modifier.padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) { AnimatedVisibility(visible = isSelected) { Row { Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary)); Spacer(Modifier.width(8.dp)) } }; Text(filter.label, color = textColor, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold, style = MaterialTheme.typography.labelLarge) } } } } }
+fun ModernFilterRow(
+    filters: List<MediaTypeFilter>,
+    selectedIndex: Int,
+    onFilterSelected: (Int) -> Unit
+) {
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        itemsIndexed(filters, key = { _, filter -> filter.name }) { index, filter ->
+            val isSelected = selectedIndex == index
+
+            val backgroundColor by animateColorAsState(
+                targetValue = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+                label = "filterBg"
+            )
+
+            val textColor by animateColorAsState(
+                targetValue = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                label = "filterText"
+            )
+
+            Surface(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable { onFilterSelected(index) },
+                shape = RoundedCornerShape(16.dp),
+                color = backgroundColor,
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = filter.label,
+                        color = textColor,
+                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                }
+            }
+        }
+    }
+}
 
 @Composable
-fun EmptyMediaOverlay() { Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Box(Modifier.size(112.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(Icons.Outlined.PhotoLibrary, null, modifier = Modifier.size(58.dp), tint = MaterialTheme.colorScheme.primary) }; Spacer(Modifier.height(28.dp)); Text("No Media Found", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface); Spacer(Modifier.height(10.dp)); Text("No images or videos are currently available.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center) } } }
+fun EmptyMediaOverlay() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(112.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.PhotoLibrary,
+                    contentDescription = null,
+                    modifier = Modifier.size(58.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            Spacer(Modifier.height(28.dp))
+
+            Text(
+                text = "No Media Found",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            Text(
+                text = "No images or videos are currently available.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}

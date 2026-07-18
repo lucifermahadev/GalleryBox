@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.gallerybox.viewmodel.RadioViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -82,13 +83,16 @@ fun RadioScreen(viewModel: RadioViewModel, onBack: () -> Unit) {
         currentView = RadioView.TUNER
     }
 
+    // OPTIMIZATION: Use system time for accurate duration recording without incremental drift
     LaunchedEffect(isRecording) {
         if (isRecording) {
-            recordingTime = 0L
-            while (isRecording) {
-                delay(1000)
-                recordingTime += 1000
+            val startTime = System.currentTimeMillis()
+            while (isActive) {
+                recordingTime = System.currentTimeMillis() - startTime
+                delay(1000L)
             }
+        } else {
+            recordingTime = 0L
         }
     }
 
@@ -321,20 +325,25 @@ private fun AdvancedRadioDisplay(
     onFineTuneDown: () -> Unit,
     onFineTuneUp: () -> Unit
 ) {
+    // OPTIMIZATION: Explicitly controlled while-loop to stop animation ticks completely when paused.
     val pulseAnim = remember { Animatable(1f) }
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
-            pulseAnim.animateTo(1.02f, infiniteRepeatable(tween(1500, easing = FastOutSlowInEasing), RepeatMode.Reverse))
+            while (isActive) {
+                pulseAnim.animateTo(1.02f, animationSpec = tween(1500, easing = FastOutSlowInEasing))
+                pulseAnim.animateTo(1f, animationSpec = tween(1500, easing = FastOutSlowInEasing))
+            }
         } else {
-            pulseAnim.snapTo(1f)
+            pulseAnim.animateTo(1f, animationSpec = tween(500, easing = FastOutSlowInEasing))
         }
     }
 
     Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth().scale(pulseAnim.value)) {
+        // OPTIMIZATION: Reduced shadow elevation from 16.dp to 8.dp to prevent GPU rendering lag
         Surface(
             shape = RoundedCornerShape(32.dp),
             color = SurfaceColor,
-            shadowElevation = if (isPlaying) 16.dp else 4.dp,
+            shadowElevation = if (isPlaying) 8.dp else 2.dp,
             border = BorderStroke(1.dp, if (isPlaying) PrimaryColor.copy(alpha = 0.3f) else Color.Transparent),
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
         ) {
@@ -450,7 +459,7 @@ private fun RadioControls(
             Icon(Icons.Rounded.KeyboardDoubleArrowLeft, "Scan Previous", tint = TextPrimary)
         }
 
-        Surface(onClick = onPowerClick, shape = CircleShape, color = if (isPlaying) PrimaryColor else SurfaceColor, shadowElevation = if (isPlaying) 12.dp else 4.dp, modifier = Modifier.size(80.dp)) {
+        Surface(onClick = onPowerClick, shape = CircleShape, color = if (isPlaying) PrimaryColor else SurfaceColor, shadowElevation = if (isPlaying) 8.dp else 2.dp, modifier = Modifier.size(80.dp)) {
             Box(contentAlignment = Alignment.Center) {
                 if (isScanning) {
                     CircularProgressIndicator(color = if (isPlaying) Color.White else PrimaryColor, strokeWidth = 3.dp, modifier = Modifier.size(40.dp))
@@ -649,10 +658,11 @@ private fun DriveModeContent(
         }
 
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            // OPTIMIZATION: Reduced shadow elevation from 4.dp to 2.dp for rendering performance
             Surface(
                 shape = RoundedCornerShape(24.dp),
                 color = SurfaceColor,
-                shadowElevation = 4.dp,
+                shadowElevation = 2.dp,
                 modifier = Modifier.size(100.dp).clickable { viewModel.scanPrevious() }
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -660,10 +670,11 @@ private fun DriveModeContent(
                 }
             }
 
+            // OPTIMIZATION: Reduced shadow elevation from 12.dp to 8.dp
             Surface(
                 shape = CircleShape,
                 color = PrimaryColor,
-                shadowElevation = 12.dp,
+                shadowElevation = 8.dp,
                 modifier = Modifier.size(120.dp).clickable { viewModel.toggleRadio() }
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -674,7 +685,7 @@ private fun DriveModeContent(
             Surface(
                 shape = RoundedCornerShape(24.dp),
                 color = SurfaceColor,
-                shadowElevation = 4.dp,
+                shadowElevation = 2.dp,
                 modifier = Modifier.size(100.dp).clickable { viewModel.autoScan() }
             ) {
                 Box(contentAlignment = Alignment.Center) {
