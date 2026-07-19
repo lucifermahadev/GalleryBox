@@ -1,4 +1,5 @@
-@file:Suppress("BlockingMethodInNonBlockingContext", "UNUSED_PARAMETER", "unused", "FunctionName", "MemberVisibilityCanBePrivate")
+@file:Suppress("BlockingMethodInNonBlockingContext", "UNUSED_PARAMETER", "unused", "FunctionName", "MemberVisibilityCanBePrivate", "OPT_IN_USAGE")
+
 package com.gallerybox.viewmodel
 
 import android.content.ContentUris
@@ -18,8 +19,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import org.json.JSONArray
 import org.json.JSONObject
-import javax.inject.Inject
 import java.util.Locale
+import javax.inject.Inject
 
 data class ReadingState(
     val uri: Uri,
@@ -30,11 +31,19 @@ data class ReadingState(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+sealed class DocumentErrorType {
+    data object PasswordProtected : DocumentErrorType()
+    data object Corrupted : DocumentErrorType()
+    data object Unsupported : DocumentErrorType()
+    data object Timeout : DocumentErrorType()
+    data class Generic(val message: String) : DocumentErrorType()
+}
+
 sealed class DocumentUiEvent {
     data class LaunchIntent(val intent: Intent) : DocumentUiEvent()
     data class ShowToast(val message: String) : DocumentUiEvent()
-    data class DocumentError(val message: String) : DocumentUiEvent()
-    data class OpenPdf(val uri: Uri) : DocumentUiEvent()
+    data class DocumentError(val error: DocumentErrorType) : DocumentUiEvent()
+    data class OpenPdf(val uri: Uri, val pageCount: Int) : DocumentUiEvent()
     data class OpenWord(val blocks: List<WordBlock>) : DocumentUiEvent()
     data class OpenExcel(val sheets: List<VirtualSheet>) : DocumentUiEvent()
     data class OpenSlide(val pages: List<SlidePage>) : DocumentUiEvent()
@@ -44,7 +53,7 @@ sealed class DocumentUiEvent {
     data class OpenZip(val contents: List<ZipEntryItem>) : DocumentUiEvent()
 }
 
-@OptIn(FlowPreview::class)
+@OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class DocumentViewModel @Inject constructor(
     private val documentEngine: DocumentCoreEngine,
@@ -53,6 +62,7 @@ class DocumentViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
+
     val pdfRendererEngine: PdfRendererEngine get() = documentEngine.pdfEngine.renderer
     val docxEngine: DocxEngine get() = documentEngine.docxEngine
     val xlsxEngine: XlsxEngine get() = documentEngine.xlsxEngine
@@ -60,6 +70,7 @@ class DocumentViewModel @Inject constructor(
     val rawTextEngine: RawTextEngine get() = documentEngine.rawTextEngine
 
     private val _allDocs = MutableStateFlow<List<DocumentFile>>(emptyList())
+
     private val _docSearchQuery = MutableStateFlow(savedStateHandle.get<String>("search") ?: "")
     val docSearchQuery = _docSearchQuery.asStateFlow()
 
@@ -73,7 +84,15 @@ class DocumentViewModel @Inject constructor(
     )
     val docSortType = _docSortType.asStateFlow()
 
-    val documents = combine(_allDocs, _docSearchQuery.debounce(300), _docCategory, _docSortType) { docs, query, category, sort ->
+    private val _recentUpdateTrigger = MutableStateFlow(0)
+
+    val documents = combine(
+        _allDocs,
+        _docSearchQuery.debounce(300),
+        _docCategory,
+        _docSortType,
+        _recentUpdateTrigger
+    ) { docs, query, category, sort, _ ->
         var seq = docs.asSequence()
         if (category != null) seq = seq.filter { it.type == category }
         if (query.isNotBlank()) seq = seq.filter { it.name.contains(query, ignoreCase = true) }
@@ -84,10 +103,14 @@ class DocumentViewModel @Inject constructor(
                 DocumentSortType.DATE -> compareByDescending { it.dateModified }
                 DocumentSortType.SIZE -> compareByDescending { it.size }
                 DocumentSortType.NAME -> compareBy { it.name.lowercase(Locale.ROOT) }
-                DocumentSortType.RECENT -> compareBy { val idx = recents.indexOf(it.uri); if (idx == -1) Int.MAX_VALUE else idx }
+                DocumentSortType.RECENT -> compareBy {
+                    val idx = recents.indexOf(it.uri)
+                    if (idx == -1) Int.MAX_VALUE else idx
+                }
             }
         ).toList()
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(provider.defaultDispatcher)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _readingHistory = MutableStateFlow<List<ReadingState>>(emptyList())
     val readingHistory = _readingHistory.asStateFlow()
@@ -102,15 +125,27 @@ class DocumentViewModel @Inject constructor(
     val events = _events.receiveAsFlow()
 
     private val prefs = context.getSharedPreferences("DocHistory", Context.MODE_PRIVATE)
+    private var openingJob: Job? = null
+    private val readingStateFlow = MutableSharedFlow<ReadingState>(extraBufferCapacity = 10)
+
     init {
         loadHistory()
         loadAllDocuments()
+
+        viewModelScope.launch(provider.ioDispatcher) {
+            readingStateFlow
+                .debounce(1500L)
+                .collectLatest { state ->
+                    persistReadingState(state)
+                }
+        }
     }
 
     fun loadAllDocuments() {
         viewModelScope.launch(provider.ioDispatcher) {
             _isListLoading.value = true
             val fetched = mutableListOf<DocumentFile>()
+
             val projection = arrayOf(
                 MediaStore.Files.FileColumns._ID,
                 MediaStore.Files.FileColumns.DISPLAY_NAME,
@@ -118,52 +153,53 @@ class DocumentViewModel @Inject constructor(
                 MediaStore.Files.FileColumns.DATE_MODIFIED,
                 MediaStore.Files.FileColumns.MIME_TYPE
             )
-            val selection = "${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'image/%' AND ${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'video/%' AND ${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'audio/%'"
+
+            val selection = "${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'image/%' AND " +
+                    "${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'video/%' AND " +
+                    "${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'audio/%'"
 
             try {
-                context.contentResolver.query(MediaStore.Files.getContentUri("external"), projection, selection, null, "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC")?.use { cursor ->
+                context.contentResolver.query(
+                    MediaStore.Files.getContentUri("external"),
+                    projection,
+                    selection,
+                    null,
+                    "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
+                )?.use { cursor ->
                     val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
                     val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
                     val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
                     val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
                     val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
 
-                    val allowedExtensions = setOf(
-                        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "json", "xml", "html", "htm",
-                        "epub", "md", "markdown", "zip", "rtf",
-                        "kt", "java", "cpp", "c", "h", "hpp", "py", "js", "ts", "css", "php", "sql", "sh"
-                    )
-
                     while (cursor.moveToNext()) {
                         currentCoroutineContext().ensureActive()
 
                         val id = cursor.getLong(idCol)
                         val name = cursor.getString(nameCol) ?: ""
-                        val extension = name.substringAfterLast('.', "").lowercase(Locale.US)
-
-                        if (extension !in allowedExtensions) continue
-
                         val mime = cursor.getString(mimeCol) ?: ""
                         val uri = ContentUris.withAppendedId(MediaStore.Files.getContentUri("external"), id)
 
-                        val type = fastDetectType(extension)
+                        val type = documentEngine.fileDetection.detect(uri, name, mime)
 
-                        fetched.add(
-                            DocumentFile(
-                                id = id,
-                                name = name,
-                                uri = uri,
-                                size = cursor.getLong(sizeCol),
-                                dateModified = cursor.getLong(dateCol) * 1000L,
-                                mimeType = mime,
-                                type = type
+                        if (type != DocumentType.UNKNOWN) {
+                            fetched.add(
+                                DocumentFile(
+                                    id = id,
+                                    name = name,
+                                    uri = uri,
+                                    size = cursor.getLong(sizeCol),
+                                    dateModified = cursor.getLong(dateCol) * 1000L,
+                                    mimeType = mime,
+                                    type = type
+                                )
                             )
-                        )
+                        }
                     }
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                Log.e("DocumentViewModel", "Failed to load documents: ${e.localizedMessage}")
+                Log.e("DocumentViewModel", "Failed to load documents", e)
             } finally {
                 withContext(Dispatchers.Main) {
                     _allDocs.value = fetched
@@ -173,34 +209,16 @@ class DocumentViewModel @Inject constructor(
         }
     }
 
-    private fun fastDetectType(extension: String): DocumentType {
-        return when (extension) {
-            "pdf" -> DocumentType.PDF
-            "doc", "docx", "odt" -> DocumentType.WORD
-            "rtf" -> DocumentType.RTF
-            "xls", "xlsx", "ods" -> DocumentType.EXCEL
-            "ppt", "pptx", "odp" -> DocumentType.SLIDE
-            "csv" -> DocumentType.CSV
-            "json" -> DocumentType.JSON
-            "xml" -> DocumentType.XML
-            "html", "htm" -> DocumentType.HTML
-            "md", "markdown" -> DocumentType.MARKDOWN
-            "epub" -> DocumentType.EPUB
-            "zip" -> DocumentType.ZIP
-            "txt" -> DocumentType.TXT
-            "kt", "java", "cpp", "c", "h", "hpp", "py", "js", "ts", "css", "php", "sql", "sh" -> DocumentType.CODE
-            else -> DocumentType.UNKNOWN
-        }
-    }
-
     fun updateDocSearchQuery(query: String) {
         _docSearchQuery.value = query
         savedStateHandle["search"] = query
     }
+
     fun updateDocCategory(type: DocumentType?) {
         _docCategory.value = type
         savedStateHandle["category"] = type?.name
     }
+
     fun updateDocSortType(sort: DocumentSortType) {
         _docSortType.value = sort
         savedStateHandle["sort"] = sort.name
@@ -208,20 +226,44 @@ class DocumentViewModel @Inject constructor(
 
     fun getDocumentById(id: Long): DocumentFile? = _allDocs.value.find { it.id == id }
 
+    fun cancelOpening() {
+        openingJob?.cancel()
+        _isOpeningDoc.value = false
+    }
+
     fun openDocument(doc: DocumentFile) {
         if (_isOpeningDoc.value) return
-        viewModelScope.launch {
+
+        openingJob?.cancel()
+        openingJob = viewModelScope.launch(provider.ioDispatcher) {
             _isOpeningDoc.value = true
             try {
-                val res = withTimeoutOrNull(30000L) { documentEngine.open(doc) }
+                val sizeInMb = doc.size / (1024 * 1024)
+                val dynamicTimeout = (10000L + (sizeInMb * 1000L)).coerceAtMost(45000L)
+
+                val res = withTimeoutOrNull(dynamicTimeout) {
+                    documentEngine.open(doc)
+                }
 
                 if (res == null) {
-                    _events.send(DocumentUiEvent.DocumentError("Document parsing timed out."))
+                    _events.send(DocumentUiEvent.DocumentError(DocumentErrorType.Timeout))
                     return@launch
                 }
 
+                // Push to recent history
+                recentEngine.addRecent(doc.uri)
+                _recentUpdateTrigger.value += 1
+
                 when (res) {
-                    is EngineResult.OpenPdf -> _events.send(DocumentUiEvent.OpenPdf(res.uri))
+                    is EngineResult.OpenPdf -> {
+                        // Pre-load the renderer here so the UI doesn't have to load it again
+                        val pageCount = documentEngine.pdfEngine.renderer.load(res.uri)
+                        if (pageCount > 0) {
+                            _events.send(DocumentUiEvent.OpenPdf(res.uri, pageCount))
+                        } else {
+                            _events.send(DocumentUiEvent.DocumentError(DocumentErrorType.Corrupted))
+                        }
+                    }
                     is EngineResult.OpenWord -> _events.send(DocumentUiEvent.OpenWord(res.blocks))
                     is EngineResult.OpenExcel -> _events.send(DocumentUiEvent.OpenExcel(res.sheets))
                     is EngineResult.OpenSlide -> _events.send(DocumentUiEvent.OpenSlide(res.pages))
@@ -230,19 +272,25 @@ class DocumentViewModel @Inject constructor(
                     is EngineResult.OpenZip -> _events.send(DocumentUiEvent.OpenZip(res.contents))
                     is EngineResult.OpenText -> _events.send(DocumentUiEvent.OpenText(res.content))
                     is EngineResult.Unsupported, is EngineResult.Error -> {
-                        val isEncrypted = (res as? EngineResult.Error)?.message?.let { it.contains("password", true) || it.contains("encrypt", true) } ?: false
+                        val errorMessage = (res as? EngineResult.Error)?.message ?: ""
+                        val isEncrypted = errorMessage.contains("password", true) || errorMessage.contains("encrypt", true)
+
                         if (isEncrypted) {
-                            _events.send(DocumentUiEvent.DocumentError("Password protected document."))
+                            _events.send(DocumentUiEvent.DocumentError(DocumentErrorType.PasswordProtected))
                         } else {
-                            val intent = Intent(Intent.ACTION_VIEW).apply { setDataAndType(doc.uri, doc.mimeType ?: "*/*"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                            // Fallback to system intent if the format is fundamentally unsupported by internal engine
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(doc.uri, doc.mimeType ?: "*/*")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
                             _events.send(DocumentUiEvent.LaunchIntent(Intent.createChooser(intent, "Open with")))
                         }
                     }
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                _events.send(DocumentUiEvent.DocumentError(e.message ?: "Failed to open document"))
-                Log.e("DocumentViewModel", "Error opening document: ${e.localizedMessage}")
+                _events.send(DocumentUiEvent.DocumentError(DocumentErrorType.Generic(e.localizedMessage ?: "Failed to open document")))
+                Log.e("DocumentViewModel", "Error opening document", e)
             } finally {
                 _isOpeningDoc.value = false
             }
@@ -250,45 +298,72 @@ class DocumentViewModel @Inject constructor(
     }
 
     private fun loadHistory() {
-        val historyJson = prefs.getString("history", "[]") ?: "[]"
-        try {
-            val arr = JSONArray(historyJson)
-            val loaded = mutableListOf<ReadingState>()
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                loaded.add(ReadingState(Uri.parse(obj.getString("uri")), obj.getInt("page"), obj.getDouble("scale").toFloat(), obj.getDouble("offsetX").toFloat(), obj.getDouble("offsetY").toFloat(), obj.getLong("timestamp")))
+        viewModelScope.launch(provider.ioDispatcher) {
+            val historyJson = prefs.getString("history", "[]") ?: "[]"
+            try {
+                val arr = JSONArray(historyJson)
+                val loaded = mutableListOf<ReadingState>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    loaded.add(
+                        ReadingState(
+                            uri = Uri.parse(obj.getString("uri")),
+                            page = obj.getInt("page"),
+                            scale = obj.getDouble("scale").toFloat(),
+                            offsetX = obj.getDouble("offsetX").toFloat(),
+                            offsetY = obj.getDouble("offsetY").toFloat(),
+                            timestamp = obj.getLong("timestamp")
+                        )
+                    )
+                }
+                _readingHistory.value = loaded
+            } catch (e: Exception) {
+                Log.e("DocumentViewModel", "Failed to load history", e)
             }
-            _readingHistory.value = loaded
-        } catch (e: Exception) {
-            Log.e("DocumentViewModel", "Failed to load history: ${e.localizedMessage}")
         }
     }
 
+    /**
+     * Called by UI. Emits to a debounced shared flow to avoid rapid disk writes.
+     */
     fun saveReadingState(state: ReadingState) {
+        viewModelScope.launch {
+            readingStateFlow.emit(state)
+        }
+    }
+
+    /**
+     * Performs the actual commit to SharedPreferences
+     */
+    private suspend fun persistReadingState(state: ReadingState) = withContext(provider.ioDispatcher) {
         val currentHistory = _readingHistory.value.toMutableList()
         currentHistory.removeAll { it.uri == state.uri }
         currentHistory.add(0, state)
         val limited = currentHistory.take(20)
         _readingHistory.value = limited
 
-        viewModelScope.launch(provider.ioDispatcher) {
-            try {
-                val arr = JSONArray()
-                limited.forEach { s ->
-                    val obj = JSONObject().apply {
-                        put("uri", s.uri.toString())
-                        put("page", s.page)
-                        put("scale", s.scale.toDouble())
-                        put("offsetX", s.offsetX.toDouble())
-                        put("offsetY", s.offsetY.toDouble())
-                        put("timestamp", s.timestamp)
-                    }
-                    arr.put(obj)
+        try {
+            val arr = JSONArray()
+            limited.forEach { s ->
+                val obj = JSONObject().apply {
+                    put("uri", s.uri.toString())
+                    put("page", s.page)
+                    put("scale", s.scale.toDouble())
+                    put("offsetX", s.offsetX.toDouble())
+                    put("offsetY", s.offsetY.toDouble())
+                    put("timestamp", s.timestamp)
                 }
-                prefs.edit().putString("history", arr.toString()).apply()
-            } catch (e: Exception) {
-                Log.e("DocumentViewModel", "Failed to save history: ${e.localizedMessage}")
+                arr.put(obj)
             }
+            prefs.edit().putString("history", arr.toString()).apply()
+        } catch (e: Exception) {
+            Log.e("DocumentViewModel", "Failed to save history", e)
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        openingJob?.cancel()
+        documentEngine.pdfEngine.renderer.close()
     }
 }

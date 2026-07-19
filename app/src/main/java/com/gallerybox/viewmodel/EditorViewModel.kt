@@ -432,7 +432,6 @@ class EditorViewModel @Inject constructor(
         }
     }
 
-    // --- BASE EXPORT PIPELINE ---
     fun cancelCurrentOperation() { fileOperationJob?.cancel(); editingEngine.cancelExport(); _fileOperationState.value = FileOperationState.Idle }
 
     fun saveMedia(mediaItem: MediaItem, targetWidth: Int = 1920, targetHeight: Int = 1080, targetFps: Int = 30, videoBitrate: Int = 15000000, exportAsSticker: Boolean = false) {
