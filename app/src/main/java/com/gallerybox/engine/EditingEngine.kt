@@ -158,68 +158,6 @@ class EditingEngine @Inject constructor(
 }
 
 @Singleton
-class FrameEngine @Inject constructor(@ApplicationContext private val context: Context) {
-    private val frameCache = LruCache<String, Bitmap>(20)
-
-    private fun getDiskCacheFile(key: String): File {
-        return File(context.cacheDir, "frame_$key.png")
-    }
-
-    fun getFrameBitmap(assetPath: String, targetWidth: Int, targetHeight: Int): Bitmap? {
-        if (targetWidth <= 0 || targetHeight <= 0) {
-            return null
-        }
-
-        val cacheKey = "${assetPath.replace("/", "_")}_${targetWidth}x${targetHeight}"
-
-        val cachedBitmap = frameCache.get(cacheKey)
-        if (cachedBitmap != null) {
-            return cachedBitmap
-        }
-
-        val diskFile = getDiskCacheFile(cacheKey)
-        if (diskFile.exists()) {
-            try {
-                val diskBitmap = BitmapFactory.decodeFile(diskFile.absolutePath)
-                if (diskBitmap != null) {
-                    frameCache.put(cacheKey, diskBitmap)
-                    return diskBitmap
-                }
-            } catch (e: Exception) {
-                Log.e("FrameEngine", "Disk cache read failed", e)
-            }
-        }
-
-        return try {
-            val svg = SVG.getFromAsset(context.assets, assetPath)
-            svg.documentWidth = targetWidth.toFloat()
-            svg.documentHeight = targetHeight.toFloat()
-
-            val bmp = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            svg.renderToCanvas(canvas)
-
-            frameCache.put(cacheKey, bmp)
-
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    FileOutputStream(diskFile).use { out ->
-                        bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
-                    }
-                } catch (e: Exception) {
-                    Log.e("FrameEngine", "Disk cache write failed", e)
-                }
-            }
-
-            bmp
-        } catch (e: Exception) {
-            Log.e("FrameEngine", "Failed to load frame: $assetPath", e)
-            null
-        }
-    }
-}
-
-@Singleton
 class LutEngine @Inject constructor(@ApplicationContext private val context: Context) {
     suspend fun loadLut(path: String): CubeLut? {
         return withContext(Dispatchers.IO) {
@@ -412,8 +350,7 @@ class TextEngine @Inject constructor() {
 class PhotoEditorEngine @Inject constructor(
     private val lutEngine: LutEngine,
     private val stickerEngine: StickerEngine,
-    private val textEngine: TextEngine,
-    private val frameEngine: FrameEngine
+    private val textEngine: TextEngine
 ) {
     suspend fun createPreview(bitmap: Bitmap, state: EditState, renderOverlays: Boolean): Bitmap {
         return withContext(Dispatchers.Default) {
@@ -428,7 +365,11 @@ class PhotoEditorEngine @Inject constructor(
                     val w = (cropRect.width() * res.width).toInt().coerceAtMost(res.width - x)
                     val h = (cropRect.height() * res.height).toInt().coerceAtMost(res.height - y)
                     if (w > 0 && h > 0) {
-                        res = Bitmap.createBitmap(res, x, y, w, h)
+                        val newBmp = Bitmap.createBitmap(res, x, y, w, h)
+                        if (newBmp != res && res != bitmap) {
+                            res.recycle()
+                        }
+                        res = newBmp
                     }
                 }
             }
@@ -473,6 +414,10 @@ class PhotoEditorEngine @Inject constructor(
             val canvas = Canvas(out)
             canvas.drawBitmap(res, 0f, 0f, paint)
 
+            if (res != bitmap) {
+                res.recycle()
+            }
+
             if (state.highlights != 0f || state.shadows != 0f) {
                 val pixels = IntArray(out.width * out.height)
                 out.getPixels(pixels, 0, out.width, 0, 0, out.width, out.height)
@@ -503,7 +448,9 @@ class PhotoEditorEngine @Inject constructor(
             // 3. LUT
             val currentLut = state.lutData
             if (currentLut != null && state.lutIntensity > 0f) {
-                out = lutEngine.applyCpuLut(out, currentLut, state.lutIntensity)
+                val lutBmp = lutEngine.applyCpuLut(out, currentLut, state.lutIntensity)
+                out.recycle()
+                out = lutBmp
             }
 
             // 4. Overlays
@@ -543,18 +490,6 @@ class PhotoEditorEngine @Inject constructor(
                                 smallBmp.recycle()
                                 pixelated.recycle()
                             }
-                        }
-                    }
-                }
-
-                runCatching {
-                    val activeFrames = state.frames.filter { it.isEnabled && it.isVisible }.sortedBy { it.zIndex }
-                    for (f in activeFrames) {
-                        val bmp = frameEngine.getFrameBitmap(f.assetPath, out.width, out.height)
-                        if (bmp != null) {
-                            val framePaint = Paint(Paint.FILTER_BITMAP_FLAG)
-                            framePaint.alpha = (f.opacity * 255).toInt().coerceIn(0, 255)
-                            sCan.drawBitmap(bmp, 0f, 0f, framePaint)
                         }
                     }
                 }
@@ -619,10 +554,18 @@ class PhotoEditorEngine @Inject constructor(
 
             if (state.rotationDegrees != 0f || state.straightenDegrees != 0f || sX != 1f || sY != 1f) {
                 val matrix = Matrix()
-                matrix.postRotate(state.rotationDegrees + state.straightenDegrees)
+                matrix.postRotate(
+                    state.rotationDegrees + state.straightenDegrees,
+                    out.width / 2f,
+                    out.height / 2f
+                )
                 matrix.postScale(sX, sY, out.width / 2f, out.height / 2f)
 
-                return@withContext Bitmap.createBitmap(out, 0, 0, out.width, out.height, matrix, true)
+                val rotated = Bitmap.createBitmap(out, 0, 0, out.width, out.height, matrix, true)
+                if (rotated != out) {
+                    out.recycle()
+                }
+                return@withContext rotated
             }
 
             out

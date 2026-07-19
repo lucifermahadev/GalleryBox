@@ -21,37 +21,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 import javax.inject.Inject
+import com.gallerybox.data.*
 
-data class ReadingState(
-    val uri: Uri,
-    val page: Int,
-    val scale: Float,
-    val offsetX: Float,
-    val offsetY: Float,
-    val timestamp: Long = System.currentTimeMillis()
-)
 
-sealed class DocumentErrorType {
-    data object PasswordProtected : DocumentErrorType()
-    data object Corrupted : DocumentErrorType()
-    data object Unsupported : DocumentErrorType()
-    data object Timeout : DocumentErrorType()
-    data class Generic(val message: String) : DocumentErrorType()
-}
-
-sealed class DocumentUiEvent {
-    data class LaunchIntent(val intent: Intent) : DocumentUiEvent()
-    data class ShowToast(val message: String) : DocumentUiEvent()
-    data class DocumentError(val error: DocumentErrorType) : DocumentUiEvent()
-    data class OpenPdf(val uri: Uri, val pageCount: Int) : DocumentUiEvent()
-    data class OpenWord(val blocks: List<WordBlock>) : DocumentUiEvent()
-    data class OpenExcel(val sheets: List<VirtualSheet>) : DocumentUiEvent()
-    data class OpenSlide(val pages: List<SlidePage>) : DocumentUiEvent()
-    data class OpenText(val content: String) : DocumentUiEvent()
-    data class OpenHtml(val uri: Uri) : DocumentUiEvent()
-    data class OpenEpub(val chapters: List<EpubChapter>) : DocumentUiEvent()
-    data class OpenZip(val contents: List<ZipEntryItem>) : DocumentUiEvent()
-}
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
 @HiltViewModel
@@ -63,7 +35,8 @@ class DocumentViewModel @Inject constructor(
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
-    val pdfRendererEngine: PdfRendererEngine get() = documentEngine.pdfEngine.renderer
+    // Expose specific engines for UI usage
+    val pdfEngine: PdfEngine get() = documentEngine.pdfEngine
     val docxEngine: DocxEngine get() = documentEngine.docxEngine
     val xlsxEngine: XlsxEngine get() = documentEngine.xlsxEngine
     val pptxEngine: PptxEngine get() = documentEngine.pptxEngine
@@ -123,6 +96,9 @@ class DocumentViewModel @Inject constructor(
 
     private val _events = Channel<DocumentUiEvent>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
+
+    private val _activePdfSession = MutableStateFlow<PdfRenderSession?>(null)
+    val activePdfSession = _activePdfSession.asStateFlow()
 
     private val prefs = context.getSharedPreferences("DocHistory", Context.MODE_PRIVATE)
     private var openingJob: Job? = null
@@ -231,6 +207,10 @@ class DocumentViewModel @Inject constructor(
         _isOpeningDoc.value = false
     }
 
+    /**
+     * Primary entry point for opening documents externally or generically.
+     * Inside the app, navigation handles routing and viewers invoke engines directly to avoid double-loading.
+     */
     fun openDocument(doc: DocumentFile) {
         if (_isOpeningDoc.value) return
 
@@ -238,6 +218,7 @@ class DocumentViewModel @Inject constructor(
         openingJob = viewModelScope.launch(provider.ioDispatcher) {
             _isOpeningDoc.value = true
             try {
+                // Dynamic timeout based on file size
                 val sizeInMb = doc.size / (1024 * 1024)
                 val dynamicTimeout = (10000L + (sizeInMb * 1000L)).coerceAtMost(45000L)
 
@@ -250,19 +231,14 @@ class DocumentViewModel @Inject constructor(
                     return@launch
                 }
 
-                // Push to recent history
                 recentEngine.addRecent(doc.uri)
                 _recentUpdateTrigger.value += 1
 
                 when (res) {
                     is EngineResult.OpenPdf -> {
-                        // Pre-load the renderer here so the UI doesn't have to load it again
-                        val pageCount = documentEngine.pdfEngine.renderer.load(res.uri)
-                        if (pageCount > 0) {
-                            _events.send(DocumentUiEvent.OpenPdf(res.uri, pageCount))
-                        } else {
-                            _events.send(DocumentUiEvent.DocumentError(DocumentErrorType.Corrupted))
-                        }
+                        _activePdfSession.value?.close()
+                        _activePdfSession.value = res.session
+                        _events.send(DocumentUiEvent.OpenPdf(res.uri, res.session.pageCount))
                     }
                     is EngineResult.OpenWord -> _events.send(DocumentUiEvent.OpenWord(res.blocks))
                     is EngineResult.OpenExcel -> _events.send(DocumentUiEvent.OpenExcel(res.sheets))
@@ -278,7 +254,6 @@ class DocumentViewModel @Inject constructor(
                         if (isEncrypted) {
                             _events.send(DocumentUiEvent.DocumentError(DocumentErrorType.PasswordProtected))
                         } else {
-                            // Fallback to system intent if the format is fundamentally unsupported by internal engine
                             val intent = Intent(Intent.ACTION_VIEW).apply {
                                 setDataAndType(doc.uri, doc.mimeType ?: "*/*")
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -295,6 +270,10 @@ class DocumentViewModel @Inject constructor(
                 _isOpeningDoc.value = false
             }
         }
+    }
+
+    fun clearActivePdfSession() {
+        _activePdfSession.value = null
     }
 
     private fun loadHistory() {
@@ -323,18 +302,12 @@ class DocumentViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Called by UI. Emits to a debounced shared flow to avoid rapid disk writes.
-     */
     fun saveReadingState(state: ReadingState) {
         viewModelScope.launch {
             readingStateFlow.emit(state)
         }
     }
 
-    /**
-     * Performs the actual commit to SharedPreferences
-     */
     private suspend fun persistReadingState(state: ReadingState) = withContext(provider.ioDispatcher) {
         val currentHistory = _readingHistory.value.toMutableList()
         currentHistory.removeAll { it.uri == state.uri }
@@ -364,6 +337,6 @@ class DocumentViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         openingJob?.cancel()
-        documentEngine.pdfEngine.renderer.close()
+        _activePdfSession.value?.close()
     }
 }

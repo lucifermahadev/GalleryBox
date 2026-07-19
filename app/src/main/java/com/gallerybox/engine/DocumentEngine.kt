@@ -1,4 +1,5 @@
 @file:Suppress("BlockingMethodInNonBlockingContext", "UNUSED_PARAMETER", "unused", "FunctionName", "MemberVisibilityCanBePrivate", "UnsafeOptInUsageError", "Deprecation")
+
 package com.gallerybox.engine
 
 import android.app.ActivityManager
@@ -7,10 +8,11 @@ import android.graphics.*
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import android.util.LruCache
 import android.util.Xml
-import android.util.Log
 import androidx.room.*
+import com.gallerybox.data.DocumentFile
 import com.gallerybox.data.DocumentMetadata
 import com.gallerybox.data.DocumentMetadataDao
 import com.opencsv.CSVParserBuilder
@@ -43,254 +45,27 @@ import javax.xml.transform.stream.StreamResult
 import javax.xml.transform.stream.StreamSource
 import kotlin.math.max
 import kotlin.math.min
+import com.gallerybox.data.CacheEntry
+import com.gallerybox.data.CellStyle
+import com.gallerybox.data.DocumentSortType
+import com.gallerybox.data.DocumentType
+import com.gallerybox.data.EngineResult
+import com.gallerybox.data.EpubChapter
+import com.gallerybox.data.PageMargins
+import com.gallerybox.data.PdfLoadResult
+import com.gallerybox.data.SearchOptions
+import com.gallerybox.data.SlideElement
+import com.gallerybox.data.SlidePage
+import com.gallerybox.data.TableCell
+import com.gallerybox.data.TableRow
+import com.gallerybox.data.TextReadResult
+import com.gallerybox.data.VirtualCell
+import com.gallerybox.data.VirtualRow
+import com.gallerybox.data.VirtualSheet
+import com.gallerybox.data.WordBlock
+import com.gallerybox.data.WordRun
+import com.gallerybox.data.ZipEntryItem
 
-// ==========================================
-// CORE DATA MODELS & ROOM ENTITIES
-// ==========================================
-enum class DocumentType(val priority: Int) {
-    PDF(0), WORD(1), EXCEL(2), SLIDE(3), JSON(4), XML(5), HTML(6), CODE(7), TXT(8), CSV(9), EPUB(10), MARKDOWN(11), ZIP(12), RTF(13), SYSTEM(14), UNKNOWN(15)
-}
-
-enum class DocumentSortType {
-    DATE, SIZE, NAME, RECENT
-}
-
-data class SearchOptions(
-    val query: String,
-    val caseSensitive: Boolean = false,
-    val wholeWord: Boolean = false,
-    val isRegex: Boolean = false
-)
-
-data class WordRun(
-    val text: String,
-    val bold: Boolean = false,
-    val italic: Boolean = false,
-    val underline: Boolean = false,
-    val fontSize: Int? = 16,
-    val colorHex: String? = "#000000",
-    val isSubscript: Boolean = false,
-    val isSuperscript: Boolean = false,
-    val fontFamily: String? = null,
-    val isHighlighted: Boolean = false
-)
-
-data class PageMargins(
-    val top: Float,
-    val bottom: Float,
-    val left: Float,
-    val right: Float,
-    val isLandscape: Boolean
-)
-
-data class TableRow(val cells: List<TableCell>)
-data class TableCell(val blocks: List<WordBlock>)
-
-sealed class WordBlock {
-    data class Paragraph(
-        val runs: List<WordRun>,
-        val alignment: String? = null,
-        val headingLevel: Int? = null,
-        val isListItem: Boolean = false
-    ) : WordBlock()
-
-    data class Table(val rows: List<TableRow>) : WordBlock()
-
-    data class Image(
-        val byteArray: ByteArray,
-        val extension: String,
-        val fileName: String,
-        val inline: Boolean = false
-    ) : WordBlock() {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (javaClass != other?.javaClass) return false
-            other as Image
-            if (!byteArray.contentEquals(other.byteArray)) return false
-            return true
-        }
-
-        override fun hashCode(): Int {
-            return byteArray.contentHashCode()
-        }
-    }
-
-    data class Header(val blocks: List<WordBlock>) : WordBlock()
-
-    data class Footer(val blocks: List<WordBlock>) : WordBlock()
-}
-
-data class VirtualSheet(
-    val name: String,
-    val rows: List<VirtualRow>,
-    val rowCount: Int,
-    val columnCount: Int,
-    val mergedRegions: List<String> = emptyList()
-)
-
-data class VirtualRow(
-    val rowIndex: Int,
-    val cells: List<VirtualCell>,
-    val isHidden: Boolean
-)
-
-data class VirtualCell(
-    val columnIndex: Int,
-    val displayValue: String,
-    val rawValue: String,
-    val isFormula: Boolean,
-    val formulaString: String? = null,
-    val comment: String? = null,
-    val style: CellStyle? = null,
-    val isHidden: Boolean = false
-)
-
-data class CellStyle(
-    val bgColor: String?,
-    val textColor: String?,
-    val bold: Boolean,
-    val italic: Boolean,
-    val alignment: String,
-    val hasBorders: Boolean
-)
-
-sealed class TextReadResult {
-    data class Success(val text: String, val syntaxMode: String, val lineOffsets: List<Long>) : TextReadResult()
-    data class Preview(val text: String, val syntaxMode: String, val lineOffsets: List<Long>, val totalBytes: Long) : TextReadResult()
-    data class Paged(val uri: Uri, val encoding: Charset, val totalBytes: Long) : TextReadResult()
-    data class BinaryFile(val confidence: Float) : TextReadResult()
-    data class Error(val message: String, val exception: Throwable? = null) : TextReadResult()
-}
-
-data class ZipEntryItem(
-    val name: String,
-    val size: Long,
-    val compressedSize: Long,
-    val time: Long,
-    val crc: Long,
-    val isDirectory: Boolean
-)
-
-data class EpubChapter(
-    val id: String,
-    val title: String,
-    val contentHtml: String,
-    val isCover: Boolean = false
-)
-
-sealed class PdfLoadResult {
-    data class Success(val pageCount: Int) : PdfLoadResult()
-    data class Encrypted(val message: String) : PdfLoadResult()
-    data class Error(val message: String, val exception: Throwable? = null) : PdfLoadResult()
-}
-
-sealed class EngineResult {
-    data class OpenPdf(val uri: Uri, val session: PdfRenderSession) : EngineResult()
-    data class OpenWord(val blocks: List<WordBlock>) : EngineResult()
-    data class OpenExcel(val sheets: List<VirtualSheet>) : EngineResult()
-    data class OpenCsv(val sheet: VirtualSheet) : EngineResult()
-    data class OpenSlide(val pages: List<SlidePage>) : EngineResult()
-    data class OpenEpub(val chapters: List<EpubChapter>) : EngineResult()
-    data class OpenZip(val contents: List<ZipEntryItem>) : EngineResult()
-    data class OpenText(val content: String, val type: DocumentType) : EngineResult()
-    data class Unsupported(val format: String, val mimeType: String) : EngineResult()
-    data class Error(val message: String) : EngineResult()
-}
-
-data class SlidePage(
-    val width: Float,
-    val height: Float,
-    val elements: List<SlideElement>
-)
-
-sealed class SlideElement {
-    abstract val x: Float
-    abstract val y: Float
-    abstract val width: Float
-    abstract val height: Float
-
-    data class Text(
-        val text: String,
-        override val x: Float,
-        override val y: Float,
-        override val width: Float,
-        override val height: Float,
-        val fontSize: Float? = null
-    ) : SlideElement()
-
-    data class Image(
-        val byteArray: ByteArray,
-        val extension: String,
-        override val x: Float,
-        override val y: Float,
-        override val width: Float,
-        override val height: Float
-    ) : SlideElement() {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (javaClass != other?.javaClass) return false
-            other as Image
-            if (!byteArray.contentEquals(other.byteArray)) return false
-            return true
-        }
-
-        override fun hashCode(): Int {
-            return byteArray.contentHashCode()
-        }
-    }
-
-    data class Table(
-        override val x: Float,
-        override val y: Float,
-        override val width: Float,
-        override val height: Float,
-        val rows: Int,
-        val cols: Int
-    ) : SlideElement()
-
-    data class Shape(
-        val shapeType: String,
-        val text: String?,
-        override val x: Float,
-        override val y: Float,
-        override val width: Float,
-        override val height: Float
-    ) : SlideElement()
-}
-
-sealed class CacheEntry {
-    data class PdfPage(val bitmap: Bitmap, val timestamp: Long = System.currentTimeMillis()) : CacheEntry()
-}
-
-data class DocumentFile(
-    val id: Long,
-    val name: String,
-    val uri: Uri,
-    val size: Long,
-    val dateModified: Long,
-    val mimeType: String?,
-    val type: DocumentType
-)
-
-
-
-// ==========================================
-// THREADING & DISPATCHERS
-// ==========================================
-@Singleton
-class DocumentDispatcherProvider @Inject constructor() {
-    private val executor = Executors.newFixedThreadPool(min(Runtime.getRuntime().availableProcessors(), 4))
-    val ioDispatcher = executor.asCoroutineDispatcher()
-    val defaultDispatcher = Dispatchers.Default
-
-    fun shutdown() {
-        executor.shutdown()
-    }
-}
-
-// ==========================================
-// SEARCH UTILITIES
-// ==========================================
 fun String.matchesOptions(options: SearchOptions): Boolean {
     if (options.isRegex) {
         return Regex(
@@ -309,9 +84,17 @@ fun String.matchesOptions(options: SearchOptions): Boolean {
     return this.contains(options.query, ignoreCase = !options.caseSensitive)
 }
 
-// ==========================================
-// DETECTION & VALIDATION ENGINES
-// ==========================================
+@Singleton
+class DocumentDispatcherProvider @Inject constructor() {
+    private val executor = Executors.newFixedThreadPool(min(Runtime.getRuntime().availableProcessors(), 4))
+    val ioDispatcher = executor.asCoroutineDispatcher()
+    val defaultDispatcher = Dispatchers.Default
+
+    fun shutdown() {
+        executor.shutdown()
+    }
+}
+
 @Singleton
 class ContainerValidationEngine @Inject constructor(
     @ApplicationContext private val context: Context
@@ -397,9 +180,7 @@ class FileDetectionEngine @Inject constructor(
                     hex.startsWith("7B5C7274") -> return DocumentType.RTF
                 }
             }
-        } catch (e: Exception) {
-
-        }
+        } catch (e: Exception) {}
 
         val safeMime = fallbackMime?.lowercase(Locale.US) ?: "*/*"
 
@@ -512,9 +293,6 @@ class DelimiterDetectionEngine @Inject constructor() {
     }
 }
 
-// ==========================================
-// CACHE & METADATA
-// ==========================================
 @Singleton
 class MetadataEngine @Inject constructor(
     private val metadataDao: DocumentMetadataDao,
@@ -588,6 +366,8 @@ class RecentDocumentsEngine @Inject constructor(
     }
 }
 
+
+
 @Singleton
 class SearchEngine @Inject constructor(
     private val provider: DocumentDispatcherProvider
@@ -630,10 +410,6 @@ class SearchEngine @Inject constructor(
     }
 }
 
-// ==========================================
-// FORMAT ENGINES
-// ==========================================
-
 class PdfRenderSession(
     private val pdfRenderer: PdfRenderer,
     private val fileDescriptor: ParcelFileDescriptor,
@@ -644,17 +420,22 @@ class PdfRenderSession(
     val pageCount: Int = pdfRenderer.pageCount
     private val renderMutex = Mutex()
     private var isClosed = false
+    private val dimensionCache = java.util.concurrent.ConcurrentHashMap<Int, Pair<Int, Int>>()
 
     suspend fun getPageDimensions(index: Int): Pair<Int, Int>? = withContext(provider.ioDispatcher) {
         if (isClosed || index < 0 || index >= pageCount) return@withContext null
+        dimensionCache[index]?.let { return@withContext it }
         try {
             renderMutex.withLock {
+                if (isClosed) return@withContext null
                 val page = pdfRenderer.openPage(index)
                 val dimensions = Pair(page.width, page.height)
                 page.close()
+                dimensionCache[index] = dimensions
                 dimensions
             }
         } catch (e: Exception) {
+            Log.e("PdfRenderSession", "Error getting page dimensions", e)
             null
         }
     }
@@ -673,6 +454,7 @@ class PdfRenderSession(
 
         try {
             renderMutex.withLock {
+                if (isClosed) return@withContext null
                 currentCoroutineContext().ensureActive()
                 val page = pdfRenderer.openPage(index)
                 val width = max(1, (page.width * scale).toInt())
@@ -716,6 +498,7 @@ class PdfRenderSession(
         val range = max(0, currentIndex - 1)..min(pageCount - 1, currentIndex + 2)
         range.forEach {
             if (it != currentIndex) {
+                ensureActive()
                 renderPage(it, 1.0f)
             }
         }
@@ -762,16 +545,13 @@ class PdfEngine @Inject constructor(
                 PdfRenderer(fileDescriptor)
             }
 
-            // Note: Returning success instead of throwing error if page count is 0
             PdfLoadResult.Success(renderer.pageCount)
 
         } catch (e: SecurityException) {
-            // Cleanup on failure
             fileDescriptor?.close()
             tempFile?.delete()
             PdfLoadResult.Encrypted("Password-protected or encrypted PDF")
         } catch (e: Exception) {
-            // Cleanup on failure
             fileDescriptor?.close()
             tempFile?.delete()
             PdfLoadResult.Error(e.localizedMessage ?: "Failed to open PDF", e)
@@ -929,7 +709,7 @@ class DocxEngine @Inject constructor(
                                 val cr = p.getCharacterRun(j)
                                 val text = cr.text()?.replace("\u0007", "")?.replace("\r", "\n") ?: ""
                                 if (text.isNotBlank()) {
-                                    runs.add(WordRun(text, bold = cr.isBold, italic = cr.isItalic, underline = cr.getUnderlineCode() != 0, fontSize = cr.fontSize / 2))
+                                    runs.add(WordRun(text, bold = p.getCharacterRun(j).isBold, italic = p.getCharacterRun(j).isItalic, underline = p.getCharacterRun(j).getUnderlineCode() != 0, fontSize = p.getCharacterRun(j).fontSize / 2))
                                 }
                             }
                             if (runs.isNotEmpty()) {
@@ -1260,9 +1040,7 @@ class PptxEngine @Inject constructor(
                     w = (anchor.javaClass.getMethod("getWidth").invoke(anchor) as? Double ?: 0.0).toFloat()
                     h = (anchor.javaClass.getMethod("getHeight").invoke(anchor) as? Double ?: 0.0).toFloat()
                 }
-            } catch (e: Exception) {
-
-            }
+            } catch (e: Exception) {}
         }
 
         when (shape) {
@@ -1689,9 +1467,6 @@ class ThumbnailEngine @Inject constructor(
     }
 }
 
-// ==========================================
-// MASTER ENGINE FACADE
-// ==========================================
 @Singleton
 class DocumentCoreEngine @Inject constructor(
     val fileDetection: FileDetectionEngine,
@@ -1768,6 +1543,7 @@ class DocumentCoreEngine @Inject constructor(
             EngineResult.Error("Failed to parse document: ${e.localizedMessage}")
         }
     }
+
 
     private fun formatTextBasedOnType(rawText: String, type: DocumentType): EngineResult {
         return when (type) {

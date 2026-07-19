@@ -29,7 +29,6 @@ import java.io.File
 import java.util.Collections
 import java.util.UUID
 import javax.inject.Inject
-import kotlin.math.exp
 
 data class LutItem(val name: String, val path: String, val category: String, val thumbnail: Bitmap? = null)
 
@@ -67,6 +66,7 @@ class EditorViewModel @Inject constructor(
     private val _previewBitmap = MutableStateFlow<Bitmap?>(null)
     val previewBitmap = _previewBitmap.asStateFlow()
     private var originalBitmap: Bitmap? = null
+    private var currentMediaUri: Uri? = null
 
     private val _isPreviewUpdating = MutableStateFlow(false)
     val isPreviewUpdating = _isPreviewUpdating.asStateFlow()
@@ -85,54 +85,34 @@ class EditorViewModel @Inject constructor(
     private val _thermalLevel = MutableStateFlow(0)
     val thermalLevel = _thermalLevel.asStateFlow()
 
-    data class FrameItem(val name: String, val assetPath: String, val thumbnail: Bitmap? = null)
-
-    private val _frameItems = MutableStateFlow<List<FrameItem>>(emptyList())
-    val frameItems = _frameItems.asStateFlow()
-
-    private fun loadFrames() = viewModelScope.launch(Dispatchers.IO) {
-        runCatching {
-            val assets = getApplication<Application>().assets
-            val allItems = mutableListOf<FrameItem>()
-            assets.list("Frames")?.filter { it.endsWith(".svg", true) }?.forEach { file ->
-                val name = file.substringBeforeLast(".")
-                    .replace("-", " ")
-                    .replaceFirstChar { it.uppercase() }
-                allItems.add(FrameItem(name, "Frames/$file"))
-            }
-            _frameItems.value = allItems.sortedBy { it.name }
-        }.onFailure { Log.e(TAG, "Failed to load Frames", it) }
-    }
-
-    // --- MATHEMATICS & PHYSICS ENGINE ---
-    object PhysicsAndMath {
-        fun calculateSpringForce(displacement: Float, stiffness: Float = 300f): Float = -stiffness * displacement
-        fun calculateDampingForce(velocity: Float, dampingCoefficient: Float = 25f): Float = -dampingCoefficient * velocity
-        fun calculateNextFlingVelocity(currentVelocity: Float, frictionMultiplier: Float = 0.92f): Float = currentVelocity * frictionMultiplier
-        fun calculateUiFadeOpacity(timeElapsedMs: Long, tauMs: Float = 1500f): Float = exp(-timeElapsedMs.toFloat() / tauMs).coerceIn(0f, 1f)
+    object MathUtils {
         fun calculateThermalScaleFactor(level: Int): Float = 1f - (level.coerceIn(0, 7) / 7f)
-        fun calculateSpeedDuration(oldDurationMs: Long, speed: Float): Long = if (speed <= 0f) oldDurationMs else (oldDurationMs / speed).toLong()
-        fun lerp(start: Float, end: Float, t: Float): Float = start + (end - start) * t.coerceIn(0f, 1f)
     }
 
     init {
         loadLuts()
         loadStickers()
-        loadFrames()
 
         @OptIn(FlowPreview::class)
         viewModelScope.launch {
-            // Apply thermal scaling to debounce time to prevent CPU choking when hot.
-            // StateFlow inherently acts as distinctUntilChanged(), so it is omitted.
-            currentEditState
+            combine(
+                currentEditState,
+                isComparing
+            ) { state, comparing ->
+                Pair(state, comparing)
+            }
                 .debounce { _ ->
                     80L + (thermalLevel.value * 20L)
                 }
-                .collectLatest { state ->
-                    generatePreview(state, thermalLevel.value)
+                .collectLatest { (state, comparing) ->
+                    if (comparing) {
+                        _previewBitmap.value = originalBitmap
+                    } else {
+                        generatePreview(state, thermalLevel.value)
+                    }
                 }
         }
-    } // <-- Added missing closing brace for init block
+    }
 
     fun updateThermalLevel(level: Int) {
         _thermalLevel.value = level.coerceIn(0, 7)
@@ -147,28 +127,69 @@ class EditorViewModel @Inject constructor(
             currentEditIndex = 0
             _currentEditState.value = initialState
         }
+
         if (!mediaItem.isVideo) {
+            // Skip re-decoding if the same media is opened
+            if (currentMediaUri == mediaItem.uri && originalBitmap != null) {
+                generatePreview(_currentEditState.value, _thermalLevel.value)
+                return@launch
+            }
+
+            currentMediaUri = mediaItem.uri
+
             withContext(Dispatchers.IO) {
                 try {
                     val resolver = getApplication<Application>().contentResolver
+                    val maxDimen = 1080
+
                     val sourceBitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, mediaItem.uri)) { d, _, _ ->
-                            d.allocator = ImageDecoder.ALLOCATOR_DEFAULT
-                            d.isMutableRequired = true
+                        ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, mediaItem.uri)) { decoder, info, _ ->
+                            decoder.allocator = ImageDecoder.ALLOCATOR_DEFAULT
+                            decoder.isMutableRequired = true
+
+                            // Decode directly to target size to save memory on large images
+                            if (info.size.width > maxDimen || info.size.height > maxDimen) {
+                                val scale = minOf(
+                                    maxDimen.toFloat() / info.size.width,
+                                    maxDimen.toFloat() / info.size.height
+                                )
+                                decoder.setTargetSize(
+                                    (info.size.width * scale).toInt(),
+                                    (info.size.height * scale).toInt()
+                                )
+                            }
                         }
                     } else {
-                        @Suppress("DEPRECATION") MediaStore.Images.Media.getBitmap(resolver, mediaItem.uri)
+                        @Suppress("DEPRECATION")
+                        val fullBitmap = MediaStore.Images.Media.getBitmap(resolver, mediaItem.uri)
+                        if (fullBitmap.width > maxDimen || fullBitmap.height > maxDimen) {
+                            val scale = minOf(
+                                maxDimen.toFloat() / fullBitmap.width,
+                                maxDimen.toFloat() / fullBitmap.height
+                            )
+                            val scaled = Bitmap.createScaledBitmap(
+                                fullBitmap,
+                                (fullBitmap.width * scale).toInt(),
+                                (fullBitmap.height * scale).toInt(),
+                                true
+                            )
+                            fullBitmap.recycle()
+                            scaled
+                        } else {
+                            fullBitmap
+                        }
                     }
-                    val maxDimen = 1080f
-                    val scale = minOf(maxDimen / sourceBitmap.width, maxDimen / sourceBitmap.height)
-                    val previewScale = if (scale < 1f) {
-                        val scaled = Bitmap.createScaledBitmap(sourceBitmap, (sourceBitmap.width * scale).toInt(), (sourceBitmap.height * scale).toInt(), true)
-                        if (scaled != sourceBitmap) sourceBitmap.recycle()
-                        scaled
+
+                    // Ensure bitmap is in ARGB_8888 for reliable processing
+                    val finalBitmap = if (sourceBitmap.config != Bitmap.Config.ARGB_8888) {
+                        val converted = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
+                        sourceBitmap.recycle()
+                        converted
                     } else {
-                        sourceBitmap.copy(Bitmap.Config.ARGB_8888, true).also { sourceBitmap.recycle() }
+                        sourceBitmap
                     }
-                    setOriginalBitmap(previewScale)
+
+                    setOriginalBitmap(finalBitmap)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to init editor bitmap", e)
                 }
@@ -209,6 +230,9 @@ class EditorViewModel @Inject constructor(
     }
 
     private fun pushToHistory(state: EditState) {
+        // Prevent duplicate states
+        if (editHistory.isNotEmpty() && editHistory.last() == state) return
+
         if (currentEditIndex < editHistory.size - 1) {
             editHistory.subList(currentEditIndex + 1, editHistory.size).clear()
         }
@@ -217,8 +241,23 @@ class EditorViewModel @Inject constructor(
         currentEditIndex = editHistory.lastIndex
     }
 
-    fun undo() = viewModelScope.launch { editMutex.withLock { if (currentEditIndex > 0) { currentEditIndex--; _currentEditState.value = editHistory[currentEditIndex] } } }
-    fun redo() = viewModelScope.launch { editMutex.withLock { if (currentEditIndex < editHistory.size - 1) { currentEditIndex++; _currentEditState.value = editHistory[currentEditIndex] } } }
+    fun undo() = viewModelScope.launch {
+        editMutex.withLock {
+            if (currentEditIndex > 0) {
+                currentEditIndex--
+                _currentEditState.value = editHistory[currentEditIndex]
+            }
+        }
+    }
+
+    fun redo() = viewModelScope.launch {
+        editMutex.withLock {
+            if (currentEditIndex < editHistory.size - 1) {
+                currentEditIndex++
+                _currentEditState.value = editHistory[currentEditIndex]
+            }
+        }
+    }
 
     fun setOriginalBitmap(bitmap: Bitmap) {
         if (originalBitmap != bitmap) {
@@ -234,7 +273,7 @@ class EditorViewModel @Inject constructor(
         withContext(Dispatchers.Default) {
             try {
                 // Dynamically downscale preview if the device is getting too hot
-                val scale = PhysicsAndMath.calculateThermalScaleFactor(currentThermalLevel)
+                val scale = MathUtils.calculateThermalScaleFactor(currentThermalLevel)
                 val workingBitmap = if (scale < 1.0f) {
                     Bitmap.createScaledBitmap(src, (src.width * scale).toInt(), (src.height * scale).toInt(), true)
                 } else {
@@ -267,7 +306,10 @@ class EditorViewModel @Inject constructor(
         _isPreviewUpdating.value = false
     }
 
-    fun setComparing(value: Boolean) { _isComparing.value = value }
+    fun setComparing(value: Boolean) {
+        _isComparing.value = value
+    }
+
     fun resetEditor() = updateEditState { EditState(contrast = 1f, saturation = 1f) }
 
     // --- TRANSFORMS ---
@@ -406,9 +448,15 @@ class EditorViewModel @Inject constructor(
     fun applyLut(item: LutItem) = viewModelScope.launch(Dispatchers.IO) {
         try {
             val cachedLut = lutCache.get(item.path)
-            if (cachedLut != null) { updateEditState { it.copy(lutData = cachedLut, lutIntensity = 1f, filterId = item.name) }; return@launch }
+            if (cachedLut != null) {
+                updateEditState { it.copy(lutData = cachedLut, lutIntensity = 1f, filterId = item.name) }
+                return@launch
+            }
             val newLut = editingEngine.loadLut(item.path)
-            if (newLut != null) { lutCache.put(item.path, newLut); updateEditState { it.copy(lutData = newLut, lutIntensity = 1f, filterId = item.name) } }
+            if (newLut != null) {
+                lutCache.put(item.path, newLut)
+                updateEditState { it.copy(lutData = newLut, lutIntensity = 1f, filterId = item.name) }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to apply LUT ${item.name}", e)
         }
@@ -426,13 +474,19 @@ class EditorViewModel @Inject constructor(
     fun exportFrame(uri: Uri, posMs: Long) = viewModelScope.launch(Dispatchers.IO) {
         try {
             val file = editingEngine.extractFrame(uri, posMs)
-            if (file != null) MediaScannerConnection.scanFile(getApplication(), arrayOf(file.absolutePath), null) { _, _ -> }
+            if (file != null) {
+                MediaScannerConnection.scanFile(getApplication(), arrayOf(file.absolutePath), null) { _, _ -> }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to export frame", e)
         }
     }
 
-    fun cancelCurrentOperation() { fileOperationJob?.cancel(); editingEngine.cancelExport(); _fileOperationState.value = FileOperationState.Idle }
+    fun cancelCurrentOperation() {
+        fileOperationJob?.cancel()
+        editingEngine.cancelExport()
+        _fileOperationState.value = FileOperationState.Idle
+    }
 
     fun saveMedia(mediaItem: MediaItem, targetWidth: Int = 1920, targetHeight: Int = 1080, targetFps: Int = 30, videoBitrate: Int = 15000000, exportAsSticker: Boolean = false) {
         fileOperationJob?.cancel()
@@ -448,10 +502,19 @@ class EditorViewModel @Inject constructor(
                     videoBitrate = videoBitrate,
                     isVideo = mediaItem.isVideo,
                     asSticker = exportAsSticker
-                ) { progress -> _fileOperationState.value = FileOperationState.Editing(progress) }
-                if (file != null) MediaScannerConnection.scanFile(getApplication(), arrayOf(file.absolutePath), null) { _, _ -> }
+                ) { progress ->
+                    _fileOperationState.value = FileOperationState.Editing(progress)
+                }
+
+                if (file != null) {
+                    MediaScannerConnection.scanFile(getApplication(), arrayOf(file.absolutePath), null) { _, _ -> }
+                    _events.send(GalleryEvent.ShowToast("Media saved successfully"))
+                } else {
+                    _events.send(GalleryEvent.ShowToast("Export failed or was cancelled."))
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Export failed", e)
+                _events.send(GalleryEvent.ShowToast("An error occurred during export."))
             } finally {
                 _fileOperationState.value = FileOperationState.Idle
             }
