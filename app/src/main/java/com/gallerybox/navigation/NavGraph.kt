@@ -60,7 +60,6 @@ sealed interface Route {
     // Gallery Main
     @Serializable data object Pictures : Route
     @Serializable data object Albums : Route
-    @Serializable data object Videos : Route
     @Serializable data object Stories : Route
     @Serializable data object Music : Route
 

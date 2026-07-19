@@ -79,6 +79,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.filter
 import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
@@ -92,14 +93,13 @@ import androidx.media3.common.util.UnstableApi
 import com.gallerybox.viewmodel.PhotoSort
 import com.gallerybox.viewmodel.TrashViewModel
 import com.gallerybox.viewmodel.GalleryViewerState
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlin.math.cos
 
 fun isValidUri(context: Context, uri: Uri?): Boolean = uri != null && uri != Uri.EMPTY
 fun getSmartName(item: MediaItem): String = item.name.lowercase().let { name -> when { "fdownloader" in name -> "Downloaded Video"; "instagram" in name -> "Instagram Video"; "whatsapp" in name -> "WhatsApp Media"; "screenshot" in name -> "Screenshot"; item.isDocument -> "Document"; item.isVideo -> "Video"; else -> "Photo" } }
@@ -164,7 +164,24 @@ fun PictureScreen(
     val openViewerState = viewerState as? GalleryViewerState.Open
     val currentItem: MediaItem? = openViewerState?.mediaId?.let { id -> mediaMap[id] }
 
-    val pagedMedia = viewModel.pagedMedia.collectAsLazyPagingItems()
+    // Filter PagingData dynamically to exclude photos/videos when the DOCUMENT tab is active
+    val pagedMedia = remember(viewModel, activeFilter) {
+        viewModel.pagedMedia.map { pagingData ->
+            pagingData.filter { item ->
+                if (item is GalleryGridItem.Media) {
+                    val filterName = activeFilter.name.uppercase()
+                    if (filterName == "DOCUMENT" || filterName == "DOCUMENTS") {
+                        item.item.isDocument && !item.item.isVideo
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            }
+        }
+    }.collectAsLazyPagingItems()
+
     val prefs = remember { context.getSharedPreferences("gallery_prefs", Context.MODE_PRIVATE) }
     var columnCount by rememberSaveable { mutableIntStateOf(prefs.getInt("picture_grid_columns", 4)) }
     var isSelectionMode by rememberSaveable { mutableStateOf(false) }
@@ -174,7 +191,15 @@ fun PictureScreen(
 
     val showScrollToTop by remember { derivedStateOf { gridState.firstVisibleItemIndex > 10 } }
     val isScrolling = gridState.isScrollInProgress
-    val filters = remember { MediaTypeFilter.entries }
+
+    // Explicitly filter to remove GIF and RAW, keeping only relevant categories
+    val filters = remember {
+        MediaTypeFilter.entries.filter {
+            val n = it.name.uppercase()
+            n == "ALL" || n == "PHOTOS" || n == "VIDEOS" || n == "DOCUMENT" || n == "DOCUMENTS"
+        }
+    }
+
     val pagerState = rememberPagerState(initialPage = filters.indexOf(activeFilter).coerceAtLeast(0), pageCount = { filters.size })
 
     val intentSenderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
