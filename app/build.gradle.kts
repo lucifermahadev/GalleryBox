@@ -23,7 +23,7 @@ android {
         applicationId = "com.gallerybox"
         minSdk = 31
         targetSdk = 35
-        versionCode = 82
+        versionCode = 83
 
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -247,7 +247,7 @@ dependencies {
     // Markdown & Archives
     implementation("org.commonmark:commonmark:0.22.0")
     implementation("org.apache.commons:commons-compress:1.26.2")
-
+    implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable:0.3.7")
     // Paging 3
     val pagingVersion = "3.4.2"
     implementation("androidx.paging:paging-runtime:$pagingVersion")

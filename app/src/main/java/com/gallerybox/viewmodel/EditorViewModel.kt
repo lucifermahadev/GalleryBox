@@ -1,5 +1,6 @@
 @file:Suppress("unused", "OPT_IN_USAGE", "UNCHECKED_CAST", "ObsoleteSdkInt", "DEPRECATION")
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 
 package com.gallerybox.viewmodel
 
@@ -122,7 +123,28 @@ class EditorViewModel @Inject constructor(
         editMutex.withLock {
             editHistory.clear()
             currentEditIndex = -1
-            val initialState = EditState(contrast = 1f, saturation = 1f)
+            val initialState = EditState(
+                contrast = 1f,
+                saturation = 1f,
+                brightness = 0f,
+                exposure = 0f,
+                highlights = 0f,
+                shadows = 0f,
+                temperature = 0f,
+                tint = 0f,
+                cropRect = RectF(0f, 0f, 1f, 1f),
+                rotationDegrees = 0f,
+                straightenDegrees = 0f,
+                flipHorizontal = false,
+                flipVertical = false,
+                lutData = null,
+                lutIntensity = 1f,
+                filterId = null,
+                textLayers = emptyList(),
+                stickers = emptyList(),
+                drawLayers = emptyList(),
+                mosaicRegions = emptyList()
+            )
             editHistory.add(initialState)
             currentEditIndex = 0
             _currentEditState.value = initialState
@@ -147,7 +169,6 @@ class EditorViewModel @Inject constructor(
                             decoder.allocator = ImageDecoder.ALLOCATOR_DEFAULT
                             decoder.isMutableRequired = true
 
-                            // Decode directly to target size to save memory on large images
                             if (info.size.width > maxDimen || info.size.height > maxDimen) {
                                 val scale = minOf(
                                     maxDimen.toFloat() / info.size.width,
@@ -180,7 +201,6 @@ class EditorViewModel @Inject constructor(
                         }
                     }
 
-                    // Ensure bitmap is in ARGB_8888 for reliable processing
                     val finalBitmap = if (sourceBitmap.config != Bitmap.Config.ARGB_8888) {
                         val converted = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
                         sourceBitmap.recycle()
@@ -197,7 +217,6 @@ class EditorViewModel @Inject constructor(
         }
     }
 
-    // --- GESTURE & HISTORY LOGIC ---
     fun beginGesture() = viewModelScope.launch {
         editMutex.withLock {
             isGestureActive = true
@@ -224,13 +243,14 @@ class EditorViewModel @Inject constructor(
             _currentEditState.value = newState
 
             if (!isGestureActive) {
-                pushToHistory(newState)
+                if (editHistory.lastOrNull() != newState) {
+                    pushToHistory(newState)
+                }
             }
         }
     }
 
     private fun pushToHistory(state: EditState) {
-        // Prevent duplicate states
         if (editHistory.isNotEmpty() && editHistory.last() == state) return
 
         if (currentEditIndex < editHistory.size - 1) {
@@ -264,15 +284,27 @@ class EditorViewModel @Inject constructor(
             originalBitmap?.recycle()
             originalBitmap = bitmap
         }
-        viewModelScope.launch { generatePreview(_currentEditState.value, _thermalLevel.value) }
+        viewModelScope.launch {
+            _previewBitmap.value?.let {
+                if (it !== originalBitmap) {
+                    it.recycle()
+                }
+            }
+            generatePreview(_currentEditState.value, _thermalLevel.value)
+        }
     }
 
     private suspend fun generatePreview(state: EditState, currentThermalLevel: Int) {
         val src = originalBitmap ?: return
+
+        Log.d(TAG, "Preview Filter = ${state.filterId}")
+        Log.d(TAG, "Preview LUT = ${state.lutData != null}")
+        Log.d(TAG, "Intensity = ${state.lutIntensity}")
+
         _isPreviewUpdating.value = true
-        withContext(Dispatchers.Default) {
-            try {
-                // Dynamically downscale preview if the device is getting too hot
+
+        try {
+            withContext(Dispatchers.Default.limitedParallelism(1)) {
                 val scale = MathUtils.calculateThermalScaleFactor(currentThermalLevel)
                 val workingBitmap = if (scale < 1.0f) {
                     Bitmap.createScaledBitmap(src, (src.width * scale).toInt(), (src.height * scale).toInt(), true)
@@ -280,30 +312,30 @@ class EditorViewModel @Inject constructor(
                     src
                 }
 
-                // Render overlays onto the working bitmap preview
                 val newPreview = editingEngine.createPreview(
                     bitmap = workingBitmap,
                     state = state,
-                    renderOverlays = true
+                    renderOverlays = false // Prevents double text/sticker overlapping in UI
                 )
 
                 val oldPreview = _previewBitmap.value
 
                 _previewBitmap.value = newPreview
 
-                // Safely recycle old bitmaps
-                if (workingBitmap != src && workingBitmap != newPreview) {
+                if (workingBitmap !== src && workingBitmap !== newPreview) {
                     workingBitmap.recycle()
                 }
-                if (oldPreview != null && oldPreview != originalBitmap && oldPreview != newPreview) {
+                if (oldPreview != null && oldPreview !== originalBitmap && oldPreview !== newPreview) {
                     oldPreview.recycle()
                 }
-
-            } catch (e: Exception) {
+            }
+        } catch (e: Exception) {
+            if (e !is CancellationException) {
                 Log.e(TAG, "Failed to generate preview", e)
             }
+        } finally {
+            _isPreviewUpdating.value = false
         }
-        _isPreviewUpdating.value = false
     }
 
     fun setComparing(value: Boolean) {
@@ -312,25 +344,28 @@ class EditorViewModel @Inject constructor(
 
     fun resetEditor() = updateEditState { EditState(contrast = 1f, saturation = 1f) }
 
-    // --- TRANSFORMS ---
     fun resetCrop() = updateEditState { it.copy(cropRect = RectF(0f, 0f, 1f, 1f), aspectRatio = null, straightenDegrees = 0f) }
     fun setAspectRatio(ratio: Float?) = updateEditState { it.copy(aspectRatio = ratio) }
-    fun updateCropRect(rect: RectF) = updateEditState { it.copy(cropRect = RectF(rect)) }
+
+    fun updateCropRect(rect: RectF) {
+        beginGesture()
+        updateEditState { it.copy(cropRect = RectF(rect)) }
+        endGesture()
+    }
+
     fun rotateLeft() = updateEditState { it.copy(rotationDegrees = (it.rotationDegrees - 90f) % 360f) }
     fun rotateRight() = updateEditState { it.copy(rotationDegrees = (it.rotationDegrees + 90f) % 360f) }
     fun toggleFlipHorizontal() = updateEditState { it.copy(flipHorizontal = !it.flipHorizontal) }
     fun toggleFlipVertical() = updateEditState { it.copy(flipVertical = !it.flipVertical) }
 
-    // --- DRAW & MOSAIC TOOLS ---
     fun addDrawStroke(stroke: DrawLayer) = updateEditState { it.copy(drawLayers = it.drawLayers + stroke) }
     fun clearDrawings() = updateEditState { it.copy(drawLayers = emptyList()) }
     fun addMosaicRegion(region: RectF, intensity: Float) = updateEditState {
         it.copy(mosaicRegions = it.mosaicRegions + MosaicLayer(id = UUID.randomUUID().toString(), region = region, intensity = intensity))
     }
 
-    // --- TEXT ENGINE ---
     fun addText(text: String, color: Int = Color.WHITE, size: Float = 40f) = updateEditState { state ->
-        val offset = (state.textLayers.size * 0.03f)
+        val offset = (state.textLayers.size % 5) * 0.04f
         val cx = (0.5f + offset).coerceAtMost(0.8f)
         val cy = (0.5f + offset).coerceAtMost(0.8f)
 
@@ -348,7 +383,13 @@ class EditorViewModel @Inject constructor(
             )
         )
     }
-    fun updateText(id: String, update: (TextLayer) -> TextLayer) = updateEditState { state -> state.copy(textLayers = state.textLayers.map { if (it.id == id) update(it) else it }) }
+
+    fun updateText(id: String, update: (TextLayer) -> TextLayer) {
+        beginGesture()
+        updateEditState { state -> state.copy(textLayers = state.textLayers.map { if (it.id == id) update(it) else it }) }
+        endGesture()
+    }
+
     fun removeText(id: String) = updateEditState { state -> state.copy(textLayers = state.textLayers.filterNot { it.id == id }) }
     fun duplicateText(id: String) = updateEditState { state ->
         val layer = state.textLayers.find { it.id == id } ?: return@updateEditState state
@@ -371,7 +412,6 @@ class EditorViewModel @Inject constructor(
     fun toggleTextVisibility(id: String) = updateText(id) { it.copy(isVisible = !it.isVisible) }
     fun clearText() = updateEditState { it.copy(textLayers = emptyList()) }
 
-    // --- STICKER ENGINE ---
     private fun loadStickers() = viewModelScope.launch(Dispatchers.IO) {
         runCatching {
             val assets = getApplication<Application>().assets
@@ -388,8 +428,9 @@ class EditorViewModel @Inject constructor(
             _stickerItems.value = allItems
         }.onFailure { Log.e(TAG, "Failed to load stickers", it) }
     }
+
     fun addSticker(assetPath: String) = updateEditState { state ->
-        val offset = (state.stickers.size * 0.03f)
+        val offset = (state.stickers.size % 5) * 0.04f
         val cx = (0.5f + offset).coerceAtMost(0.8f)
         val cy = (0.5f + offset).coerceAtMost(0.8f)
 
@@ -406,7 +447,13 @@ class EditorViewModel @Inject constructor(
             )
         )
     }
-    fun updateSticker(id: String, update: (StickerLayer) -> StickerLayer) = updateEditState { state -> state.copy(stickers = state.stickers.map { if (it.id == id) update(it) else it }) }
+
+    fun updateSticker(id: String, update: (StickerLayer) -> StickerLayer) {
+        beginGesture()
+        updateEditState { state -> state.copy(stickers = state.stickers.map { if (it.id == id) update(it) else it }) }
+        endGesture()
+    }
+
     fun removeSticker(id: String) = updateEditState { state -> state.copy(stickers = state.stickers.filterNot { it.id == id }) }
     fun duplicateSticker(id: String) = updateEditState { state ->
         val layer = state.stickers.find { it.id == id } ?: return@updateEditState state
@@ -429,7 +476,6 @@ class EditorViewModel @Inject constructor(
     fun toggleStickerVisibility(id: String) = updateSticker(id) { it.copy(isVisible = !it.isVisible) }
     fun clearStickers() = updateEditState { it.copy(stickers = emptyList()) }
 
-    // --- LUT ENGINE ---
     private fun loadLuts() = viewModelScope.launch(Dispatchers.IO) {
         runCatching {
             val assets = getApplication<Application>().assets
@@ -445,26 +491,49 @@ class EditorViewModel @Inject constructor(
             _lutItems.value = allItems
         }.onFailure { Log.e(TAG, "Failed to load LUTs", it) }
     }
+
     fun applyLut(item: LutItem) = viewModelScope.launch(Dispatchers.IO) {
         try {
+            Log.d(TAG, "Clicked = ${item.name}")
+            Log.d(TAG, "Path = ${item.path}")
+
             val cachedLut = lutCache.get(item.path)
             if (cachedLut != null) {
                 updateEditState { it.copy(lutData = cachedLut, lutIntensity = 1f, filterId = item.name) }
+                Log.d(TAG, "LUT Applied (Cached) : ${item.name}")
+                Log.d(TAG, "State LUT = ${_currentEditState.value.lutData != null}")
                 return@launch
             }
+
             val newLut = editingEngine.loadLut(item.path)
+            Log.d(TAG, "Loaded = ${newLut != null}")
+            Log.d(TAG, "Size = ${newLut?.size}")
+            Log.d(TAG, "Data = ${newLut?.data?.size}")
+
             if (newLut != null) {
                 lutCache.put(item.path, newLut)
                 updateEditState { it.copy(lutData = newLut, lutIntensity = 1f, filterId = item.name) }
+                Log.d(TAG, "LUT Applied : ${item.name}")
+                Log.d(TAG, "State LUT = ${_currentEditState.value.lutData != null}")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to apply LUT ${item.name}", e)
         }
     }
-    fun setLutIntensity(value: Float) = updateEditState { it.copy(lutIntensity = value) }
-    fun clearLut() = updateEditState { it.copy(lutData = null, lutIntensity = 1f, filterId = null) }
 
-    // --- VIDEO ENGINE ---
+    fun setLutIntensity(value: Float) = updateEditState { it.copy(lutIntensity = value) }
+
+    fun clearLut() {
+        lutCache.evictAll()
+        updateEditState {
+            it.copy(
+                lutData = null,
+                lutIntensity = 1f,
+                filterId = null
+            )
+        }
+    }
+
     fun setTrimRange(startMs: Long, endMs: Long) = updateEditState { it.copy(trimStartMs = startMs, trimEndMs = endMs) }
 
     fun commitTrim(startMs: Long, endMs: Long) = updateEditState {
@@ -524,9 +593,14 @@ class EditorViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         editingEngine.cancelExport()
+
+        _previewBitmap.value?.let {
+            if (it !== originalBitmap) {
+                it.recycle()
+            }
+        }
+        originalBitmap?.recycle()
         lutCache.evictAll()
         editHistory.clear()
-        originalBitmap?.recycle()
-        _previewBitmap.value?.recycle()
     }
 }

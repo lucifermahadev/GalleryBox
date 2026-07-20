@@ -66,7 +66,7 @@ enum class SaveMode { SAVE_AS_NEW, REPLACE_ORIGINAL }
 enum class LockType { NONE, PIN, PATTERN }
 enum class AlbumSort { DateDesc, DateAsc, NameAsc, NameDesc, SizeDesc, CountDesc, Custom }
 enum class PhotoSort { NameAsc, NameDesc, SizeDesc, DateAsc, DateDesc }
-enum class MediaTypeFilter(val label: String) { ALL("All"), PHOTOS("Photos"), VIDEOS("Videos"), GIFS("GIFs"), RAW("RAW"), DOCUMENTS("Documents") }
+enum class MediaTypeFilter(val label: String) { ALL("All"), PHOTOS("Photos"), VIDEOS("Videos"), DOCUMENTS("Documents") }
 enum class MergeMode { MOVE, COPY, MOVE_AND_DELETE }
 
 data class ExportAdvanced(val bitrate: Int = 10000000, val fps: Int = 30, val codec: String = "video/avc")
@@ -307,9 +307,8 @@ class GalleryViewModel @Inject constructor(
             MediaTypeFilter.ALL -> indexes.all.filter { !isMediaDoc(it) }
             MediaTypeFilter.PHOTOS -> indexes.photos
             MediaTypeFilter.VIDEOS -> indexes.videos
-            MediaTypeFilter.GIFS -> indexes.gifs
             MediaTypeFilter.DOCUMENTS -> indexes.docs
-            MediaTypeFilter.RAW -> indexes.all.filter { it.mimeType.contains("dng", true) || it.mimeType.contains("raw", true) }
+
         }
 
         if (q.isNotBlank()) {
@@ -1445,8 +1444,6 @@ class MediaPagingSource(
                     ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.htm'
                     )
                 """.trimIndent()
-                MediaTypeFilter.GIFS -> "${MediaStore.Files.FileColumns.MIME_TYPE} = 'image/gif'"
-                MediaTypeFilter.RAW -> "(${MediaStore.Files.FileColumns.MIME_TYPE} = 'image/x-adobe-dng' OR ${MediaStore.Files.FileColumns.MIME_TYPE} LIKE 'image/raw%')"
             }
 
             val selectionArgsList = mutableListOf<String>()

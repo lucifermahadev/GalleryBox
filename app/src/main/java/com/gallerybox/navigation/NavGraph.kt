@@ -215,7 +215,6 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
         }
     }
 
-    // Step 1 - Create one shared MusicViewModel
     val sharedMusicViewModel: MusicViewModel = hiltViewModel()
 
     Scaffold(
@@ -231,11 +230,9 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
             startDestination = initialStartDestination,
             modifier = Modifier.padding(padding)
         ) {
-            // Step 2 & 3 - Pass the shared view model to mainTabs
             mainTabs(navController, context, navigateToVideo, onLockApp, { isFullScreenMediaOpen = it }, sharedMusicViewModel)
             albumGraphs(navController, navigateToVideo, onLockApp) { isFullScreenMediaOpen = it }
             editorGraphs(navController)
-            // Step 4 - Pass the shared view model to toolsAndUtilityGraphs
             toolsAndUtilityGraphs(navController, navigateToVideo, context, onLockApp, sharedMusicViewModel)
         }
     }
@@ -298,7 +295,6 @@ private fun NavGraphBuilder.mainTabs(
         )
     }
 
-    // Step 3 - Use the shared view model here
     composable<Route.Music> {
         MusicScreen(
             viewModel = musicViewModel,
@@ -368,7 +364,6 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     composable<Route.DuoMusic> { DuoMusicScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
     composable<Route.Settings> { SettingScreen(onBack = { nav.popBackStack() }) }
 
-    // Consolidated Document Graph
     composable<Route.DocumentReader> {
         AllDocumentReaderScreen(
             onBack = { nav.popBackStack() },
@@ -467,8 +462,9 @@ fun BottomNavigationBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+                // FIX: Chained padding to safely apply horizontal and vertical separately
+                .padding(horizontal = 12.dp)
+                .padding(top = 12.dp, bottom = 16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -490,7 +486,7 @@ fun BottomNavigationBar(
                                 }
                             }
                         }
-                        .padding(vertical = 6.dp),
+                        .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(
@@ -518,7 +514,6 @@ fun BottomNavigationBar(
         }
     }
 }
-
 fun safeLaunchCamera(context: Context) {
     try {
         context.startActivity(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))

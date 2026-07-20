@@ -329,8 +329,13 @@ fun VideoPlayerContent(
         }
     }
 
-    LaunchedEffect(gestureState.isSeeking, currentVideoUri) {
-        if (gestureState.isSeeking && currentVideoUri.isNotBlank()) {
+    var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
+    var isPlaying by remember { mutableStateOf(player.isPlaying) }
+
+    // Lazy initialize thumbnail loader only in background after playback starts for fast startup
+    LaunchedEffect(currentVideoUri, isPlaying) {
+        if (isPlaying && currentVideoUri.isNotBlank()) {
+            delay(1500)
             withContext(Dispatchers.IO) {
                 frameLoader.setSource(Uri.parse(currentVideoUri))
             }
@@ -349,8 +354,6 @@ fun VideoPlayerContent(
             }
     }
 
-    var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
-    var isPlaying by remember { mutableStateOf(player.isPlaying) }
     var currentTimeState by remember { mutableLongStateOf(0L) }
     var bufferedPositionState by remember { mutableLongStateOf(0L) }
     var totalDuration by remember { mutableLongStateOf(0L) }
@@ -445,6 +448,7 @@ fun VideoPlayerContent(
         player.playbackParameters = PlaybackParameters(speed, pitch)
     }
 
+    // Optimized loading: Avoid rebuilding media items if the playlist hasn't changed.
     LaunchedEffect(playlistUrls, initialVideoUrl) {
         if (playlistUrls.isNotEmpty()) {
             try {
@@ -463,7 +467,13 @@ fun VideoPlayerContent(
                 val actualIndex = playlistUrls.indexOf(initialVideoUrl).takeIf { it >= 0 } ?: startIndex
                 val savedPos = prefs.getLong(initialVideoUrl, 0L)
 
-                if (player.mediaItemCount != playlistUrls.size) {
+                var isSamePlaylist = player.mediaItemCount == playlistUrls.size
+                if (isSamePlaylist && playlistUrls.isNotEmpty() && player.mediaItemCount > 0) {
+                    val firstUri = player.getMediaItemAt(0).localConfiguration?.uri?.toString()
+                    if (firstUri != playlistUrls[0]) isSamePlaylist = false
+                }
+
+                if (!isSamePlaylist) {
                     val items = playlistUrls.map { MediaItem.fromUri(Uri.parse(it)) }
                     player.setMediaItems(items)
                     player.prepare()
@@ -511,10 +521,6 @@ fun VideoPlayerContent(
                 if (selectedVideoFormat != null) {
                     videoFormat = selectedVideoFormat
                 }
-            }
-
-            override fun onVideoSizeChanged(videoSize: VideoSize) {
-                // Formatting data handled in onTracksChanged safely.
             }
         }
         player.addListener(listener)
@@ -577,6 +583,12 @@ fun VideoPlayerContent(
     }
 
     BackHandler { if (!isInPiPMode) onBackPress() }
+
+    val abRepeatStateStr = when {
+        abRepeatStart != null && abRepeatEnd != null -> "[A-B]"
+        abRepeatStart != null -> "[A- ]"
+        else -> "A-B"
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
@@ -677,13 +689,7 @@ fun VideoPlayerContent(
                     seekPosition = gestureState.seekPosition,
                     hasNext = player.hasNextMediaItem(),
                     hasPrev = player.hasPreviousMediaItem() || player.currentPosition > 3000L,
-                    currentRepeatMode = autoRepeat,
                     isHdr = isHdr,
-                    abRepeatState = when {
-                        abRepeatStart != null && abRepeatEnd != null -> "[A-B]"
-                        abRepeatStart != null -> "[A- ]"
-                        else -> "A-B"
-                    },
                     onTogglePlay = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         if (playbackState == Player.STATE_ENDED) {
@@ -725,12 +731,6 @@ fun VideoPlayerContent(
                         isLocked = true
                         showControls = false
                     },
-                    onResizeToggle = {
-                        val modes = PremiumResizeMode.entries.toTypedArray()
-                        resizeMode = modes[(resizeMode.ordinal + 1) % modes.size]
-                        triggerHideJob(isPlaying)
-                    },
-                    onOrientationToggle = { manualRotateOverride = !manualRotateOverride },
                     onOpenMenu = {
                         showMenuSheet = true
                         showControls = false
@@ -754,42 +754,11 @@ fun VideoPlayerContent(
                             }
                         }
                     },
-                    onRepeatToggle = {
-                        val entries = PremiumRepeatMode.entries.toTypedArray()
-                        autoRepeat = entries[(autoRepeat.ordinal + 1) % entries.size]
-                    },
                     onSpeedToggle = {
                         showMenuSheet = true
                         showControls = false
                     },
-                    onControlsPositioned = { controlsTopBound = it },
-                    onAbRepeatToggle = {
-                        when {
-                            abRepeatStart == null -> abRepeatStart = player.currentPosition
-                            abRepeatEnd == null -> {
-                                val current = player.currentPosition
-                                if (current > abRepeatStart!!) {
-                                    abRepeatEnd = current
-                                } else {
-                                    abRepeatStart = null
-                                    Toast.makeText(context, "Invalid A-B range", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                            else -> {
-                                abRepeatStart = null
-                                abRepeatEnd = null
-                            }
-                        }
-                        triggerHideJob(isPlaying)
-                    },
-                    onFrameStepForward = {
-                        viewModel.stepFrame(player, true)
-                        triggerHideJob(isPlaying)
-                    },
-                    onFrameStepBackward = {
-                        viewModel.stepFrame(player, false)
-                        triggerHideJob(isPlaying)
-                    }
+                    onControlsPositioned = { controlsTopBound = it }
                 )
             }
         }
@@ -824,6 +793,8 @@ fun VideoPlayerContent(
             player = player,
             sleepTimerActive = sleepTimerMs != null,
             audioDelayMs = audioDelayMs,
+            abRepeatState = abRepeatStateStr,
+            resizeMode = resizeMode,
             onDismissRequest = {
                 showMenuSheet = false
                 showControls = true
@@ -858,7 +829,32 @@ fun VideoPlayerContent(
                 Toast.makeText(context, "Audio Delay: ${delayOffset.toInt()} ms", Toast.LENGTH_SHORT).show()
             },
             onShare = { /* Handle Share */ },
-            onDetails = { /* Handle Details */ }
+            onDetails = { /* Handle Details */ },
+            onAbRepeatToggle = {
+                when {
+                    abRepeatStart == null -> abRepeatStart = player.currentPosition
+                    abRepeatEnd == null -> {
+                        val current = player.currentPosition
+                        if (current > abRepeatStart!!) {
+                            abRepeatEnd = current
+                        } else {
+                            abRepeatStart = null
+                            Toast.makeText(context, "Invalid A-B range", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    else -> {
+                        abRepeatStart = null
+                        abRepeatEnd = null
+                    }
+                }
+            },
+            onFrameStepForward = { viewModel.stepFrame(player, true) },
+            onFrameStepBackward = { viewModel.stepFrame(player, false) },
+            onResizeToggle = {
+                val modes = PremiumResizeMode.entries.toTypedArray()
+                resizeMode = modes[(resizeMode.ordinal + 1) % modes.size]
+            },
+            onOrientationToggle = { manualRotateOverride = !manualRotateOverride }
         )
     }
 }
@@ -880,9 +876,7 @@ fun VideoControlsOverlay(
     seekPosition: Float,
     hasNext: Boolean,
     hasPrev: Boolean,
-    currentRepeatMode: PremiumRepeatMode,
     isHdr: Boolean,
-    abRepeatState: String,
     onTogglePlay: () -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
@@ -890,16 +884,10 @@ fun VideoControlsOverlay(
     onSeekFinished: () -> Unit,
     onBack: () -> Unit,
     onLock: () -> Unit,
-    onResizeToggle: () -> Unit,
-    onOrientationToggle: () -> Unit,
     onOpenMenu: () -> Unit,
     onPipClick: () -> Unit,
-    onRepeatToggle: () -> Unit,
     onSpeedToggle: () -> Unit,
-    onControlsPositioned: (Float) -> Unit,
-    onAbRepeatToggle: () -> Unit,
-    onFrameStepForward: () -> Unit,
-    onFrameStepBackward: () -> Unit
+    onControlsPositioned: (Float) -> Unit
 ) {
     var thumbXOffset by remember { mutableFloatStateOf(0f) }
 
@@ -937,17 +925,6 @@ fun VideoControlsOverlay(
 
         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 16.dp)) {
 
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onAbRepeatToggle) {
-                        Text(abRepeatState, color = if (abRepeatState.contains("B]")) MaterialTheme.colorScheme.primaryContainer else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    }
-                    IconButton(onClick = onFrameStepBackward) { Icon(Icons.Rounded.SkipPrevious, null, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(20.dp)) }
-                    IconButton(onClick = onFrameStepForward) { Icon(Icons.Rounded.SkipNext, null, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(20.dp)) }
-                }
-                IconButton(onClick = onResizeToggle) { Icon(Icons.Outlined.AspectRatio, null, tint = Color.White) }
-            }
-
             Box(Modifier.fillMaxWidth().height(80.dp)) {
                 if (isSeeking && previewBitmap != null) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.align(Alignment.BottomStart).offset(x = with(LocalDensity.current) { thumbXOffset.toDp() } - 60.dp, y = (-20).dp)) {
@@ -970,35 +947,30 @@ fun VideoControlsOverlay(
                 Text(totalTimeStr, color = Color.White.copy(0.7f), style = MaterialTheme.typography.labelMedium)
             }
 
-            Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onLock) {
+            Box(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp)) {
+                IconButton(onClick = onLock, modifier = Modifier.align(Alignment.CenterStart)) {
                     Icon(if (isLocked) Icons.Outlined.Lock else Icons.Outlined.LockOpen, null, tint = Color.White, modifier = Modifier.size(24.dp))
                 }
-                IconButton(onClick = onPrev, enabled = hasPrev) {
-                    Icon(Icons.Rounded.SkipPrevious, null, tint = if (hasPrev) Color.White else Color.White.copy(0.3f), modifier = Modifier.size(32.dp))
-                }
 
-                Surface(modifier = Modifier.size(64.dp), shape = CircleShape, color = Color.White.copy(alpha = 0.15f), tonalElevation = 0.dp, shadowElevation = 0.dp, onClick = onTogglePlay) {
-                    Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                        val playIcon = if (playbackState == Player.STATE_ENDED) Icons.Rounded.Replay else if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow
-                        Icon(imageVector = playIcon, contentDescription = "Play/Pause", tint = Color.White, modifier = Modifier.size(42.dp))
+                Row(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onPrev, enabled = hasPrev) {
+                        Icon(Icons.Rounded.SkipPrevious, null, tint = if (hasPrev) Color.White else Color.White.copy(0.3f), modifier = Modifier.size(36.dp))
                     }
-                }
 
-                IconButton(onClick = onNext, enabled = hasNext) {
-                    Icon(Icons.Rounded.SkipNext, null, tint = if (hasNext) Color.White else Color.White.copy(0.3f), modifier = Modifier.size(32.dp))
-                }
-                IconButton(onClick = onRepeatToggle) {
-                    val repeatIcon = when (currentRepeatMode) {
-                        PremiumRepeatMode.OFF -> Icons.Rounded.Repeat
-                        PremiumRepeatMode.ONE -> Icons.Rounded.RepeatOne
-                        PremiumRepeatMode.ALL -> Icons.Rounded.RepeatOn
+                    Surface(modifier = Modifier.size(64.dp), shape = CircleShape, color = Color.White.copy(alpha = 0.15f), tonalElevation = 0.dp, shadowElevation = 0.dp, onClick = onTogglePlay) {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                            val playIcon = if (playbackState == Player.STATE_ENDED) Icons.Rounded.Replay else if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow
+                            Icon(imageVector = playIcon, contentDescription = "Play/Pause", tint = Color.White, modifier = Modifier.size(42.dp))
+                        }
                     }
-                    val repeatTint = if (currentRepeatMode == PremiumRepeatMode.OFF) Color.White.copy(0.6f) else MaterialTheme.colorScheme.primaryContainer
-                    Icon(repeatIcon, null, tint = repeatTint, modifier = Modifier.size(24.dp))
-                }
-                IconButton(onClick = onOrientationToggle) {
-                    Icon(Icons.Outlined.ScreenRotation, null, tint = Color.White, modifier = Modifier.size(24.dp))
+
+                    IconButton(onClick = onNext, enabled = hasNext) {
+                        Icon(Icons.Rounded.SkipNext, null, tint = if (hasNext) Color.White else Color.White.copy(0.3f), modifier = Modifier.size(36.dp))
+                    }
                 }
             }
         }
@@ -1042,7 +1014,7 @@ fun SamsungSeekBar(current: Float, buffered: Float, total: Float, modifier: Modi
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun PlaybackMenuSheet(
     currentSpeed: Float,
@@ -1053,6 +1025,8 @@ private fun PlaybackMenuSheet(
     player: Player,
     sleepTimerActive: Boolean,
     audioDelayMs: Float,
+    abRepeatState: String,
+    resizeMode: PremiumResizeMode,
     onDismissRequest: () -> Unit,
     onSpeedChange: (Float) -> Unit,
     onToggleAutoPlay: (Boolean) -> Unit,
@@ -1062,7 +1036,12 @@ private fun PlaybackMenuSheet(
     onCancelSleepTimer: () -> Unit,
     onSetAudioDelay: (Float) -> Unit,
     onShare: () -> Unit,
-    onDetails: () -> Unit
+    onDetails: () -> Unit,
+    onAbRepeatToggle: () -> Unit,
+    onFrameStepForward: () -> Unit,
+    onFrameStepBackward: () -> Unit,
+    onResizeToggle: () -> Unit,
+    onOrientationToggle: () -> Unit
 ) {
     var currentSubMenu by remember { mutableStateOf<String?>(null) }
 
@@ -1181,8 +1160,9 @@ private fun PlaybackMenuSheet(
                     }
                 }
                 else -> {
-                    LazyColumn(Modifier.padding(24.dp)) {
-                        item { Text("Options", fontWeight = FontWeight.Medium, style = MaterialTheme.typography.titleLarge); Spacer(Modifier.height(16.dp)) }
+                    LazyColumn(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp, top = 8.dp)) {
+
+                        item { Text("Playback", fontWeight = FontWeight.Medium, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 8.dp)) }
                         item {
                             ListItem(
                                 headlineContent = { Text("Playback Speed") },
@@ -1214,13 +1194,8 @@ private fun PlaybackMenuSheet(
                             )
                         }
                         item { HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp)) }
-                        item {
-                            ListItem(
-                                headlineContent = { Text("Auto Play Next") },
-                                leadingContent = { Icon(Icons.Rounded.SkipNext, null) },
-                                trailingContent = { Switch(checked = autoPlayNext, onCheckedChange = onToggleAutoPlay) }
-                            )
-                        }
+
+                        item { Text("Playback Controls", fontWeight = FontWeight.Medium, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 8.dp)) }
                         item {
                             ListItem(
                                 headlineContent = { Text("Repeat Mode") },
@@ -1234,12 +1209,55 @@ private fun PlaybackMenuSheet(
                         }
                         item {
                             ListItem(
-                                headlineContent = { Text("Background Play") },
-                                leadingContent = { Icon(Icons.Rounded.PlayCircleOutline, null) },
-                                trailingContent = { Switch(checked = backgroundPlay, onCheckedChange = onToggleBackgroundPlay) }
+                                headlineContent = { Text("A-B Repeat") },
+                                supportingContent = { Text(abRepeatState) },
+                                leadingContent = { Icon(Icons.Rounded.Repeat, null) },
+                                modifier = Modifier.clickable { onAbRepeatToggle() }
+                            )
+                        }
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Frame Step Forward") },
+                                leadingContent = { Icon(Icons.Rounded.SkipNext, null) },
+                                modifier = Modifier.clickable { onFrameStepForward() }
+                            )
+                        }
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Frame Step Backward") },
+                                leadingContent = { Icon(Icons.Rounded.SkipPrevious, null) },
+                                modifier = Modifier.clickable { onFrameStepBackward() }
+                            )
+                        }
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Aspect Ratio") },
+                                supportingContent = { Text(resizeMode.name) },
+                                leadingContent = { Icon(Icons.Outlined.AspectRatio, null) },
+                                modifier = Modifier.clickable { onResizeToggle() }
+                            )
+                        }
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Rotate Screen") },
+                                leadingContent = { Icon(Icons.Outlined.ScreenRotation, null) },
+                                modifier = Modifier.clickable { onOrientationToggle() }
                             )
                         }
                         item { HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp)) }
+
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Auto Play Next") },
+                                trailingContent = { Switch(checked = autoPlayNext, onCheckedChange = onToggleAutoPlay) }
+                            )
+                        }
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Background Play") },
+                                trailingContent = { Switch(checked = backgroundPlay, onCheckedChange = onToggleBackgroundPlay) }
+                            )
+                        }
                         item { ListItem(headlineContent = { Text("Share") }, leadingContent = { Icon(Icons.Default.Share, null) }, modifier = Modifier.clickable { onShare() }) }
                         item { ListItem(headlineContent = { Text("Details") }, leadingContent = { Icon(Icons.Default.Info, null) }, modifier = Modifier.clickable { onDetails() }) }
                     }

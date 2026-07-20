@@ -272,12 +272,6 @@ class MusicViewModel @Inject constructor(
     private val _allAudioTracks = MutableStateFlow<List<AudioTrack>>(emptyList())
     val allAudioTracks = _allAudioTracks.asStateFlow()
 
-    fun loadAllAudioTracks() {
-        viewModelScope.launch {
-            _allAudioTracks.value = repository.getLocalQueue(_currentSortOption.value)
-        }
-    }
-
     val pagedAudio: Flow<PagingData<AudioTrack>> = combine(_searchQuery.debounce(300), _currentSortOption, ::Pair).flatMapLatest { (q, s) ->
         Pager(PagingConfig(pageSize = 50, enablePlaceholders = false)) {
             AudioPagingSource(getApplication<Application>().contentResolver, q, s)
@@ -293,8 +287,13 @@ class MusicViewModel @Inject constructor(
     private val _favoriteIds = MutableStateFlow<Set<Long>>(emptySet())
     val favoriteIds = _favoriteIds.asStateFlow()
 
+    // Normal recent history tracking
     private val _recentHistory = MutableStateFlow<ArrayDeque<Long>>(ArrayDeque())
     val recentHistory = _recentHistory.asStateFlow()
+
+    // Duo player history tracking
+    private val _duoRecentHistory = MutableStateFlow<ArrayDeque<Long>>(ArrayDeque())
+    val duoRecentHistory = _duoRecentHistory.asStateFlow()
 
     private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
     val playlists = _playlists.asStateFlow()
@@ -378,10 +377,17 @@ class MusicViewModel @Inject constructor(
     }
 
     init {
+        loadAllAudioTracks() // Crucial fix: Preload local queue to prevent blank folders/all songs
         observePlayerManager()
         loadRoomData()
         _eqBands1.value.forEachIndexed { i, v -> playerManager.updateEq(i, v, false) }
         _eqBands2.value.forEachIndexed { i, v -> playerManager.updateEq(i, v, true) }
+    }
+
+    fun loadAllAudioTracks() {
+        viewModelScope.launch {
+            _allAudioTracks.value = repository.getLocalQueue(_currentSortOption.value)
+        }
     }
 
     private fun loadRoomData() {
@@ -391,10 +397,11 @@ class MusicViewModel @Inject constructor(
 
             val deque = ArrayDeque<Long>()
             stats.sortedByDescending { it.lastPlayed }.take(50).forEach { deque.add(it.trackId) }
-            _recentHistory.value = deque
+
+            _recentHistory.value = ArrayDeque(deque)
+            _duoRecentHistory.value = ArrayDeque(deque)
 
             musicDao.getPlaylistsWithTracks().collectLatest { entities ->
-                // Optimized Playlist Resolution: Batch track fetch to reduce DB lookups
                 val uniqueTrackIds = entities.flatMap { it.trackRefs.map { ref -> ref.trackId } }.distinct()
                 val allTracksMap = repository.getTracksByIds(uniqueTrackIds).associateBy { it.id }
 
@@ -464,13 +471,12 @@ class MusicViewModel @Inject constructor(
     fun playTrack(track: AudioTrack, secondary: Boolean = false) {
         if (!secondary) {
             setDuoMode(false)
-            updateStats(track.id)
+            updateStats(track.id, false)
 
             _currentPosition1.value = 0L
             _duration1.value = track.duration
 
             viewModelScope.launch {
-                // Lazy initialize complete queue for shuffle functionality to prevent massive memory footprints at startup
                 val full = if (_allAudioTracks.value.isNotEmpty()) _allAudioTracks.value else {
                     val loaded = repository.getLocalQueue(_currentSortOption.value)
                     _allAudioTracks.value = loaded
@@ -537,6 +543,7 @@ class MusicViewModel @Inject constructor(
         pause(true)
     }
 
+    // Overload 1: Takes track index
     fun playQueue(tracks: List<AudioTrack>, startIndex: Int = 0) {
         if (tracks.isEmpty()) return
         setDuoMode(false)
@@ -550,12 +557,19 @@ class MusicViewModel @Inject constructor(
         }
         _queue.value = q
         _currentQueueIndex.value = 0
-        q.firstOrNull()?.let { updateStats(it.id) }
+        q.firstOrNull()?.let { updateStats(it.id, false) }
         playerManager.setPlaylist(q, 0)
+    }
+
+    // Overload 2: Takes specific AudioTrack
+    fun playQueue(tracks: List<AudioTrack>, trackToPlay: AudioTrack) {
+        val idx = tracks.indexOfFirst { it.id == trackToPlay.id }.coerceAtLeast(0)
+        playQueue(tracks, idx)
     }
 
     fun playDuoTrack(track: AudioTrack, isPlayer2: Boolean) {
         setDuoMode(true)
+        updateStats(track.id, true)
         if (isPlayer2) {
             _currentTrack2.value = track
             _currentPosition2.value = 0L
@@ -827,17 +841,27 @@ class MusicViewModel @Inject constructor(
         sleepTimeRemaining = 0
     }
 
-    private fun updateStats(id: Long) {
+    private fun updateStats(id: Long, isDuo: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
             val existing = musicDao.getStat(id)
             val newStat = existing?.copy(playCount = existing.playCount + 1, lastPlayed = System.currentTimeMillis())
                 ?: TrackStatEntity(id, 1, System.currentTimeMillis(), false)
             musicDao.insertStat(newStat)
-            val h = _recentHistory.value
-            h.remove(id)
-            h.addFirst(id)
-            if (h.size > 50) h.removeLast()
-            _recentHistory.value = h
+
+            // Accurately update the separate recent histories for Compose StateFlow to react
+            if (isDuo) {
+                val h = ArrayDeque(_duoRecentHistory.value)
+                h.remove(id)
+                h.addFirst(id)
+                if (h.size > 50) h.removeLast()
+                _duoRecentHistory.value = h
+            } else {
+                val h = ArrayDeque(_recentHistory.value)
+                h.remove(id)
+                h.addFirst(id)
+                if (h.size > 50) h.removeLast()
+                _recentHistory.value = h
+            }
         }
     }
 

@@ -200,6 +200,8 @@ class LutEngine @Inject constructor(@ApplicationContext private val context: Con
         val s = lut.size
         val d = lut.data
 
+        fun lerp(v0: Float, v1: Float, t: Float): Float = v0 + (v1 - v0) * t
+
         for (i in pixels.indices) {
             val c = pixels[i]
             val a = (c shr 24) and 0xff
@@ -207,15 +209,52 @@ class LutEngine @Inject constructor(@ApplicationContext private val context: Con
             val g = (c shr 8) and 0xff
             val b = c and 0xff
 
-            val ri = (r / 255f * (s - 1)).toInt().coerceIn(0, s - 1)
-            val gi = (g / 255f * (s - 1)).toInt().coerceIn(0, s - 1)
-            val bi = (b / 255f * (s - 1)).toInt().coerceIn(0, s - 1)
+            val rF = (r / 255f) * (s - 1)
+            val gF = (g / 255f) * (s - 1)
+            val bF = (b / 255f) * (s - 1)
 
-            val idx = ((ri + gi * s + bi * s * s) * 3).coerceAtMost(d.size - 3)
+            val r0 = rF.toInt().coerceIn(0, s - 1)
+            val g0 = gF.toInt().coerceIn(0, s - 1)
+            val b0 = bF.toInt().coerceIn(0, s - 1)
 
-            val nr = (d[idx] * 255).toInt().coerceIn(0, 255)
-            val ng = (d[idx + 1] * 255).toInt().coerceIn(0, 255)
-            val nb = (d[idx + 2] * 255).toInt().coerceIn(0, 255)
+            val r1 = (r0 + 1).coerceIn(0, s - 1)
+            val g1 = (g0 + 1).coerceIn(0, s - 1)
+            val b1 = (b0 + 1).coerceIn(0, s - 1)
+
+            val fr = rF - r0
+            val fg = gF - g0
+            val fb = bF - b0
+
+            var nr = 0f
+            var ng = 0f
+            var nb = 0f
+
+            for (ch in 0..2) {
+                val c000 = d[((r0 + g0 * s + b0 * s * s) * 3) + ch]
+                val c100 = d[((r1 + g0 * s + b0 * s * s) * 3) + ch]
+                val c010 = d[((r0 + g1 * s + b0 * s * s) * 3) + ch]
+                val c110 = d[((r1 + g1 * s + b0 * s * s) * 3) + ch]
+                val c001 = d[((r0 + g0 * s + b1 * s * s) * 3) + ch]
+                val c101 = d[((r1 + g0 * s + b1 * s * s) * 3) + ch]
+                val c011 = d[((r0 + g1 * s + b1 * s * s) * 3) + ch]
+                val c111 = d[((r1 + g1 * s + b1 * s * s) * 3) + ch]
+
+                val cx00 = lerp(c000, c100, fr)
+                val cx10 = lerp(c010, c110, fr)
+                val cx01 = lerp(c001, c101, fr)
+                val cx11 = lerp(c011, c111, fr)
+
+                val cxy0 = lerp(cx00, cx10, fg)
+                val cxy1 = lerp(cx01, cx11, fg)
+
+                val fVal = lerp(cxy0, cxy1, fb)
+
+                when (ch) {
+                    0 -> nr = fVal * 255f
+                    1 -> ng = fVal * 255f
+                    2 -> nb = fVal * 255f
+                }
+            }
 
             val finalR = (r + (nr - r) * intensity).toInt().coerceIn(0, 255)
             val finalG = (g + (ng - g) * intensity).toInt().coerceIn(0, 255)
@@ -230,7 +269,7 @@ class LutEngine @Inject constructor(@ApplicationContext private val context: Con
 
 @Singleton
 class StickerEngine @Inject constructor(@ApplicationContext private val context: Context) {
-    private val stickerCache = LruCache<String, Bitmap>(30)
+    private val stickerCache = LruCache<String, Bitmap>(80)
 
     private fun getDiskCacheFile(key: String): File {
         return File(context.cacheDir, "sticker_$key.png")
@@ -264,7 +303,7 @@ class StickerEngine @Inject constructor(@ApplicationContext private val context:
             val docHeight = if (svg.documentHeight > 0) svg.documentHeight else 500f
             val aspect = docWidth / docHeight
 
-            val w = (targetBaseResolution * 0.4f).toInt()
+            val w = (targetBaseResolution * 0.25f).toInt()
             val h = (w / aspect).toInt()
 
             svg.documentWidth = w.toFloat()
@@ -311,10 +350,13 @@ class TextEngine @Inject constructor() {
         }
 
         return try {
-            val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            val paint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG).apply {
                 color = layer.color
                 textSize = (targetBaseResolution * (layer.size / 100f)).coerceAtLeast(12f)
                 typeface = Typeface.DEFAULT_BOLD
+                isSubpixelText = true
+                isLinearText = true
+                isDither = true
             }
 
             val maxWidth = (targetBaseResolution * 0.85f).toInt()
@@ -354,7 +396,7 @@ class PhotoEditorEngine @Inject constructor(
 ) {
     suspend fun createPreview(bitmap: Bitmap, state: EditState, renderOverlays: Boolean): Bitmap {
         return withContext(Dispatchers.Default) {
-            var res = bitmap
+            var res = bitmap.copy(Bitmap.Config.ARGB_8888, true) ?: return@withContext bitmap
 
             // 1. Geometry: Crop
             val cropRect = state.cropRect
@@ -366,10 +408,10 @@ class PhotoEditorEngine @Inject constructor(
                     val h = (cropRect.height() * res.height).toInt().coerceAtMost(res.height - y)
                     if (w > 0 && h > 0) {
                         val newBmp = Bitmap.createBitmap(res, x, y, w, h)
-                        if (newBmp != res && res != bitmap) {
-                            res.recycle()
+                        if (newBmp !== res) {
+                            if (res !== bitmap) res.recycle()
+                            res = newBmp
                         }
-                        res = newBmp
                     }
                 }
             }
@@ -409,12 +451,12 @@ class PhotoEditorEngine @Inject constructor(
             cm.postConcat(tempTintMatrix)
 
             var out = Bitmap.createBitmap(res.width, res.height, Bitmap.Config.ARGB_8888)
-            val paint = Paint()
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
             paint.colorFilter = ColorMatrixColorFilter(cm)
             val canvas = Canvas(out)
             canvas.drawBitmap(res, 0f, 0f, paint)
 
-            if (res != bitmap) {
+            if (res !== bitmap) {
                 res.recycle()
             }
 
@@ -447,9 +489,11 @@ class PhotoEditorEngine @Inject constructor(
 
             // 3. LUT
             val currentLut = state.lutData
-            if (currentLut != null && state.lutIntensity > 0f) {
+            if (currentLut != null && state.lutIntensity > 0.001f) {
                 val lutBmp = lutEngine.applyCpuLut(out, currentLut, state.lutIntensity)
-                out.recycle()
+                if (out !== bitmap) {
+                    out.recycle()
+                }
                 out = lutBmp
             }
 
@@ -480,13 +524,13 @@ class PhotoEditorEngine @Inject constructor(
                             val safeRh = rh.coerceAtMost(out.height - safeRy)
 
                             if (safeRw > 0 && safeRh > 0) {
-                                val crop = Bitmap.createBitmap(out, safeRx, safeRy, safeRw, safeRh)
-                                val smallBmp = Bitmap.createScaledBitmap(crop, smallW, smallH, false)
+                                val cropBmp = Bitmap.createBitmap(out, safeRx, safeRy, safeRw, safeRh)
+                                val smallBmp = Bitmap.createScaledBitmap(cropBmp, smallW, smallH, false)
                                 val pixelated = Bitmap.createScaledBitmap(smallBmp, safeRw, safeRh, false)
 
                                 sCan.drawBitmap(pixelated, safeRx.toFloat(), safeRy.toFloat(), mosaicPaint)
 
-                                crop.recycle()
+                                cropBmp.recycle()
                                 smallBmp.recycle()
                                 pixelated.recycle()
                             }
@@ -494,20 +538,21 @@ class PhotoEditorEngine @Inject constructor(
                     }
                 }
 
+                val matrix = Matrix()
+                val overlayPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG)
+
                 val activeStickers = state.stickers.filter { it.isVisible }.sortedBy { it.zIndex }
                 for (s in activeStickers) {
                     val bmp = stickerEngine.getStickerBitmap(s.assetPath, resV)
                     if (bmp != null) {
-                        val matrix = Matrix()
+                        matrix.reset()
                         matrix.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
                         matrix.postScale(s.scale, s.scale)
                         matrix.postRotate(s.rotation)
                         matrix.postTranslate(s.x * out.width, s.y * out.height)
 
-                        val stickerPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
-                        stickerPaint.alpha = (s.opacity * 255).toInt().coerceIn(0, 255)
-
-                        sCan.drawBitmap(bmp, matrix, stickerPaint)
+                        overlayPaint.alpha = (s.opacity * 255).toInt().coerceIn(0, 255)
+                        sCan.drawBitmap(bmp, matrix, overlayPaint)
                     }
                 }
 
@@ -515,26 +560,26 @@ class PhotoEditorEngine @Inject constructor(
                 for (t in activeTextLayers) {
                     val bmp = textEngine.getTextBitmap(t, resV)
                     if (bmp != null) {
-                        val matrix = Matrix()
+                        matrix.reset()
                         matrix.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
                         matrix.postRotate(t.rotation)
                         matrix.postTranslate(t.x * out.width, t.y * out.height)
 
-                        val textPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
-                        textPaint.alpha = (t.opacity * 255).toInt().coerceIn(0, 255)
-
-                        sCan.drawBitmap(bmp, matrix, textPaint)
+                        overlayPaint.alpha = (t.opacity * 255).toInt().coerceIn(0, 255)
+                        sCan.drawBitmap(bmp, matrix, overlayPaint)
                     }
+                }
+
+                val drawPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    style = Paint.Style.STROKE
+                    strokeCap = Paint.Cap.ROUND
+                    strokeJoin = Paint.Join.ROUND
                 }
 
                 val activeDrawLayers = state.drawLayers.filter { it.isVisible }.sortedBy { it.zIndex }
                 for (stroke in activeDrawLayers) {
-                    val drawPaint = Paint(Paint.ANTI_ALIAS_FLAG)
                     drawPaint.color = stroke.color
                     drawPaint.strokeWidth = stroke.width
-                    drawPaint.style = Paint.Style.STROKE
-                    drawPaint.strokeCap = Paint.Cap.ROUND
-                    drawPaint.strokeJoin = Paint.Join.ROUND
 
                     val path = Path()
                     if (stroke.points.isNotEmpty()) {
@@ -553,16 +598,16 @@ class PhotoEditorEngine @Inject constructor(
             val sY = if (state.flipVertical) -1f else 1f
 
             if (state.rotationDegrees != 0f || state.straightenDegrees != 0f || sX != 1f || sY != 1f) {
-                val matrix = Matrix()
-                matrix.postRotate(
+                val finalMatrix = Matrix()
+                finalMatrix.postRotate(
                     state.rotationDegrees + state.straightenDegrees,
                     out.width / 2f,
                     out.height / 2f
                 )
-                matrix.postScale(sX, sY, out.width / 2f, out.height / 2f)
+                finalMatrix.postScale(sX, sY, out.width / 2f, out.height / 2f)
 
-                val rotated = Bitmap.createBitmap(out, 0, 0, out.width, out.height, matrix, true)
-                if (rotated != out) {
+                val rotated = Bitmap.createBitmap(out, 0, 0, out.width, out.height, finalMatrix, true)
+                if (rotated !== out && out !== bitmap) {
                     out.recycle()
                 }
                 return@withContext rotated
@@ -682,10 +727,10 @@ class ExportEngine @Inject constructor(
 
                     val fos = FileOutputStream(file)
                     val format = if (asSticker) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
-                    out.compress(format, 100, fos)
+                    out.compress(format, 95, fos)
                     fos.close()
 
-                    if (src != out) {
+                    if (src !== out) {
                         src.recycle()
                     }
                     out.recycle()

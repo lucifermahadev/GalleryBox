@@ -3,7 +3,6 @@
 package com.gallerybox.ui.screens.editor
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.RectF
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -53,11 +52,11 @@ import coil.request.ImageRequest
 import com.gallerybox.data.*
 import com.gallerybox.viewmodel.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.*
 import java.util.Locale
 import kotlin.math.*
 
 enum class EditorTab { ADJUST, CROP, LUT, TEXT, STICKER, TRIM }
+enum class EditorMode { HOME, TOOL }
 
 @Immutable
 data class AdjustTool(
@@ -91,9 +90,8 @@ fun EditorScreen(
     val isPreviewUpdating by editorViewModel.isPreviewUpdating.collectAsState()
     val isComparing by editorViewModel.isComparing.collectAsState()
 
-    var activeTab by rememberSaveable(mediaId) {
-        mutableStateOf(if (mediaItem?.isVideo == true) EditorTab.TRIM.name else EditorTab.ADJUST.name)
-    }
+    var editorMode by rememberSaveable { mutableStateOf(EditorMode.HOME) }
+    var activeTab by rememberSaveable { mutableStateOf(if (mediaItem?.isVideo == true) EditorTab.TRIM else EditorTab.ADJUST) }
 
     var selectedLayerId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentPlayerPos by remember { mutableLongStateOf(0L) }
@@ -114,10 +112,16 @@ fun EditorScreen(
     }
 
     val handleBack = {
-        if (selectedLayerId != null) {
-            selectedLayerId = null
-        } else {
-            onBack()
+        when {
+            selectedLayerId != null -> {
+                selectedLayerId = null
+            }
+            editorMode == EditorMode.TOOL -> {
+                editorMode = EditorMode.HOME
+            }
+            else -> {
+                onBack()
+            }
         }
     }
 
@@ -199,53 +203,78 @@ fun EditorScreen(
                     }
 
                     AnimatedContent(
-                        targetState = activeTab,
+                        targetState = editorMode,
                         transitionSpec = {
-                            slideInVertically(tween(250)) { it } + fadeIn() togetherWith slideOutVertically(tween(250)) { it } + fadeOut()
-                        },
-                        label = "tool_panel"
-                    ) { tab ->
-                        Box(Modifier.fillMaxWidth().wrapContentHeight().padding(vertical = 12.dp), Alignment.Center) {
-                            when (tab) {
-                                EditorTab.ADJUST.name -> AdjustToolPanel(editState, mediaItem.isVideo) { editorViewModel.updateEditState(it) }
-                                EditorTab.CROP.name -> CropToolPanel(editorViewModel, gridType) { gridType = it }
-                                EditorTab.LUT.name -> FilterToolPanel(editorViewModel, selectedLutCategory, lutCategories) { selectedLutCategory = it }
-                                EditorTab.TEXT.name -> TextToolPanel(editorViewModel)
-                                EditorTab.STICKER.name -> StickerToolPanel(editorViewModel)
-                                EditorTab.TRIM.name -> TrimToolPanel(editorViewModel, editState, videoDuration) { seekRequest = it }
+                            if (targetState == EditorMode.TOOL) {
+                                slideInHorizontally(tween(250)) { it } + fadeIn() togetherWith slideOutHorizontally(tween(250)) { -it } + fadeOut()
+                            } else {
+                                slideInHorizontally(tween(250)) { -it } + fadeIn() togetherWith slideOutHorizontally(tween(250)) { it } + fadeOut()
                             }
-                        }
-                    }
-
-                    LazyRow(
-                        Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        contentPadding = PaddingValues(horizontal = 16.dp)
-                    ) {
-                        val tabs = if (mediaItem.isVideo) {
-                            listOf(
-                                EditorTab.TRIM to Icons.Rounded.ContentCut,
-                                EditorTab.CROP to Icons.Rounded.Crop,
-                                EditorTab.ADJUST to Icons.Rounded.Tune
-                            )
-                        } else {
-                            listOf(
-                                EditorTab.ADJUST to Icons.Rounded.Tune,
-                                EditorTab.CROP to Icons.Rounded.Crop,
-                                EditorTab.LUT to Icons.Rounded.AutoAwesome,
-                                EditorTab.TEXT to Icons.Rounded.TextFields,
-                                EditorTab.STICKER to Icons.Rounded.EmojiEmotions
-                            )
-                        }
-
-                        items(tabs) { (tb, ic) ->
-                            TabItem(
-                                lbl = tb.name.lowercase().replaceFirstChar { it.uppercase() },
-                                ic = ic,
-                                sel = activeTab == tb.name
+                        },
+                        label = "mode_panel"
+                    ) { mode ->
+                        if (mode == EditorMode.HOME) {
+                            LazyRow(
+                                Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                contentPadding = PaddingValues(horizontal = 16.dp)
                             ) {
-                                activeTab = tb.name
-                                selectedLayerId = null
+                                val tabs = if (mediaItem.isVideo) {
+                                    listOf(
+                                        EditorTab.TRIM to Icons.Rounded.ContentCut,
+                                        EditorTab.CROP to Icons.Rounded.Crop,
+                                        EditorTab.ADJUST to Icons.Rounded.Tune
+                                    )
+                                } else {
+                                    listOf(
+                                        EditorTab.ADJUST to Icons.Rounded.Tune,
+                                        EditorTab.CROP to Icons.Rounded.Crop,
+                                        EditorTab.LUT to Icons.Rounded.AutoAwesome,
+                                        EditorTab.TEXT to Icons.Rounded.TextFields,
+                                        EditorTab.STICKER to Icons.Rounded.EmojiEmotions
+                                    )
+                                }
+
+                                items(tabs) { (tb, ic) ->
+                                    TabItem(
+                                        lbl = tb.name.lowercase().replaceFirstChar { it.uppercase() },
+                                        ic = ic,
+                                        sel = false
+                                    ) {
+                                        activeTab = tb
+                                        selectedLayerId = null
+                                        editorMode = EditorMode.TOOL
+                                    }
+                                }
+                            }
+                        } else {
+                            Column(Modifier.fillMaxWidth()) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    IconButton(onClick = { editorMode = EditorMode.HOME }) {
+                                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back", tint = MaterialTheme.colorScheme.onSurface)
+                                    }
+                                    Text(
+                                        text = activeTab.name.lowercase().replaceFirstChar { it.uppercase() },
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 18.sp,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.padding(start = 8.dp)
+                                    )
+                                }
+
+                                Box(Modifier.fillMaxWidth().wrapContentHeight().padding(bottom = 12.dp), Alignment.Center) {
+                                    when (activeTab) {
+                                        EditorTab.ADJUST -> AdjustToolPanel(editState, mediaItem.isVideo) { editorViewModel.updateEditState(it) }
+                                        EditorTab.CROP -> CropToolPanel(editorViewModel, gridType) { gridType = it }
+                                        EditorTab.LUT -> FilterToolPanel(editorViewModel, selectedLutCategory, lutCategories) { selectedLutCategory = it }
+                                        EditorTab.TEXT -> TextToolPanel(editorViewModel)
+                                        EditorTab.STICKER -> StickerToolPanel(editorViewModel)
+                                        EditorTab.TRIM -> TrimToolPanel(editorViewModel, editState, videoDuration) { seekRequest = it }
+                                    }
+                                }
                             }
                         }
                     }
@@ -254,9 +283,40 @@ fun EditorScreen(
         }
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding).background(MaterialTheme.colorScheme.background), Alignment.Center) {
+
+            // Core Global Image Dimensions & Zoom State
+            var sc by remember { mutableFloatStateOf(1f) }
+            var ox by remember { mutableFloatStateOf(0f) }
+            var oy by remember { mutableFloatStateOf(0f) }
+
+            val imgWidth = previewBitmap?.width?.toFloat() ?: mediaItem.width.toFloat()
+            val imgHeight = previewBitmap?.height?.toFloat() ?: mediaItem.height.toFloat()
+            val imgAspect = if (imgHeight > 0f) imgWidth / imgHeight else 1f
+            val isCropping = activeTab == EditorTab.CROP && editorMode == EditorMode.TOOL
+
+            // 1. The unified transform container for BOTH Image and Overlays
             Box(
-                Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { selectedLayerId = null } },
-                Alignment.Center
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        if (!isCropping && !isComparing) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                sc = (sc * zoom).coerceIn(1f, 5f)
+                                val maxOff = (sc - 1f) * 1500f
+                                ox = (ox + pan.x).coerceIn(-maxOff, maxOff)
+                                oy = (oy + pan.y).coerceIn(-maxOff, maxOff)
+                            }
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        if (!isCropping && !isComparing) {
+                            detectTapGestures(
+                                onDoubleTap = { sc = 1f; ox = 0f; oy = 0f },
+                                onTap = { selectedLayerId = null }
+                            )
+                        }
+                    },
+                contentAlignment = Alignment.Center
             ) {
                 if (mediaItem.isVideo) {
                     EditorVideoPreview(
@@ -268,54 +328,66 @@ fun EditorScreen(
                         onPos = { currentPlayerPos = it }
                     )
                 } else {
-                    EditorImagePreview(
-                        item = mediaItem,
-                        state = editState,
-                        bmp = previewBitmap,
-                        isComp = isComparing,
-                        isUpd = isPreviewUpdating,
-                        isCropping = activeTab == EditorTab.CROP.name
-                    )
-                }
-
-                if (!mediaItem.isVideo && !isComparing) {
-                    BoxWithConstraints(Modifier.fillMaxSize()) {
-                        val w = constraints.maxWidth.toFloat()
-                        val h = constraints.maxHeight.toFloat()
-
-                        StickerOverlay(
-                            state = editState,
-                            parentWidth = w,
-                            parentHeight = h,
-                            selId = selectedLayerId,
-                            onSel = { id -> selectedLayerId = id },
-                            up = { id, updater -> editorViewModel.updateSticker(id, updater) }
-                        )
-                    }
-
-                    BoxWithConstraints(Modifier.fillMaxSize()) {
-                        val w = constraints.maxWidth.toFloat()
-                        val h = constraints.maxHeight.toFloat()
-
-                        TextOverlay(
-                            state = editState,
-                            parentWidth = w,
-                            parentHeight = h,
-                            selId = selectedLayerId,
-                            onSel = { id -> selectedLayerId = id },
-                            up = { id, updater -> editorViewModel.updateText(id, updater) }
-                        )
-                    }
-                }
-
-                if (activeTab == EditorTab.CROP.name && !isComparing) {
-                    InteractiveCropOverlay(
-                        cCrop = editState.cropRect,
-                        cAsp = editState.aspectRatio,
-                        grid = gridType
+                    // 2. The perfectly aspect-ratio matched canvas
+                    Box(
+                        Modifier
+                            .aspectRatio(imgAspect)
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = sc * (if (!isComparing && editState.flipHorizontal) -1f else 1f),
+                                scaleY = sc * (if (!isComparing && editState.flipVertical) -1f else 1f),
+                                rotationZ = if (!isComparing) editState.rotationDegrees + editState.straightenDegrees else 0f,
+                                translationX = ox,
+                                translationY = oy
+                            )
                     ) {
-                        editorViewModel.updateCropRect(it)
+                        // The active preview
+                        if (previewBitmap != null) {
+                            Image(previewBitmap!!.asImageBitmap(), "Preview", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                        } else {
+                            AsyncImage(ImageRequest.Builder(LocalContext.current).data(mediaItem.uri).build(), "Original", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                        }
+
+                        // The locked coordinate Overlays
+                        if (!isComparing) {
+                            BoxWithConstraints(Modifier.fillMaxSize()) {
+                                val w = constraints.maxWidth.toFloat()
+                                val h = constraints.maxHeight.toFloat()
+
+                                StickerOverlay(
+                                    state = editState,
+                                    parentWidth = w,
+                                    parentHeight = h,
+                                    selId = selectedLayerId,
+                                    onSel = { id -> selectedLayerId = id },
+                                    up = { id, updater -> editorViewModel.updateSticker(id, updater) }
+                                )
+
+                                TextOverlay(
+                                    state = editState,
+                                    parentWidth = w,
+                                    parentHeight = h,
+                                    selId = selectedLayerId,
+                                    onSel = { id -> selectedLayerId = id },
+                                    up = { id, updater -> editorViewModel.updateText(id, updater) }
+                                )
+                            }
+                        }
+
+                        if (isCropping && !isComparing) {
+                            InteractiveCropOverlay(
+                                cCrop = editState.cropRect,
+                                cAsp = editState.aspectRatio,
+                                grid = gridType
+                            ) {
+                                editorViewModel.updateCropRect(it)
+                            }
+                        }
                     }
+                }
+
+                if (isPreviewUpdating && !isComparing && !mediaItem.isVideo) {
+                    CircularProgressIndicator(Modifier.align(Alignment.Center).size(36.dp), MaterialTheme.colorScheme.primary, 3.dp)
                 }
             }
 
@@ -504,43 +576,6 @@ fun EditorVideoPreview(item: MediaItem, state: EditState, isComp: Boolean, seekR
                     Icon(if(isPlay) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, tint=Color.White, modifier=Modifier.padding(16.dp))
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun EditorImagePreview(item: MediaItem, state: EditState, bmp: Bitmap?, isComp: Boolean, isUpd: Boolean, isCropping: Boolean) {
-    var sc by remember { mutableFloatStateOf(1f) }
-    var ox by remember { mutableFloatStateOf(0f) }
-    var oy by remember { mutableFloatStateOf(0f) }
-
-    val mod = Modifier.fillMaxSize()
-        .then(if (!isCropping && !isComp) Modifier.pointerInput(Unit) {
-            detectTransformGestures { _,p,z,_ ->
-                sc=(sc*z).coerceIn(1f,5f)
-                val mo=(sc-1f)*1000f
-                ox=(ox+p.x).coerceIn(-mo,mo)
-                oy=(oy+p.y).coerceIn(-mo,mo)
-            }
-        }.pointerInput(Unit){
-            detectTapGestures(onDoubleTap={ sc=1f; ox=0f; oy=0f })
-        } else Modifier)
-        .graphicsLayer(
-            scaleX=sc*(if(!isComp&&state.flipHorizontal) -1f else 1f),
-            scaleY=sc*(if(!isComp&&state.flipVertical) -1f else 1f),
-            rotationZ=if(!isComp) state.rotationDegrees+state.straightenDegrees else 0f,
-            translationX=ox,
-            translationY=oy
-        )
-
-    Box(Modifier.fillMaxSize(), Alignment.Center) {
-        if(bmp != null) {
-            Image(bmp.asImageBitmap(), "Preview", mod, contentScale=ContentScale.Fit)
-        } else {
-            AsyncImage(ImageRequest.Builder(LocalContext.current).data(item.uri).build(), "Original", mod, contentScale=ContentScale.Fit)
-        }
-        if(isUpd) {
-            CircularProgressIndicator(Modifier.align(Alignment.Center).size(24.dp), MaterialTheme.colorScheme.primary, 2.dp)
         }
     }
 }
@@ -1066,6 +1101,7 @@ fun StickerOverlay(
     up: (String, (StickerLayer) -> StickerLayer) -> Unit
 ) {
     val ctx = LocalContext.current
+    val il = remember { ImageLoader.Builder(ctx).components { add(SvgDecoder.Factory()) }.build() }
     state.stickers.filter { it.isVisible }.forEach { st ->
         val isSel = st.id == selId
         val b = 150f * st.scale
@@ -1092,7 +1128,12 @@ fun StickerOverlay(
                 }
                 .pointerInput(st.id) { detectTapGestures { onSel(st.id) } }
         ) {
-            AsyncImage(model = ImageRequest.Builder(ctx).data("file:///android_asset/${st.assetPath}").build(), contentDescription = "Sticker", modifier = Modifier.fillMaxSize())
+            AsyncImage(
+                model = ImageRequest.Builder(ctx).data("file:///android_asset/${st.assetPath}").build(),
+                imageLoader = il,
+                contentDescription = "Sticker",
+                modifier = Modifier.fillMaxSize()
+            )
             if (isSel) {
                 Box(Modifier.matchParentSize().border(2.dp, Color.White))
             }

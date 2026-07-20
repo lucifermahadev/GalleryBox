@@ -23,8 +23,6 @@ import java.util.Locale
 import javax.inject.Inject
 import com.gallerybox.data.*
 
-
-
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class DocumentViewModel @Inject constructor(
@@ -127,18 +125,15 @@ class DocumentViewModel @Inject constructor(
                 MediaStore.Files.FileColumns.DISPLAY_NAME,
                 MediaStore.Files.FileColumns.SIZE,
                 MediaStore.Files.FileColumns.DATE_MODIFIED,
-                MediaStore.Files.FileColumns.MIME_TYPE
+                MediaStore.Files.FileColumns.MIME_TYPE,
+                MediaStore.Files.FileColumns.RELATIVE_PATH
             )
-
-            val selection = "${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'image/%' AND " +
-                    "${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'video/%' AND " +
-                    "${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'audio/%'"
 
             try {
                 context.contentResolver.query(
                     MediaStore.Files.getContentUri("external"),
                     projection,
-                    selection,
+                    null, // Passing selection as null as requested
                     null,
                     "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
                 )?.use { cursor ->
@@ -147,13 +142,60 @@ class DocumentViewModel @Inject constructor(
                     val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
                     val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
                     val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
+                    val pathCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.RELATIVE_PATH)
+
+                    val supported = setOf(
+                        "pdf",
+                        "doc", "docx",
+                        "xls", "xlsx",
+                        "ppt", "pptx",
+                        "txt", "csv",
+                        "json", "xml",
+                        "html", "htm",
+                        "md",
+                        "rtf",
+                        "odt", "ods", "odp",
+                        "epub",
+                        "zip",
+                        "kt", "java", "cpp", "c",
+                        "py", "js", "ts",
+                        "gradle", "sh", "bat",
+                        "cs", "swift", "go", "rs", "yaml"
+                    )
 
                     while (cursor.moveToNext()) {
                         currentCoroutineContext().ensureActive()
+                        val name = cursor.getString(nameCol) ?: ""
+                        val mime = cursor.getString(mimeCol)?.lowercase() ?: ""
+                        val relativePath = cursor.getString(pathCol) ?: ""
+
+                        if (name.startsWith(".")) continue
+
+                        // Manual fallback filtering for media types
+                        if (
+                            mime.startsWith("image/") ||
+                            mime.startsWith("video/") ||
+                            mime.startsWith("audio/")
+                        ) continue
+
+                        val path = relativePath.lowercase()
+
+                        if (
+                            path.startsWith("android/") ||
+                            path.contains(".thumbnails") ||
+                            path.contains("/cache/") ||
+                            path.contains("cache/") ||
+                            path.contains("obb/") ||
+                            path.contains("data/")
+                        ) {
+                            continue
+                        }
+
+                        // Explicit extension verification
+                        val ext = name.substringAfterLast('.', "").lowercase()
+                        if (ext !in supported) continue
 
                         val id = cursor.getLong(idCol)
-                        val name = cursor.getString(nameCol) ?: ""
-                        val mime = cursor.getString(mimeCol) ?: ""
                         val uri = ContentUris.withAppendedId(MediaStore.Files.getContentUri("external"), id)
 
                         val type = documentEngine.fileDetection.detect(uri, name, mime)
@@ -207,10 +249,6 @@ class DocumentViewModel @Inject constructor(
         _isOpeningDoc.value = false
     }
 
-    /**
-     * Primary entry point for opening documents externally or generically.
-     * Inside the app, navigation handles routing and viewers invoke engines directly to avoid double-loading.
-     */
     fun openDocument(doc: DocumentFile) {
         if (_isOpeningDoc.value) return
 
@@ -218,7 +256,6 @@ class DocumentViewModel @Inject constructor(
         openingJob = viewModelScope.launch(provider.ioDispatcher) {
             _isOpeningDoc.value = true
             try {
-                // Dynamic timeout based on file size
                 val sizeInMb = doc.size / (1024 * 1024)
                 val dynamicTimeout = (10000L + (sizeInMb * 1000L)).coerceAtMost(45000L)
 

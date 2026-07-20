@@ -57,6 +57,7 @@ import com.gallerybox.viewmodel.AudioTrack
 import com.gallerybox.viewmodel.MusicViewModel
 import com.gallerybox.viewmodel.Playlist
 import com.gallerybox.viewmodel.TrashViewModel
+import kotlinx.collections.immutable.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.debounce
@@ -71,16 +72,16 @@ private val TextPrimary = Color(0xFF000000)
 private val TextSecondary = Color(0xFF8E8E93)
 
 sealed class MusicRoute(val route: String) {
-    object Dashboard : MusicRoute("dashboard")
-    object Library : MusicRoute("library")
-    object Playlists : MusicRoute("playlists")
-    object Folders : MusicRoute("folders")
-    object History : MusicRoute("history")
-    object Queue : MusicRoute("queue")
-    object Settings : MusicRoute("settings")
-    object AudioInfo : MusicRoute("audio_info")
-    object Radio : MusicRoute("radio")
-    object Favorites : MusicRoute("favorites")
+    data object Dashboard : MusicRoute("dashboard")
+    data object Library : MusicRoute("library")
+    data object Playlists : MusicRoute("playlists")
+    data object Folders : MusicRoute("folders")
+    data object History : MusicRoute("history")
+    data object Queue : MusicRoute("queue")
+    data object Settings : MusicRoute("settings")
+    data object AudioInfo : MusicRoute("audio_info")
+    data object Radio : MusicRoute("radio")
+    data object Favorites : MusicRoute("favorites")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -102,10 +103,13 @@ fun MusicScreen(
 
     val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
     val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
-    val loadedSongs by viewModel.allAudioTracks.collectAsStateWithLifecycle()
+    val loadedSongsRaw by viewModel.allAudioTracks.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
 
+    val loadedSongs = remember(loadedSongsRaw) { loadedSongsRaw.toImmutableList() }
+
     LaunchedEffect(Unit) {
+        viewModel.loadAllAudioTracks()
         trashViewModel.onRefreshMusic = {
             viewModel.loadAllAudioTracks()
         }
@@ -113,7 +117,7 @@ fun MusicScreen(
 
     val displaySongs = remember(loadedSongs, searchQuery) {
         if (searchQuery.isBlank()) loadedSongs
-        else loadedSongs.filter { it.title.contains(searchQuery, true) || it.artist.contains(searchQuery, true) }
+        else loadedSongs.filter { it.title.contains(searchQuery, true) || it.artist.contains(searchQuery, true) }.toImmutableList()
     }
 
     LaunchedEffect(showFullPlayer) { onViewerStateChanged(showFullPlayer) }
@@ -220,10 +224,13 @@ fun MusicTopAppBar(currentRoute: String?, isSearchActive: Boolean, searchQuery: 
 }
 
 @Composable
-fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: List<AudioTrack>, onNavigateToAllSongs: () -> Unit, onNavigateToRadio: () -> Unit, onNavigateToHistory: () -> Unit, onNavigateToPlaylists: () -> Unit, onNavigateToFolders: () -> Unit, onNavigateToQueue: () -> Unit, onNavigateToSettings: () -> Unit, onNavigateToDuoMode: () -> Unit, onNavigateToFavorites: () -> Unit) {
-    val recentHistory by viewModel.recentHistory.collectAsStateWithLifecycle()
-    val playlists by viewModel.playlists.collectAsStateWithLifecycle()
-    val songMap = remember(loadedSongs) { loadedSongs.associateBy { it.id } }
+fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: ImmutableList<AudioTrack>, onNavigateToAllSongs: () -> Unit, onNavigateToRadio: () -> Unit, onNavigateToHistory: () -> Unit, onNavigateToPlaylists: () -> Unit, onNavigateToFolders: () -> Unit, onNavigateToQueue: () -> Unit, onNavigateToSettings: () -> Unit, onNavigateToDuoMode: () -> Unit, onNavigateToFavorites: () -> Unit) {
+    val recentHistoryRaw by viewModel.recentHistory.collectAsStateWithLifecycle(initialValue = emptyList())
+    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
+
+    val recentHistory = remember(recentHistoryRaw) { recentHistoryRaw.toImmutableList() }
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
+    val songMap = remember(loadedSongs) { loadedSongs.associateBy { it.id }.toImmutableMap() }
 
     LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
         item {
@@ -243,9 +250,8 @@ fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: List<AudioTrack>, on
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                 QuickActionIcon(Icons.Rounded.Shuffle, "Shuffle", Color(0xFFFF9800)) {
                     if (loadedSongs.isNotEmpty()) {
-                        // Limit shuffle overhead slightly if huge library
                         val toPlay = if (loadedSongs.size > 1000) loadedSongs.shuffled().take(1000) else loadedSongs.shuffled()
-                        viewModel.playQueue(toPlay, 0)
+                        toPlay.firstOrNull()?.let { track -> viewModel.playQueue(toPlay, track) }
                     }
                 }
                 QuickActionIcon(Icons.AutoMirrored.Rounded.QueueMusic, "Queue", Color(0xFF8E24AA), onNavigateToQueue)
@@ -259,8 +265,10 @@ fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: List<AudioTrack>, on
             item {
                 Text("Recently Played", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 12.dp))
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    val historySongs = recentHistory.take(10).mapNotNull { id -> songMap[id] }
-                    items(historySongs) { song -> SquareSongCard(song) { viewModel.playQueue(historySongs, historySongs.indexOf(song)) } }
+                    val historySongs = recentHistory.take(10).mapNotNull { id -> songMap[id] }.toImmutableList()
+                    items(historySongs, key = { it.id }, contentType = { "song" }) { song ->
+                        SquareSongCard(song) { viewModel.playQueue(historySongs, song) }
+                    }
                 }
             }
         }
@@ -281,9 +289,11 @@ fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: List<AudioTrack>, on
                 }
             } else {
                 LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    items(playlists) { playlist ->
+                    items(playlists, key = { it.id }, contentType = { "playlist" }) { playlist ->
                         PlaylistCard(playlist) {
-                            if (playlist.tracks.isNotEmpty()) viewModel.playQueue(playlist.tracks, 0)
+                            if (playlist.tracks.isNotEmpty()) {
+                                viewModel.playQueue(playlist.tracks, playlist.tracks.first())
+                            }
                         }
                     }
                 }
@@ -294,11 +304,16 @@ fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: List<AudioTrack>, on
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun HistoryScreen(viewModel: MusicViewModel, allSongs: List<AudioTrack>, onTrashClick: (AudioTrack) -> Unit) {
-    val history by viewModel.recentHistory.collectAsStateWithLifecycle()
-    val playlists by viewModel.playlists.collectAsStateWithLifecycle()
-    val songMap = remember(allSongs) { allSongs.associateBy { it.id } }
-    val playCounts = remember(history) { history.groupingBy { it }.eachCount() }
+fun HistoryScreen(viewModel: MusicViewModel, allSongs: ImmutableList<AudioTrack>, onTrashClick: (AudioTrack) -> Unit) {
+    val historyRaw by viewModel.recentHistory.collectAsStateWithLifecycle(initialValue = emptyList())
+    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
+
+    val history = remember(historyRaw) { historyRaw.toImmutableList() }
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
+    val songMap = remember(allSongs) { allSongs.associateBy { it.id }.toImmutableMap() }
+
+    val playCounts = remember(history) { history.groupingBy { it }.eachCount().toImmutableMap() }
+
     var sortDescending by remember { mutableStateOf(true) }
     val pagerState = rememberPagerState(pageCount = { 2 })
     val scope = rememberCoroutineScope()
@@ -312,23 +327,27 @@ fun HistoryScreen(viewModel: MusicViewModel, allSongs: List<AudioTrack>, onTrash
                 Text("Top Played", modifier = Modifier.padding(16.dp), fontWeight = if (pagerState.currentPage == 1) FontWeight.Bold else FontWeight.Normal, color = if (pagerState.currentPage == 1) PrimaryColor else TextSecondary)
             }
         }
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), verticalAlignment = Alignment.Top) { page ->
+        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth().weight(1f), verticalAlignment = Alignment.Top) { page ->
             if (page == 0) {
-                val recentList = history.mapNotNull { id -> songMap[id] }
+                val recentList = remember(history, songMap) { history.mapNotNull { id -> songMap[id] }.toImmutableList() }
                 if (recentList.isEmpty()) Box(modifier = Modifier.fillMaxWidth().padding(top = 80.dp), contentAlignment = Alignment.Center) { Text("No recent history", color = TextSecondary) }
                 else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp, top = 8.dp)) {
-                    items(recentList) { song ->
-                        InteractiveSongRow(song, playlists, viewModel, { viewModel.playQueue(recentList, recentList.indexOf(song)) }, { onTrashClick(song) })
+                    items(recentList, key = { it.id }, contentType = { "song" }) { song ->
+                        InteractiveSongRow(song, playlists, viewModel, { viewModel.playQueue(recentList, song) }, { onTrashClick(song) })
                     }
                 }
             } else {
-                val playedSongs = playCounts.keys.mapNotNull { id -> songMap[id] }
-                val sortedSongs = if (sortDescending) playedSongs.sortedByDescending { playCounts[it.id] ?: 0 } else playedSongs.sortedBy { playCounts[it.id] ?: 0 }
+                val sortedSongs = remember(playCounts, songMap, sortDescending) {
+                    val playedSongs = playCounts.keys.mapNotNull { id -> songMap[id] }
+                    if (sortDescending) playedSongs.sortedByDescending { playCounts[it.id] ?: 0 }.toImmutableList()
+                    else playedSongs.sortedBy { playCounts[it.id] ?: 0 }.toImmutableList()
+                }
+
                 if (sortedSongs.isEmpty()) Box(modifier = Modifier.fillMaxWidth().padding(top = 80.dp), contentAlignment = Alignment.Center) { Text("No play statistics yet", color = TextSecondary) }
                 else Column(Modifier.fillMaxSize()) {
                     Surface(color = SurfaceColor, modifier = Modifier.fillMaxWidth().padding(16.dp), shape = RoundedCornerShape(12.dp)) {
                         Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("Total Unique Plays: ${playedSongs.size}", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Total Unique Plays: ${sortedSongs.size}", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { sortDescending = !sortDescending }) {
                                 Text(if (sortDescending) "Highest First" else "Lowest First", color = PrimaryColor, fontWeight = FontWeight.Medium, fontSize = 14.sp)
                                 Icon(if (sortDescending) Icons.Rounded.ArrowDownward else Icons.Rounded.ArrowUpward, "Toggle Sort", tint = PrimaryColor, modifier = Modifier.padding(start = 4.dp).size(20.dp))
@@ -336,7 +355,7 @@ fun HistoryScreen(viewModel: MusicViewModel, allSongs: List<AudioTrack>, onTrash
                         }
                     }
                     LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                        items(sortedSongs) { song ->
+                        items(sortedSongs, key = { it.id }, contentType = { "song" }) { song ->
                             HistoryStatRow(song, playCounts[song.id] ?: 0, viewModel, sortedSongs) { onTrashClick(song) }
                         }
                     }
@@ -347,17 +366,20 @@ fun HistoryScreen(viewModel: MusicViewModel, allSongs: List<AudioTrack>, onTrash
 }
 
 @Composable
-fun FavoritesScreen(viewModel: MusicViewModel, allSongs: List<AudioTrack>, onTrashClick: (AudioTrack) -> Unit) {
-    val favoriteIds by viewModel.favoriteIds.collectAsStateWithLifecycle()
-    val playlists by viewModel.playlists.collectAsStateWithLifecycle()
-    val favoriteSongs = remember(allSongs, favoriteIds) { allSongs.filter { it.id in favoriteIds } }
+fun FavoritesScreen(viewModel: MusicViewModel, allSongs: ImmutableList<AudioTrack>, onTrashClick: (AudioTrack) -> Unit) {
+    val favoriteIdsRaw by viewModel.favoriteIds.collectAsStateWithLifecycle()
+    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle()
+
+    val favoriteIds = remember(favoriteIdsRaw) { favoriteIdsRaw.toImmutableSet() }
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
+    val favoriteSongs = remember(allSongs, favoriteIds) { allSongs.filter { it.id in favoriteIds }.toImmutableList() }
 
     if (favoriteSongs.isEmpty()) {
         Box(Modifier.fillMaxSize(), Alignment.Center) { Text("No favorites yet", color = TextSecondary) }
     } else {
         LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-            itemsIndexed(favoriteSongs) { i, song ->
-                InteractiveSongRow(song, playlists, viewModel, { viewModel.playQueue(favoriteSongs, i) }, { onTrashClick(song) })
+            items(favoriteSongs, key = { it.id }, contentType = { "song" }) { song ->
+                InteractiveSongRow(song, playlists, viewModel, { viewModel.playQueue(favoriteSongs, song) }, { onTrashClick(song) })
             }
         }
     }
@@ -365,23 +387,26 @@ fun FavoritesScreen(viewModel: MusicViewModel, allSongs: List<AudioTrack>, onTra
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun LibraryContent(displaySongs: List<AudioTrack>, vm: MusicViewModel, onTrashClick: (AudioTrack) -> Unit) {
+fun LibraryContent(displaySongs: ImmutableList<AudioTrack>, vm: MusicViewModel, onTrashClick: (AudioTrack) -> Unit) {
     val pagerState = rememberPagerState(pageCount = { 3 })
     val scope = rememberCoroutineScope()
-    val playlists by vm.playlists.collectAsStateWithLifecycle()
+    val playlistsRaw by vm.playlists.collectAsStateWithLifecycle()
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
 
-    val tabs = listOf("Tracks", "Artists", "Albums")
-    val artistGroups = remember(displaySongs) { displaySongs.groupBy { it.artist } }
-    val albumGroups = remember(displaySongs) { displaySongs.groupBy { it.albumId.toString() } }
+    val tabs = remember { listOf("Tracks", "Artists", "Albums").toImmutableList() }
+    val artistGroups = remember(displaySongs) { displaySongs.groupBy { it.artist }.toImmutableMap() }
+    val albumGroups = remember(displaySongs) { displaySongs.groupBy { it.albumId.toString() }.toImmutableMap() }
 
-    Column {
+    Column(Modifier.fillMaxSize()) {
         ScrollableTabRow(selectedTabIndex = pagerState.currentPage, containerColor = BgColor, contentColor = TextPrimary, indicator = { if (pagerState.currentPage < it.size) TabRowDefaults.SecondaryIndicator(Modifier.tabIndicatorOffset(it[pagerState.currentPage]), color = PrimaryColor) }, divider = { HorizontalDivider(color = Color.Transparent) }, edgePadding = 16.dp) {
             tabs.forEachIndexed { i, title -> Tab(selected = pagerState.currentPage == i, onClick = { scope.launch { pagerState.animateScrollToPage(i) } }, text = { Text(title, fontWeight = if (pagerState.currentPage == i) FontWeight.Bold else FontWeight.Normal) }, selectedContentColor = PrimaryColor, unselectedContentColor = TextSecondary) }
         }
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), verticalAlignment = Alignment.Top) { page ->
+        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth().weight(1f), verticalAlignment = Alignment.Top) { page ->
             when (page) {
                 0 -> LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                    itemsIndexed(displaySongs) { i, song -> InteractiveSongRow(song, playlists, vm, { vm.playQueue(displaySongs, i) }, { onTrashClick(song) }) }
+                    items(displaySongs, key = { it.id }, contentType = { "song" }) { song ->
+                        InteractiveSongRow(song, playlists, vm, { vm.playQueue(displaySongs, song) }, { onTrashClick(song) })
+                    }
                 }
                 1 -> GroupList(groups = artistGroups, isAlbum = false, vm = vm)
                 2 -> GroupList(groups = albumGroups, isAlbum = true, vm = vm)
@@ -391,17 +416,20 @@ fun LibraryContent(displaySongs: List<AudioTrack>, vm: MusicViewModel, onTrashCl
 }
 
 @Composable
-fun FolderList(songs: List<AudioTrack>, vm: MusicViewModel, onTrashClick: (AudioTrack) -> Unit) {
-    val playlists by vm.playlists.collectAsStateWithLifecycle()
+fun FolderList(songs: ImmutableList<AudioTrack>, vm: MusicViewModel, onTrashClick: (AudioTrack) -> Unit) {
+    val playlistsRaw by vm.playlists.collectAsStateWithLifecycle()
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
     val folders = remember(songs) { songs.filter { it.path.isNotBlank() }.groupBy { it.path.substringBeforeLast("/", "Unknown").trim() }.toSortedMap() }
     var selectedFolder by remember { mutableStateOf<String?>(null) }
+
     BackHandler(enabled = selectedFolder != null) { selectedFolder = null }
 
     Box(Modifier.fillMaxSize()) {
         AnimatedContent(targetState = selectedFolder, transitionSpec = { if (targetState == null) slideInHorizontally { -it } togetherWith slideOutHorizontally { it } else slideInHorizontally { it } togetherWith slideOutHorizontally { -it } }, label = "FolderTransition") { activeFolder ->
             if (activeFolder == null) {
+                val folderKeys = remember(folders) { folders.keys.toList().toImmutableList() }
                 LazyVerticalGrid(columns = GridCells.Adaptive(160.dp), contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 90.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxSize()) {
-                    items(folders.keys.toList()) { path ->
+                    items(folderKeys, key = { it }, contentType = { "folder" }) { path ->
                         Surface(shape = RoundedCornerShape(16.dp), color = SurfaceColor, modifier = Modifier.fillMaxWidth().aspectRatio(1f).clickable { selectedFolder = path }) {
                             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                                 Icon(Icons.Rounded.Folder, null, tint = PrimaryColor, modifier = Modifier.size(56.dp))
@@ -412,14 +440,16 @@ fun FolderList(songs: List<AudioTrack>, vm: MusicViewModel, onTrashClick: (Audio
                     }
                 }
             } else {
-                val tracks = folders[activeFolder] ?: emptyList()
+                val tracks = remember(activeFolder, folders) { folders[activeFolder]?.toImmutableList() ?: persistentListOf() }
                 Column(Modifier.fillMaxSize()) {
                     Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { selectedFolder = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) }
                         Text(activeFolder.substringAfterLast("/"), fontWeight = FontWeight.Bold, fontSize = 20.sp, color = TextPrimary, modifier = Modifier.padding(start = 8.dp))
                     }
-                    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                        itemsIndexed(tracks) { index, song -> InteractiveSongRow(song, playlists, vm, { vm.playQueue(tracks, index) }, { onTrashClick(song) }) }
+                    LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 90.dp)) {
+                        items(tracks, key = { it.id }, contentType = { "song" }) { song ->
+                            InteractiveSongRow(song, playlists, vm, { vm.playQueue(tracks, song) }, { onTrashClick(song) })
+                        }
                     }
                 }
             }
@@ -429,8 +459,11 @@ fun FolderList(songs: List<AudioTrack>, vm: MusicViewModel, onTrashClick: (Audio
 
 @Composable
 fun QueueScreen(viewModel: MusicViewModel, currentTrack: AudioTrack?, onTrashClick: (AudioTrack) -> Unit) {
-    val activeQueue by viewModel.currentQueue.collectAsStateWithLifecycle()
-    val playlists by viewModel.playlists.collectAsStateWithLifecycle()
+    val activeQueueRaw by viewModel.currentQueue.collectAsStateWithLifecycle()
+    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle()
+
+    val activeQueue = remember(activeQueueRaw) { activeQueueRaw.toImmutableList() }
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
 
     Column(Modifier.fillMaxSize()) {
         Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -442,11 +475,11 @@ fun QueueScreen(viewModel: MusicViewModel, currentTrack: AudioTrack?, onTrashCli
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = SurfaceColor)
         }
         if (activeQueue.isEmpty()) {
-            Box(Modifier.fillMaxSize().weight(1f), Alignment.Center) { Text("No more tracks in queue", color = TextSecondary) }
+            Box(Modifier.fillMaxWidth().weight(1f), Alignment.Center) { Text("No more tracks in queue", color = TextSecondary) }
         } else {
-            LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                itemsIndexed(activeQueue) { idx, song ->
-                    Row(modifier = Modifier.fillMaxWidth().clickable { viewModel.playQueue(activeQueue, idx) }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 90.dp)) {
+                items(activeQueue, key = { it.id }, contentType = { "song" }) { song ->
+                    Row(modifier = Modifier.fillMaxWidth().clickable { viewModel.playQueue(activeQueue, song) }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.DragHandle, "Reorder", tint = TextSecondary); Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(song.title, color = TextPrimary, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -462,8 +495,10 @@ fun QueueScreen(viewModel: MusicViewModel, currentTrack: AudioTrack?, onTrashCli
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlaylistsScreen(vm: MusicViewModel, allSongs: List<AudioTrack>, currentTrackId: Long?, onPlayQueue: (Pair<List<AudioTrack>, Int>) -> Unit) {
-    val playlists by vm.playlists.collectAsStateWithLifecycle()
+fun PlaylistsScreen(vm: MusicViewModel, allSongs: ImmutableList<AudioTrack>, currentTrackId: Long?, onPlayQueue: (Pair<List<AudioTrack>, AudioTrack>) -> Unit) {
+    val playlistsRaw by vm.playlists.collectAsStateWithLifecycle()
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
+
     var openPlaylistId by remember { mutableStateOf<Long?>(null) }
     val activePlaylist = remember(playlists, openPlaylistId) { playlists.find { it.id == openPlaylistId } }
 
@@ -479,11 +514,11 @@ fun PlaylistsScreen(vm: MusicViewModel, allSongs: List<AudioTrack>, currentTrack
             if (targetId == null) {
                 Scaffold(floatingActionButton = { FloatingActionButton(onClick = { showCreateDialog = true }, containerColor = PrimaryColor, contentColor = Color.White) { Icon(Icons.Default.Add, "Create Playlist") } }, containerColor = Color.Transparent) { padding ->
                     if (playlists.isEmpty()) Box(Modifier.fillMaxSize().padding(padding), Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Box(modifier = Modifier.size(120.dp).background(PrimaryColor.copy(alpha = 0.1f), CircleShape), contentAlignment = Alignment.Center) { Icon(Icons.AutoMirrored.Filled.QueueMusic, null, tint = PrimaryColor, modifier = Modifier.size(64.dp)) }; Spacer(Modifier.height(24.dp)); Text("Your library is empty", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold) } }
-                    else LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 100.dp, top = 16.dp)) { items(playlists, key = { it.id }) { pl -> PlaylistRow(pl, { openPlaylistId = pl.id }, { playlistToRename = pl }, { playlistToDelete = pl }) } }
+                    else LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 100.dp, top = 16.dp)) { items(playlists, key = { it.id }, contentType = { "playlist" }) { pl -> PlaylistRow(pl, { openPlaylistId = pl.id }, { playlistToRename = pl }, { playlistToDelete = pl }) } }
                 }
             } else {
                 activePlaylist?.let { playlist ->
-                    val currentSongs = playlist.tracks
+                    val currentSongs = remember(playlist.tracks) { playlist.tracks.toImmutableList() }
                     var searchQuery by remember { mutableStateOf("") }
                     var filteredSongs by remember { mutableStateOf(currentSongs) }
 
@@ -491,16 +526,19 @@ fun PlaylistsScreen(vm: MusicViewModel, allSongs: List<AudioTrack>, currentTrack
                         snapshotFlow { searchQuery }
                             .debounce(250)
                             .collect { query ->
-                                withContext(Dispatchers.Default) { filteredSongs = if (query.isBlank()) currentSongs else currentSongs.filter { it.title.contains(query, true) || it.artist.contains(query, true) } }
+                                withContext(Dispatchers.Default) {
+                                    filteredSongs = if (query.isBlank()) currentSongs
+                                    else currentSongs.filter { it.title.contains(query, true) || it.artist.contains(query, true) }.toImmutableList()
+                                }
                             }
                     }
 
-                    Scaffold(topBar = { TopAppBar(title = { Text(playlist.name, fontWeight = FontWeight.Bold, color = TextPrimary) }, navigationIcon = { IconButton(onClick = { openPlaylistId = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) } }, actions = { IconButton(onClick = { showAddSongsDialog = true }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add Songs", tint = TextPrimary) } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = BgColor)) }, floatingActionButton = { if (currentSongs.isNotEmpty()) FloatingActionButton(onClick = { onPlayQueue(currentSongs.shuffled() to 0) }, containerColor = PrimaryColor, contentColor = Color.White) { Icon(Icons.Default.Shuffle, "Shuffle Play") } }, containerColor = BgColor) { padding ->
+                    Scaffold(topBar = { TopAppBar(title = { Text(playlist.name, fontWeight = FontWeight.Bold, color = TextPrimary) }, navigationIcon = { IconButton(onClick = { openPlaylistId = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) } }, actions = { IconButton(onClick = { showAddSongsDialog = true }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add Songs", tint = TextPrimary) } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = BgColor)) }, floatingActionButton = { if (currentSongs.isNotEmpty()) FloatingActionButton(onClick = { currentSongs.firstOrNull()?.let { onPlayQueue(currentSongs.shuffled() to it) } }, containerColor = PrimaryColor, contentColor = Color.White) { Icon(Icons.Default.Shuffle, "Shuffle Play") } }, containerColor = BgColor) { padding ->
                         Column(Modifier.padding(padding).fillMaxSize()) {
                             PlaylistHeader(playlist)
                             if (currentSongs.isNotEmpty()) OutlinedTextField(searchQuery, { searchQuery = it }, placeholder = { Text("Search in playlist...") }, leadingIcon = { Icon(Icons.Default.Search, null, tint = TextSecondary) }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), shape = CircleShape, singleLine = true, colors = TextFieldDefaults.colors(focusedContainerColor = SurfaceColor, unfocusedContainerColor = SurfaceColor, focusedIndicatorColor = PrimaryColor, unfocusedIndicatorColor = Color.Transparent))
                             if (filteredSongs.isEmpty()) Box(Modifier.weight(1f).fillMaxWidth(), Alignment.Center) { Text(if (searchQuery.isNotEmpty()) "No matches found" else "Playlist is empty", color = TextSecondary) }
-                            else LazyColumn(modifier = Modifier.fillMaxSize().weight(1f), contentPadding = PaddingValues(bottom = 80.dp)) { items(filteredSongs, key = { it.id }) { song -> PlaylistEditableSongRow(song, currentTrackId == song.id, { onPlayQueue(currentSongs to currentSongs.indexOf(song)) }, { vm.removeSongFromPlaylist(playlist, song) }) } }
+                            else LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 80.dp)) { items(filteredSongs, key = { it.id }, contentType = { "song" }) { song -> PlaylistEditableSongRow(song, currentTrackId == song.id, { onPlayQueue(currentSongs to song) }, { vm.removeSongFromPlaylist(playlist, song) }) } }
                         }
                     }
                 }
@@ -511,7 +549,7 @@ fun PlaylistsScreen(vm: MusicViewModel, allSongs: List<AudioTrack>, currentTrack
     if (showCreateDialog) CreatePlaylistDialog(playlists, { showCreateDialog = false }, { vm.createPlaylist(it); showCreateDialog = false })
     if (playlistToRename != null) RenamePlaylistDialog(playlistToRename!!, playlists, { playlistToRename = null }, { vm.renamePlaylist(playlistToRename!!, it); playlistToRename = null })
 
-    if (showAddSongsDialog && activePlaylist != null) AddSongsDialog(activePlaylist!!, allSongs, { showAddSongsDialog = false }, { selectedSongs -> selectedSongs.forEach { vm.addSongToPlaylist(activePlaylist!!, it) }; showAddSongsDialog = false })
+    if (showAddSongsDialog && activePlaylist != null) AddSongsDialog(activePlaylist!!, allSongs, { showAddSongsDialog = false }, { selectedSongs -> selectedSongs.forEach { vm.addSongToPlaylist(activePlaylist, it) }; showAddSongsDialog = false })
 
     if (playlistToDelete != null) {
         AlertDialog(
@@ -530,8 +568,12 @@ fun PlaylistsScreen(vm: MusicViewModel, allSongs: List<AudioTrack>, currentTrack
 fun PlayerScreen(onBack: () -> Unit, viewModel: MusicViewModel, currentTrack: AudioTrack?, isPlaying: Boolean, onNavigateToQueue: () -> Unit, onNavigateToAudioInfo: () -> Unit) {
     val ctx = LocalContext.current
     val view = LocalView.current
-    val playlists by viewModel.playlists.collectAsStateWithLifecycle()
-    val isFavorite = viewModel.favoriteIds.collectAsStateWithLifecycle().value.contains(currentTrack?.id)
+    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle()
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
+
+    val favoriteIds by viewModel.favoriteIds.collectAsStateWithLifecycle()
+    val isFavorite = remember(currentTrack?.id, favoriteIds) { favoriteIds.contains(currentTrack?.id) }
+
     var showSleepTimer by remember { mutableStateOf(false) }
     var showEffectsSheet by remember { mutableStateOf(false) }
     var showPlaylistDialog by remember { mutableStateOf(false) }
@@ -539,7 +581,6 @@ fun PlayerScreen(onBack: () -> Unit, viewModel: MusicViewModel, currentTrack: Au
     val bgArtworkReq = remember(currentTrack?.albumId) {
         ImageRequest.Builder(ctx).data(getAlbumArtUri(currentTrack?.albumId ?: -1)).size(400).allowHardware(true).build()
     }
-    // Reduced resolution to 512 for better memory performance on low-end
     val artworkReq = remember(currentTrack?.albumId) {
         ImageRequest.Builder(ctx).data(getAlbumArtUri(currentTrack?.albumId ?: -1)).size(512).error(android.R.drawable.ic_media_play).build()
     }
@@ -551,7 +592,6 @@ fun PlayerScreen(onBack: () -> Unit, viewModel: MusicViewModel, currentTrack: Au
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             PlayerHeader(currentTrack?.album, viewModel.sleepTimeRemaining, onBack, { showSleepTimer = true }, { showEffectsSheet = true })
 
-            // Reduced shadow intensity to 4.dp to prevent GPU rendering overhead
             Box(modifier = Modifier.weight(0.6f).aspectRatio(1f).padding(16.dp).pointerInput(Unit) { detectTapGestures(onDoubleTap = { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); currentTrack?.let { viewModel.toggleFavorite(listOf(it.id)) } }) }) {
                 AsyncImage(artworkReq, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().shadow(4.dp, RoundedCornerShape(16.dp)).clip(RoundedCornerShape(16.dp)))
             }
@@ -593,7 +633,6 @@ fun IsolatedProgressBar(positionFlow: Flow<Long>, duration: Long, onSeek: (Long)
     var sliderVal by remember { mutableFloatStateOf(0f) }
     val safeDur = duration.coerceAtLeast(1L).toFloat()
 
-    // Smooth, lightweight UI animation for slider progress
     val animatedProgress by animateFloatAsState(
         targetValue = if (isDragging) sliderVal else (position.toFloat() / safeDur).coerceIn(0f, 1f),
         label = "progressBarAnimation"
@@ -659,21 +698,23 @@ fun AudioInfoScreen(currentTrack: AudioTrack?) {
 }
 
 @Composable
-fun GroupList(groups: Map<String, List<AudioTrack>>, isAlbum: Boolean, vm: MusicViewModel) {
-    var selectedGroup by remember { mutableStateOf<Pair<String, List<AudioTrack>>?>(null) }
-    val playlists by vm.playlists.collectAsStateWithLifecycle()
+fun GroupList(groups: ImmutableMap<String, List<AudioTrack>>, isAlbum: Boolean, vm: MusicViewModel) {
+    var selectedGroup by remember { mutableStateOf<Pair<String, ImmutableList<AudioTrack>>?>(null) }
+    val playlistsRaw by vm.playlists.collectAsStateWithLifecycle()
+    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
 
     BackHandler(selectedGroup != null) { selectedGroup = null }
 
     AnimatedContent(selectedGroup, label = "group_transition") { activeGroup ->
         if (activeGroup == null) {
+            val groupList = remember(groups) { groups.toList().toImmutableList() }
             LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 8.dp, bottom = 90.dp)) {
-                items(groups.toList()) { (key, tracks) ->
+                items(groupList, key = { it.first }, contentType = { "group" }) { (key, tracks) ->
                     val firstTrack = tracks.first()
                     val title = if (isAlbum) firstTrack.album else key
 
                     ListItem(
-                        modifier = Modifier.clickable { selectedGroup = key to tracks },
+                        modifier = Modifier.clickable { selectedGroup = key to tracks.toImmutableList() },
                         headlineContent = { Text(title, fontWeight = FontWeight.Bold, maxLines = 1, color = TextPrimary) },
                         supportingContent = { Text("${tracks.size} Songs", fontSize = 12.sp, color = TextSecondary) },
                         leadingContent = {
@@ -695,8 +736,10 @@ fun GroupList(groups: Map<String, List<AudioTrack>>, isAlbum: Boolean, vm: Music
                     IconButton(onClick = { selectedGroup = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = TextPrimary) }
                     Text(text = headerTitle, fontWeight = FontWeight.Bold, fontSize = 20.sp, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                    itemsIndexed(tracks) { index, song -> InteractiveSongRow(song, playlists, vm, { vm.playQueue(tracks, index) }, { }) }
+                LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 90.dp)) {
+                    items(tracks, key = { it.id }, contentType = { "song" }) { song ->
+                        InteractiveSongRow(song, playlists, vm, { vm.playQueue(tracks, song) }, { })
+                    }
                 }
             }
         }
@@ -704,13 +747,13 @@ fun GroupList(groups: Map<String, List<AudioTrack>>, isAlbum: Boolean, vm: Music
 }
 
 @Composable
-fun InteractiveSongRow(song: AudioTrack, playlists: List<Playlist>, vm: MusicViewModel, onClick: () -> Unit, onTrashClick: () -> Unit) {
+fun InteractiveSongRow(song: AudioTrack, playlists: ImmutableList<Playlist>, vm: MusicViewModel, onClick: () -> Unit, onTrashClick: () -> Unit) {
     var showMenu by remember { mutableStateOf(false) }
     var showTagEditor by remember { mutableStateOf(false) }
     var showPlaylistDialog by remember { mutableStateOf(false) }
-    val isPlaying = vm.currentTrack.collectAsStateWithLifecycle().value?.id == song.id
+    val currentTrackRaw by vm.currentTrack.collectAsStateWithLifecycle()
+    val isPlaying = remember(currentTrackRaw?.id, song.id) { currentTrackRaw?.id == song.id }
 
-    // Lightweight animation for title color when playing
     val titleColor by animateColorAsState(targetValue = if (isPlaying) PrimaryColor else TextPrimary, label = "titleColor")
 
     Row(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -733,13 +776,13 @@ fun InteractiveSongRow(song: AudioTrack, playlists: List<Playlist>, vm: MusicVie
 }
 
 @Composable
-fun SelectPlaylistDialog(playlists: List<Playlist>, onDismiss: () -> Unit, onSelect: (Playlist) -> Unit) {
+fun SelectPlaylistDialog(playlists: ImmutableList<Playlist>, onDismiss: () -> Unit, onSelect: (Playlist) -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Add to Playlist", fontWeight = FontWeight.Bold, color = TextPrimary) },
         text = {
             if (playlists.isEmpty()) Text("No playlists available.")
-            else LazyColumn { items(playlists) { pl -> TextButton(onClick = { onSelect(pl) }, modifier = Modifier.fillMaxWidth()) { Text(pl.name, color = PrimaryColor) } } }
+            else LazyColumn { items(playlists, key = { it.id }) { pl -> TextButton(onClick = { onSelect(pl) }, modifier = Modifier.fillMaxWidth()) { Text(pl.name, color = PrimaryColor) } } }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) } },
         containerColor = SurfaceColor
@@ -756,9 +799,15 @@ fun AdvancedEffectsBottomSheet(viewModel: MusicViewModel, onDismiss: () -> Unit)
                 TextButton(onClick = { viewModel.resetAudioEffects() }) { Text("Reset", color = MaterialTheme.colorScheme.error) }
             }
             Spacer(Modifier.height(16.dp))
+            val effects = remember { listOf("Normal", "Nightcore", "Slowed", "Vaporwave").toImmutableList() }
+
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(listOf("Normal", "Nightcore", "Slowed", "Vaporwave")) { effect ->
-                    AssistChip(onClick = { viewModel.setPlaybackEffect(false, effect) }, label = { Text(effect, color = TextPrimary) }, colors = AssistChipDefaults.assistChipColors(containerColor = BgColor))
+                items(effects, key = { it }) { effect ->
+                    AssistChip(
+                        onClick = { viewModel.setPlaybackEffect(false, effect) },
+                        label = { Text(effect, color = TextPrimary) },
+                        colors = AssistChipDefaults.assistChipColors(containerColor = BgColor)
+                    )
                 }
             }
             Spacer(Modifier.height(24.dp))
@@ -815,9 +864,8 @@ fun ModernMiniPlayer(track: AudioTrack, isPlaying: Boolean, positionFlow: Flow<L
 @Composable
 private fun BoxScope.MiniPlayerProgressBar(positionFlow: Flow<Long>, duration: Long) {
     val position by positionFlow.collectAsStateWithLifecycle(initialValue = 0L)
-    val progress = if (duration > 0) (position.coerceIn(0, duration)).toFloat() / duration else 0f
+    val progress = remember(position, duration) { if (duration > 0) (position.coerceIn(0, duration)).toFloat() / duration else 0f }
 
-    // Smooth progress fill rather than hard skipping
     val animatedProgress by animateFloatAsState(targetValue = progress, label = "miniProgressBar")
 
     LinearProgressIndicator(
@@ -866,7 +914,7 @@ fun PlaylistCard(playlist: Playlist, onClick: () -> Unit) {
 }
 
 @Composable
-fun HistoryStatRow(song: AudioTrack, count: Int, vm: MusicViewModel, sortedSongs: List<AudioTrack>, onTrashClick: () -> Unit) {
+fun HistoryStatRow(song: AudioTrack, count: Int, vm: MusicViewModel, sortedSongs: ImmutableList<AudioTrack>, onTrashClick: () -> Unit) {
     var showMenu by remember { mutableStateOf(false) }
     ListItem(
         headlineContent = { Text(song.title, fontWeight = FontWeight.Bold, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -876,11 +924,11 @@ fun HistoryStatRow(song: AudioTrack, count: Int, vm: MusicViewModel, sortedSongs
             Box {
                 IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More", tint = TextSecondary) }
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.background(SurfaceColor)) {
-                    DropdownMenuItem(text = { Text("Play", color = TextPrimary) }, onClick = { showMenu = false; vm.playQueue(sortedSongs, sortedSongs.indexOf(song)) }, leadingIcon = { Icon(Icons.Rounded.PlayArrow, null, tint = TextPrimary) })
+                    DropdownMenuItem(text = { Text("Play", color = TextPrimary) }, onClick = { showMenu = false; vm.playQueue(sortedSongs, song) }, leadingIcon = { Icon(Icons.Rounded.PlayArrow, null, tint = TextPrimary) })
                     DropdownMenuItem(text = { Text("Move to Trash", color = MaterialTheme.colorScheme.error) }, onClick = { showMenu = false; onTrashClick() }, leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) })
                 }
             }
-        }, colors = ListItemDefaults.colors(containerColor = Color.Transparent), modifier = Modifier.clickable { vm.playQueue(sortedSongs, sortedSongs.indexOf(song)) }
+        }, colors = ListItemDefaults.colors(containerColor = Color.Transparent), modifier = Modifier.clickable { vm.playQueue(sortedSongs, song) }
     )
 }
 
@@ -892,7 +940,6 @@ fun PlaylistHeader(playlist: Playlist) {
         Row(Modifier.padding(horizontal = 24.dp, vertical = 24.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             val imgReq = getArtRequest(playlist.tracks.firstOrNull { it.albumId > 0 }?.albumId ?: -1L)
 
-            // Reduced shadow scale to 4.dp to prevent GPU rendering lag
             if (imgReq != null) {
                 AsyncImage(imgReq, null, contentScale = ContentScale.Crop, modifier = Modifier.size(110.dp).shadow(4.dp, RoundedCornerShape(12.dp)).clip(RoundedCornerShape(12.dp)))
             } else {
@@ -1053,7 +1100,7 @@ fun TagEditorDialog(song: AudioTrack, onDismiss: () -> Unit, onSave: () -> Unit)
 }
 
 @Composable
-fun CreatePlaylistDialog(existingPlaylists: List<Playlist>, onDismiss: () -> Unit, onCreate: (String) -> Unit) {
+fun CreatePlaylistDialog(existingPlaylists: ImmutableList<Playlist>, onDismiss: () -> Unit, onCreate: (String) -> Unit) {
     var newName by remember { mutableStateOf("") }
     var isError by remember { mutableStateOf(false) }
     AlertDialog(
@@ -1078,7 +1125,7 @@ fun CreatePlaylistDialog(existingPlaylists: List<Playlist>, onDismiss: () -> Uni
 }
 
 @Composable
-fun RenamePlaylistDialog(playlist: Playlist, existingPlaylists: List<Playlist>, onDismiss: () -> Unit, onRename: (String) -> Unit) {
+fun RenamePlaylistDialog(playlist: Playlist, existingPlaylists: ImmutableList<Playlist>, onDismiss: () -> Unit, onRename: (String) -> Unit) {
     var newName by remember { mutableStateOf(playlist.name) }
     var isError by remember { mutableStateOf(false) }
     AlertDialog(
@@ -1103,8 +1150,8 @@ fun RenamePlaylistDialog(playlist: Playlist, existingPlaylists: List<Playlist>, 
 }
 
 @Composable
-fun AddSongsDialog(playlist: Playlist, allSongs: List<AudioTrack>, onDismiss: () -> Unit, onAddSongs: (List<AudioTrack>) -> Unit) {
-    val availableSongs = remember(allSongs, playlist.tracks) { val existingIds = playlist.tracks.map { it.id }.toSet(); allSongs.filter { it.id !in existingIds } }
+fun AddSongsDialog(playlist: Playlist, allSongs: ImmutableList<AudioTrack>, onDismiss: () -> Unit, onAddSongs: (List<AudioTrack>) -> Unit) {
+    val availableSongs = remember(allSongs, playlist.tracks) { val existingIds = playlist.tracks.map { it.id }.toSet(); allSongs.filter { it.id !in existingIds }.toImmutableList() }
     val selectedIds = remember { mutableStateListOf<Long>() }
     Dialog(onDismissRequest = onDismiss) {
         Card(modifier = Modifier.fillMaxWidth().heightIn(max = 600.dp), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = SurfaceColor)) {
