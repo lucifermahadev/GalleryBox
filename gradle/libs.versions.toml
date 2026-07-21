@@ -55,6 +55,7 @@ remoteCreationCore = "1.0.0-alpha09"
 runtimeLivedata = "1.11.0"
 foundationVersion = "1.11.2"
 
+
 [libraries]
 # ---------------- Core ----------------
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -104,9 +105,6 @@ firebase-perf = { group = "com.google.firebase", name = "firebase-perf", version
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
-
-# ---------------- Ads ----------------
-play-services-ads = { group = "com.google.android.gms", name = "play-services-ads", version.ref = "playServicesAds" }
 
 # ---------------- Image Loading ----------------
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }

@@ -26,7 +26,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
-import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -77,7 +76,11 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
             }
         }
 
-        var sel = "(${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE} OR ${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO})"
+        // Include Images, Videos, Documents (6 - API 29+), and None (0 - fallback for older API documents)
+        var sel = "(${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE} OR " +
+                "${MediaStore.Files.FileColumns.MEDIA_TYPE}=${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO} OR " +
+                "${MediaStore.Files.FileColumns.MEDIA_TYPE}=6 OR " +
+                "${MediaStore.Files.FileColumns.MEDIA_TYPE}=0)"
         val args = mutableListOf<String>()
 
         if (minGeneration != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -109,14 +112,27 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                 while (c.moveToNext()) {
                     if (trashC != -1 && c.getInt(trashC) == 1) continue
 
-                    val id = c.getLong(idC)
                     val type = c.getInt(typeC)
+                    val isImg = type == MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
                     val isV = type == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
 
-                    val cUri = when (type) {
-                        MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE -> ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-                        MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO -> ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
-                        else -> ContentUris.withAppendedId(uri, id)
+                    val name = c.getString(nameC) ?: "Unknown"
+                    val mimeType = c.getString(mimeC)?.lowercase(Locale.ROOT) ?: ""
+                    val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+
+                    val isPdfFile = mimeType == "application/pdf" || ext == "pdf"
+                    val isDocFile = isPdfFile ||
+                            ext in setOf("doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt", "json", "xml", "html", "htm", "md", "rtf", "odt", "ods", "odp", "epub", "zip", "kt", "java", "cpp", "c", "py", "js", "ts", "gradle", "sh", "bat", "cs", "swift", "go", "rs", "yaml") ||
+                            mimeType.contains("word") || mimeType.contains("spreadsheet") || mimeType.contains("presentation") || mimeType.startsWith("text/")
+
+                    // Only process standard images, videos, and our recognized documents
+                    if (!isImg && !isV && !isDocFile) continue
+
+                    val id = c.getLong(idC)
+                    val cUri = when {
+                        isImg -> ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                        isV -> ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+                        else -> ContentUris.withAppendedId(uri, id) // Fallback for Documents via Files URI
                     }
 
                     val relP = if (relC != -1 && c.getString(relC) != null) c.getString(relC) else File(c.getString(dataC) ?: "").parent ?: ""
@@ -131,13 +147,13 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                             uri = cUri,
                             path = c.getString(dataC) ?: "",
                             relativePath = relP,
-                            name = c.getString(nameC) ?: "Unknown",
-                            mimeType = c.getString(mimeC) ?: "",
+                            name = name,
+                            mimeType = mimeType,
                             size = c.getLong(sizeC),
                             dateAdded = dSec,
                             isVideo = isV,
-                            isPdf = false,
-                            isDocument = false,
+                            isPdf = isPdfFile,
+                            isDocument = isDocFile,
                             isHidden = hidden.contains(id.toString()),
                             isFavorite = false,
                             bucketId = c.getString(bIdC) ?: "unknown",

@@ -2,15 +2,14 @@
 
 package com.gallerybox.viewmodel
 
-import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.gallerybox.data.*
 import com.gallerybox.engine.*
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -21,24 +20,43 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 import javax.inject.Inject
-import com.gallerybox.data.*
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class DocumentViewModel @Inject constructor(
     private val documentEngine: DocumentCoreEngine,
-    private val recentEngine: RecentDocumentsEngine,
     private val provider: DocumentDispatcherProvider,
     private val savedStateHandle: SavedStateHandle,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
-    // Expose specific engines for UI usage
     val pdfEngine: PdfEngine get() = documentEngine.pdfEngine
     val docxEngine: DocxEngine get() = documentEngine.docxEngine
     val xlsxEngine: XlsxEngine get() = documentEngine.xlsxEngine
     val pptxEngine: PptxEngine get() = documentEngine.pptxEngine
     val rawTextEngine: RawTextEngine get() = documentEngine.rawTextEngine
+
+    private val supportedDocExtensions = setOf(
+        "pdf",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "txt"
+    )
+
+    private val supportedMimeTypes = setOf(
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "text/plain"
+    )
 
     private val _allDocs = MutableStateFlow<List<DocumentFile>>(emptyList())
 
@@ -55,29 +73,28 @@ class DocumentViewModel @Inject constructor(
     )
     val docSortType = _docSortType.asStateFlow()
 
-    private val _recentUpdateTrigger = MutableStateFlow(0)
-
     val documents = combine(
         _allDocs,
         _docSearchQuery.debounce(300),
         _docCategory,
-        _docSortType,
-        _recentUpdateTrigger
-    ) { docs, query, category, sort, _ ->
+        _docSortType
+    ) { docs, query, category, sort ->
         var seq = docs.asSequence()
-        if (category != null) seq = seq.filter { it.type == category }
-        if (query.isNotBlank()) seq = seq.filter { it.name.contains(query, ignoreCase = true) }
 
-        val recents = recentEngine.getRecents()
+        if (category != null) {
+            seq = seq.filter { it.type == category }
+        }
+
+        if (query.isNotBlank()) {
+            seq = seq.filter { it.name.contains(query, ignoreCase = true) }
+        }
+
         seq.sortedWith(
             when (sort) {
                 DocumentSortType.DATE -> compareByDescending { it.dateModified }
                 DocumentSortType.SIZE -> compareByDescending { it.size }
                 DocumentSortType.NAME -> compareBy { it.name.lowercase(Locale.ROOT) }
-                DocumentSortType.RECENT -> compareBy {
-                    val idx = recents.indexOf(it.uri)
-                    if (idx == -1) Int.MAX_VALUE else idx
-                }
+                DocumentSortType.RECENT -> compareByDescending { it.dateModified }
             }
         ).toList()
     }.flowOn(provider.defaultDispatcher)
@@ -104,7 +121,8 @@ class DocumentViewModel @Inject constructor(
 
     init {
         loadHistory()
-        loadAllDocuments()
+        // Note: loadAllDocuments() is intentionally NOT called here anymore.
+        // It must be triggered from the UI once the user grants SAF folder access.
 
         viewModelScope.launch(provider.ioDispatcher) {
             readingStateFlow
@@ -115,114 +133,82 @@ class DocumentViewModel @Inject constructor(
         }
     }
 
-    fun loadAllDocuments() {
+    // Pass the SAF Tree URI granted from the UI (DocumentFolderGuard)
+    fun loadAllDocuments(treeUri: Uri) {
         viewModelScope.launch(provider.ioDispatcher) {
             _isListLoading.value = true
             val fetched = mutableListOf<DocumentFile>()
 
-            val projection = arrayOf(
-                MediaStore.Files.FileColumns._ID,
-                MediaStore.Files.FileColumns.DISPLAY_NAME,
-                MediaStore.Files.FileColumns.SIZE,
-                MediaStore.Files.FileColumns.DATE_MODIFIED,
-                MediaStore.Files.FileColumns.MIME_TYPE,
-                MediaStore.Files.FileColumns.RELATIVE_PATH
-            )
-
             try {
-                context.contentResolver.query(
-                    MediaStore.Files.getContentUri("external"),
-                    projection,
-                    null, // Passing selection as null as requested
-                    null,
-                    "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
-                )?.use { cursor ->
-                    val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
-                    val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
-                    val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
-                    val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
-                    val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
-                    val pathCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.RELATIVE_PATH)
+                // Convert the raw treeUri into an AndroidX DocumentFile root
+                val rootDoc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, treeUri)
 
-                    val supported = setOf(
-                        "pdf",
-                        "doc", "docx",
-                        "xls", "xlsx",
-                        "ppt", "pptx",
-                        "txt", "csv",
-                        "json", "xml",
-                        "html", "htm",
-                        "md",
-                        "rtf",
-                        "odt", "ods", "odp",
-                        "epub",
-                        "zip",
-                        "kt", "java", "cpp", "c",
-                        "py", "js", "ts",
-                        "gradle", "sh", "bat",
-                        "cs", "swift", "go", "rs", "yaml"
-                    )
-
-                    while (cursor.moveToNext()) {
-                        currentCoroutineContext().ensureActive()
-                        val name = cursor.getString(nameCol) ?: ""
-                        val mime = cursor.getString(mimeCol)?.lowercase() ?: ""
-                        val relativePath = cursor.getString(pathCol) ?: ""
-
-                        if (name.startsWith(".")) continue
-
-                        // Manual fallback filtering for media types
-                        if (
-                            mime.startsWith("image/") ||
-                            mime.startsWith("video/") ||
-                            mime.startsWith("audio/")
-                        ) continue
-
-                        val path = relativePath.lowercase()
-
-                        if (
-                            path.startsWith("android/") ||
-                            path.contains(".thumbnails") ||
-                            path.contains("/cache/") ||
-                            path.contains("cache/") ||
-                            path.contains("obb/") ||
-                            path.contains("data/")
-                        ) {
-                            continue
-                        }
-
-                        // Explicit extension verification
-                        val ext = name.substringAfterLast('.', "").lowercase()
-                        if (ext !in supported) continue
-
-                        val id = cursor.getLong(idCol)
-                        val uri = ContentUris.withAppendedId(MediaStore.Files.getContentUri("external"), id)
-
-                        val type = documentEngine.fileDetection.detect(uri, name, mime)
-
-                        if (type != DocumentType.UNKNOWN) {
-                            fetched.add(
-                                DocumentFile(
-                                    id = id,
-                                    name = name,
-                                    uri = uri,
-                                    size = cursor.getLong(sizeCol),
-                                    dateModified = cursor.getLong(dateCol) * 1000L,
-                                    mimeType = mime,
-                                    type = type
-                                )
-                            )
-                        }
-                    }
+                if (rootDoc != null && rootDoc.isDirectory) {
+                    // Scan the folder recursively
+                    traverseDirectory(rootDoc, fetched)
                 }
             } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                Log.e("DocumentViewModel", "Failed to load documents", e)
+                Log.e("DocumentViewModel", "Failed to load documents via SAF", e)
             } finally {
                 withContext(Dispatchers.Main) {
                     _allDocs.value = fetched
                     _isListLoading.value = false
                 }
+            }
+        }
+    }
+
+    // Recursive helper to traverse SAF directories
+    private suspend fun traverseDirectory(
+        dir: androidx.documentfile.provider.DocumentFile,
+        fetched: MutableList<DocumentFile>
+    ) {
+        val files = dir.listFiles()
+        for (file in files) {
+            // Stop scanning immediately if the ViewModel job is cancelled
+            currentCoroutineContext().ensureActive()
+
+            if (file.isDirectory) {
+                traverseDirectory(file, fetched)
+            } else {
+                val name = file.name ?: continue
+                if (name.startsWith(".")) continue
+
+                val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                val mime = file.type ?: ""
+
+                // Filter strictly by supported extensions and MIME types
+                if (ext !in supportedDocExtensions && mime !in supportedMimeTypes) continue
+
+                val fallbackType = when {
+                    mime == "application/pdf" || ext == "pdf" -> DocumentType.PDF
+                    ext in setOf("doc", "docx") || mime.contains("word") -> DocumentType.WORD
+                    ext in setOf("xls", "xlsx") || mime.contains("spreadsheet") -> DocumentType.EXCEL
+                    ext in setOf("ppt", "pptx") || mime.contains("presentation") -> DocumentType.SLIDE
+                    ext == "txt" || mime == "text/plain" -> DocumentType.TXT
+                    else -> DocumentType.UNKNOWN
+                }
+
+                var type = try {
+                    documentEngine.fileDetection.detect(file.uri, name, mime)
+                } catch (_: Exception) {
+                    DocumentType.UNKNOWN
+                }
+
+                if (type == DocumentType.UNKNOWN) type = fallbackType
+
+                // Map to your custom data class securely
+                fetched.add(
+                    DocumentFile(
+                        id = file.uri.toString().hashCode().toLong(), // Stable hash for ID
+                        name = name,
+                        uri = file.uri,
+                        size = file.length(),
+                        dateModified = file.lastModified(),
+                        mimeType = mime,
+                        type = type
+                    )
+                )
             }
         }
     }
@@ -268,9 +254,6 @@ class DocumentViewModel @Inject constructor(
                     return@launch
                 }
 
-                recentEngine.addRecent(doc.uri)
-                _recentUpdateTrigger.value += 1
-
                 when (res) {
                     is EngineResult.OpenPdf -> {
                         _activePdfSession.value?.close()
@@ -281,8 +264,6 @@ class DocumentViewModel @Inject constructor(
                     is EngineResult.OpenExcel -> _events.send(DocumentUiEvent.OpenExcel(res.sheets))
                     is EngineResult.OpenSlide -> _events.send(DocumentUiEvent.OpenSlide(res.pages))
                     is EngineResult.OpenCsv -> _events.send(DocumentUiEvent.OpenExcel(listOf(res.sheet)))
-                    is EngineResult.OpenEpub -> _events.send(DocumentUiEvent.OpenEpub(res.chapters))
-                    is EngineResult.OpenZip -> _events.send(DocumentUiEvent.OpenZip(res.contents))
                     is EngineResult.OpenText -> _events.send(DocumentUiEvent.OpenText(res.content))
                     is EngineResult.Unsupported, is EngineResult.Error -> {
                         val errorMessage = (res as? EngineResult.Error)?.message ?: ""
@@ -298,6 +279,7 @@ class DocumentViewModel @Inject constructor(
                             _events.send(DocumentUiEvent.LaunchIntent(Intent.createChooser(intent, "Open with")))
                         }
                     }
+                    else -> {}
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e

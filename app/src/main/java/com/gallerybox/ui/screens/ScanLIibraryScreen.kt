@@ -2,6 +2,8 @@
 
 package com.gallerybox.ui.screens
 
+import android.content.Context
+import android.net.Uri
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
@@ -81,6 +83,9 @@ fun ScanLibraryScreen(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+
+    // Access SharedPreferences to fetch the SAF folder URI
+    val prefs = remember { context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE) }
 
     val isGalleryBusy by galleryViewModel.isBusy.collectAsState()
     val isDocsBusy by documentViewModel.isListLoading.collectAsState()
@@ -176,7 +181,13 @@ fun ScanLibraryScreen(
                 coroutineScope.launch {
                     galleryViewModel.forceSync()
                 }
-                documentViewModel.loadAllDocuments()
+
+                // Fetch URI and pass it to the updated document scanner
+                val savedUriStr = prefs.getString("document_tree_uri", null)
+                if (savedUriStr != null) {
+                    documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
+                }
+
                 musicViewModel.loadAllAudioTracks()
             }
         }

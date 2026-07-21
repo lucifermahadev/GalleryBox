@@ -103,6 +103,9 @@ fun TrashScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val haptics = LocalHapticFeedback.current
 
+    // Fetch SAF preferences for documents
+    val prefs = remember { context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE) }
+
     val trashEntities by galleryViewModel.trashBin.collectAsState(initial = emptyList())
     val isGalleryBusy by galleryViewModel.isBusy.collectAsState(initial = false)
     val operationProgress by trashViewModel.operationProgress.collectAsState()
@@ -112,10 +115,19 @@ fun TrashScreen(
     LaunchedEffect(Unit) {
         trashViewModel.onRefreshGallery = { galleryViewModel.forceSync() }
         trashViewModel.onRefreshMusic = { musicViewModel.loadAllAudioTracks() }
-        trashViewModel.onRefreshDocuments = { documentViewModel.loadAllDocuments() }
+        trashViewModel.onRefreshDocuments = {
+            val savedUriStr = prefs.getString("document_tree_uri", null)
+            if (savedUriStr != null) {
+                documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
+            }
+        }
         galleryViewModel.refreshData()
-        documentViewModel.loadAllDocuments()
         musicViewModel.loadAllAudioTracks()
+
+        val savedUriStr = prefs.getString("document_tree_uri", null)
+        if (savedUriStr != null) {
+            documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
+        }
     }
 
     var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -238,7 +250,10 @@ fun TrashScreen(
 
                     galleryViewModel.refreshData()
                     musicViewModel.loadAllAudioTracks()
-                    documentViewModel.loadAllDocuments()
+                    val savedUriStr = prefs.getString("document_tree_uri", null)
+                    if (savedUriStr != null) {
+                        documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
+                    }
                 }
                 else -> {}
             }

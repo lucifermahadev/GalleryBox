@@ -1,14 +1,20 @@
 @file:Suppress("unused", "OPT_IN_USAGE", "DEPRECATION")
+
 package com.gallerybox.ui.screens.pdf
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
@@ -35,7 +41,6 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -106,15 +111,40 @@ fun AllDocumentReaderScreen(
     onOpenDocument: (Long) -> Unit,
     viewModel: DocumentViewModel = hiltViewModel()
 ) {
-    val documents by viewModel.documents.collectAsState()
-    val history by viewModel.readingHistory.collectAsState()
-    val isListLoading by viewModel.isListLoading.collectAsState()
-    val searchQuery by viewModel.docSearchQuery.collectAsState()
-    val currentSort by viewModel.docSortType.collectAsState()
-
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val prefs = remember { context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE) }
 
+    // SAF State
+    var grantedUri by remember { mutableStateOf<Uri?>(null) }
+    var isCheckingPermission by remember { mutableStateOf(true) }
+
+    // Check for existing persisted SAF permissions
+    LaunchedEffect(Unit) {
+        val savedUriStr = prefs.getString("document_tree_uri", null)
+        if (savedUriStr != null) {
+            val uri = Uri.parse(savedUriStr)
+            val persistedPermissions = context.contentResolver.persistedUriPermissions
+            val hasPermission = persistedPermissions.any { it.uri == uri && it.isReadPermission }
+
+            if (hasPermission) {
+                grantedUri = uri
+            } else {
+                prefs.edit().remove("document_tree_uri").apply()
+            }
+        }
+        isCheckingPermission = false
+    }
+
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            prefs.edit().putString("document_tree_uri", uri.toString()).apply()
+            grantedUri = uri
+        }
+    }
+
+    // Handle Toast and Errors
     LaunchedEffect(viewModel.events, lifecycleOwner.lifecycle) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             viewModel.events.collect { e ->
@@ -137,6 +167,33 @@ fun AllDocumentReaderScreen(
         }
     }
 
+    if (isCheckingPermission) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        return
+    }
+
+    // IF NO SAF PERMISSION GRANTED, SHOW THE GUARD UI
+    if (grantedUri == null) {
+        DocumentFolderGuardUI(
+            onBack = onBack,
+            onGrant = { launcher.launch(null) }
+        )
+        return
+    }
+
+    // ONCE PERMISSION GRANTED, LOAD DOCUMENTS & SHOW LIST
+    val documents by viewModel.documents.collectAsState()
+    val history by viewModel.readingHistory.collectAsState()
+    val isListLoading by viewModel.isListLoading.collectAsState()
+    val searchQuery by viewModel.docSearchQuery.collectAsState()
+    val currentSort by viewModel.docSortType.collectAsState()
+
+    LaunchedEffect(grantedUri) {
+        if (documents.isEmpty()) {
+            viewModel.loadAllDocuments(grantedUri!!)
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         Scaffold(
             modifier = Modifier.fillMaxSize(),
@@ -153,6 +210,58 @@ fun AllDocumentReaderScreen(
                 onQueryChange = { viewModel.updateDocSearchQuery(it) },
                 onOpen = { onOpenDocument(it.id) }
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DocumentFolderGuardUI(onBack: () -> Unit, onGrant: () -> Unit) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Documents", fontWeight = FontWeight.Bold) },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) } }
+            )
+        }
+    ) { p ->
+        Box(
+            modifier = Modifier
+                .padding(p)
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.FolderOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(72.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+                Text(
+                    text = "Folder Access Required",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "To view your documents, please select a folder (like Documents or Downloads) where your files are stored. You only need to do this once.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 22.sp
+                )
+                Spacer(modifier = Modifier.height(32.dp))
+                Button(onClick = onGrant, modifier = Modifier.height(56.dp)) {
+                    Text("Select Folder", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.padding(horizontal = 24.dp))
+                }
+            }
         }
     }
 }
@@ -306,13 +415,19 @@ fun DocumentViewerScreen(fileId: Long, viewModel: DocumentViewModel = hiltViewMo
     val allDocs by viewModel.documents.collectAsState()
     val isListLoading by viewModel.isListLoading.collectAsState()
 
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE) }
+
     val doc: DocumentFile? = remember(allDocs, fileId) {
         allDocs.find { it.id == fileId } ?: viewModel.getDocumentById(fileId)
     }
 
     LaunchedEffect(fileId) {
         if (allDocs.isEmpty()) {
-            viewModel.loadAllDocuments()
+            val savedUriStr = prefs.getString("document_tree_uri", null)
+            if (savedUriStr != null) {
+                viewModel.loadAllDocuments(Uri.parse(savedUriStr))
+            }
         }
     }
 
@@ -324,7 +439,12 @@ fun DocumentViewerScreen(fileId: Long, viewModel: DocumentViewModel = hiltViewMo
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Document not found")
                     Spacer(Modifier.height(12.dp))
-                    Button(onClick = { viewModel.loadAllDocuments() }) { Text("Reload") }
+                    Button(onClick = {
+                        val savedUriStr = prefs.getString("document_tree_uri", null)
+                        if (savedUriStr != null) {
+                            viewModel.loadAllDocuments(Uri.parse(savedUriStr))
+                        }
+                    }) { Text("Reload") }
                 }
             }
         }

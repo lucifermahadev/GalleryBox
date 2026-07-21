@@ -2,58 +2,16 @@
 
 package com.gallerybox.engine
 
-import android.app.ActivityManager
 import android.content.Context
 import android.graphics.*
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Log
-import android.util.LruCache
-import android.util.Xml
 import androidx.room.*
 import com.gallerybox.data.DocumentFile
-import com.gallerybox.data.DocumentMetadata
-import com.gallerybox.data.DocumentMetadataDao
-import com.opencsv.CSVParserBuilder
-import com.opencsv.CSVReaderBuilder
-import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
-import com.tom_roush.pdfbox.pdmodel.PDDocument
-import com.tom_roush.pdfbox.text.PDFTextStripper
-import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import org.apache.poi.hwpf.HWPFDocument
-import org.apache.poi.sl.usermodel.PlaceableShape
-import org.apache.poi.sl.usermodel.SlideShowFactory
-import org.apache.poi.ss.usermodel.*
-import org.apache.poi.xwpf.usermodel.*
-import org.json.JSONArray
-import org.json.JSONObject
-import org.xmlpull.v1.XmlPullParser
-import java.io.*
-import java.nio.charset.Charset
-import java.util.Locale
-import java.util.concurrent.Executors
-import java.util.zip.ZipInputStream
-import javax.inject.Inject
-import javax.inject.Singleton
-import javax.xml.transform.OutputKeys
-import javax.xml.transform.TransformerFactory
-import javax.xml.transform.stream.StreamResult
-import javax.xml.transform.stream.StreamSource
-import kotlin.math.max
-import kotlin.math.min
-import com.gallerybox.data.CacheEntry
-import com.gallerybox.data.CellStyle
-import com.gallerybox.data.DocumentSortType
 import com.gallerybox.data.DocumentType
 import com.gallerybox.data.EngineResult
-import com.gallerybox.data.EpubChapter
-import com.gallerybox.data.PageMargins
-import com.gallerybox.data.PdfLoadResult
-import com.gallerybox.data.SearchOptions
 import com.gallerybox.data.SlideElement
 import com.gallerybox.data.SlidePage
 import com.gallerybox.data.TableCell
@@ -64,25 +22,26 @@ import com.gallerybox.data.VirtualRow
 import com.gallerybox.data.VirtualSheet
 import com.gallerybox.data.WordBlock
 import com.gallerybox.data.WordRun
-import com.gallerybox.data.ZipEntryItem
-
-fun String.matchesOptions(options: SearchOptions): Boolean {
-    if (options.isRegex) {
-        return Regex(
-            options.query,
-            if (options.caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE)
-        ).containsMatchIn(this)
-    }
-
-    if (options.wholeWord) {
-        return Regex(
-            "\\b${Regex.escape(options.query)}\\b",
-            if (options.caseSensitive) emptySet() else setOf(RegexOption.IGNORE_CASE)
-        ).containsMatchIn(this)
-    }
-
-    return this.contains(options.query, ignoreCase = !options.caseSensitive)
-}
+import com.gallerybox.data.PdfLoadResult
+import com.gallerybox.data.CellStyle
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.apache.poi.hwpf.HWPFDocument
+import org.apache.poi.sl.usermodel.PlaceableShape
+import org.apache.poi.sl.usermodel.SlideShowFactory
+import org.apache.poi.ss.usermodel.*
+import org.apache.poi.xwpf.usermodel.*
+import java.io.*
+import java.nio.charset.Charset
+import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.zip.ZipInputStream
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlin.math.max
+import kotlin.math.min
 
 @Singleton
 class DocumentDispatcherProvider @Inject constructor() {
@@ -96,110 +55,19 @@ class DocumentDispatcherProvider @Inject constructor() {
 }
 
 @Singleton
-class ContainerValidationEngine @Inject constructor(
+class FileDetectionEngine @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    fun validateOOXML(uri: Uri, requiredFile: String): Boolean {
-        return try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                ZipInputStream(stream).use { zis ->
-                    var hasContentTypes = false
-                    var hasRequired = false
-                    var entry = zis.nextEntry
-
-                    while (entry != null) {
-                        if (entry.name == "[Content_Types].xml") {
-                            hasContentTypes = true
-                        }
-                        if (entry.name.contains(requiredFile)) {
-                            hasRequired = true
-                        }
-                        if (hasContentTypes && hasRequired) {
-                            return true
-                        }
-                        entry = zis.nextEntry
-                    }
-                    false
-                }
-            } ?: false
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    fun isEncryptedOOXML(uri: Uri): Boolean {
-        return try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                val buffer = ByteArray(8)
-                val read = stream.read(buffer)
-                if (read >= 8) {
-                    val hex = buffer.take(8).joinToString("") { "%02X".format(it) }
-                    hex.startsWith("D0CF11E0")
-                } else {
-                    false
-                }
-            } ?: false
-        } catch (e: Exception) {
-            false
-        }
-    }
-}
-
-@Singleton
-class FileDetectionEngine @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val containerValidation: ContainerValidationEngine
-) {
-    private val codeExts = setOf("kt", "java", "cpp", "c", "py", "js", "ts", "gradle", "sh", "bat", "cs", "swift", "go", "rs", "yaml", "xml", "json", "html", "htm")
-    private val legacyExts = setOf("doc", "xls", "ppt", "rtf", "odt", "ods", "odp", "epub")
-
     fun detect(uri: Uri, name: String, fallbackMime: String?): DocumentType {
         val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
-
-        try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                val h = ByteArray(8)
-                val bytesRead = stream.read(h, 0, 8)
-                val hex = h.take(bytesRead).joinToString("") { "%02X".format(it) }
-
-                when {
-                    hex.startsWith("25504446") -> return DocumentType.PDF
-                    hex.startsWith("504B0304") -> return when {
-                        ext == "epub" -> DocumentType.EPUB
-                        ext == "zip" -> DocumentType.ZIP
-                        containerValidation.validateOOXML(uri, "word/document.xml") || ext == "odt" -> DocumentType.WORD
-                        containerValidation.validateOOXML(uri, "xl/workbook.xml") || ext == "ods" -> DocumentType.EXCEL
-                        containerValidation.validateOOXML(uri, "ppt/presentation.xml") || ext == "odp" -> DocumentType.SLIDE
-                        else -> DocumentType.ZIP
-                    }
-                    hex.startsWith("D0CF11E0") -> return when (ext) {
-                        "xls" -> DocumentType.EXCEL
-                        "ppt" -> DocumentType.SLIDE
-                        else -> DocumentType.WORD
-                    }
-                    hex.startsWith("7B5C7274") -> return DocumentType.RTF
-                }
-            }
-        } catch (e: Exception) {}
-
         val safeMime = fallbackMime?.lowercase(Locale.US) ?: "*/*"
 
         return when {
-            ext == "csv" || safeMime.contains("csv") -> DocumentType.CSV
-            ext == "json" || safeMime.contains("json") -> DocumentType.JSON
-            ext == "xml" || safeMime.contains("xml") -> DocumentType.XML
-            ext in listOf("html", "htm") || safeMime.contains("html") -> DocumentType.HTML
-            ext == "md" || safeMime.contains("markdown") -> DocumentType.MARKDOWN
-            ext in codeExts -> DocumentType.CODE
-            ext == "epub" || safeMime.contains("epub") -> DocumentType.EPUB
-            ext == "zip" || safeMime.contains("zip") -> DocumentType.ZIP
-            ext == "txt" || safeMime.startsWith("text/") -> DocumentType.TXT
-            ext in legacyExts -> when(ext) {
-                "xls", "ods" -> DocumentType.EXCEL
-                "ppt", "odp" -> DocumentType.SLIDE
-                "rtf" -> DocumentType.RTF
-                else -> DocumentType.WORD
-            }
+            ext == "pdf" || safeMime.contains("pdf") -> DocumentType.PDF
+            ext in setOf("doc", "docx") || safeMime.contains("word") -> DocumentType.WORD
+            ext in setOf("xls", "xlsx") || safeMime.contains("spreadsheet") || safeMime.contains("excel") -> DocumentType.EXCEL
+            ext in setOf("ppt", "pptx") || safeMime.contains("presentation") || safeMime.contains("powerpoint") -> DocumentType.SLIDE
+            ext == "txt" || safeMime.startsWith("text/plain") -> DocumentType.TXT
             else -> DocumentType.UNKNOWN
         }
     }
@@ -208,7 +76,6 @@ class FileDetectionEngine @Inject constructor(
 @Singleton
 class ValidationEngine @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val containerValidation: ContainerValidationEngine,
     private val provider: DocumentDispatcherProvider
 ) {
     suspend fun validatePdf(uri: Uri): Boolean = withContext(provider.ioDispatcher) {
@@ -225,188 +92,18 @@ class ValidationEngine @Inject constructor(
     }
 
     suspend fun validateDocx(uri: Uri): Boolean = withContext(provider.ioDispatcher) {
-        containerValidation.validateOOXML(uri, "word/document.xml") || uri.toString().endsWith(".doc") || uri.toString().endsWith(".rtf")
+        val path = uri.toString().lowercase(Locale.US)
+        path.endsWith(".doc") || path.endsWith(".docx")
     }
 
     suspend fun validateXlsx(uri: Uri): Boolean = withContext(provider.ioDispatcher) {
-        containerValidation.validateOOXML(uri, "xl/workbook.xml") || uri.toString().endsWith(".xls") || uri.toString().endsWith(".csv")
+        val path = uri.toString().lowercase(Locale.US)
+        path.endsWith(".xls") || path.endsWith(".xlsx")
     }
 
     suspend fun validatePptx(uri: Uri): Boolean = withContext(provider.ioDispatcher) {
-        containerValidation.validateOOXML(uri, "ppt/presentation.xml") || uri.toString().endsWith(".ppt")
-    }
-}
-
-@Singleton
-class EncodingDetectionEngine @Inject constructor() {
-    fun detectCharset(bytes: ByteArray): Charset {
-        if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {
-            return Charset.forName("UTF-8")
-        }
-        if (bytes.size >= 4 && bytes[0] == 0x00.toByte() && bytes[1] == 0x00.toByte() && bytes[2] == 0xFE.toByte() && bytes[3] == 0xFF.toByte()) {
-            return Charset.forName("UTF-32BE")
-        }
-        if (bytes.size >= 4 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte() && bytes[2] == 0x00.toByte() && bytes[3] == 0x00.toByte()) {
-            return Charset.forName("UTF-32LE")
-        }
-        if (bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte()) {
-            return Charset.forName("UTF-16BE")
-        }
-        if (bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte()) {
-            return Charset.forName("UTF-16LE")
-        }
-        return Charset.defaultCharset()
-    }
-
-    fun detectCharset(context: Context, uri: Uri): Charset {
-        return try {
-            context.contentResolver.openInputStream(uri)?.use { i ->
-                val b = ByteArray(4)
-                i.read(b)
-                detectCharset(b)
-            } ?: Charset.defaultCharset()
-        } catch (e: Exception) {
-            Charset.defaultCharset()
-        }
-    }
-}
-
-@Singleton
-class DelimiterDetectionEngine @Inject constructor() {
-    fun detect(context: Context, uri: Uri, charset: Charset, fallback: Char): Char {
-        return try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                BufferedReader(InputStreamReader(stream, charset)).use { r ->
-                    val sample = (1..5).mapNotNull { r.readLine() }.joinToString("\n")
-                    val counts = mapOf(
-                        ',' to sample.count { it == ',' },
-                        ';' to sample.count { it == ';' },
-                        '\t' to sample.count { it == '\t' },
-                        '|' to sample.count { it == '|' }
-                    )
-                    counts.maxByOrNull { it.value }?.key ?: fallback
-                }
-            } ?: fallback
-        } catch (e: Exception) {
-            fallback
-        }
-    }
-}
-
-@Singleton
-class MetadataEngine @Inject constructor(
-    private val metadataDao: DocumentMetadataDao,
-    private val provider: DocumentDispatcherProvider
-) {
-    suspend fun saveMetadata(metadata: DocumentMetadata) =
-        withContext(provider.ioDispatcher) {
-            metadataDao.insert(metadata)
-        }
-
-    suspend fun getMetadata(id: Long): DocumentMetadata? =
-        withContext(provider.ioDispatcher) {
-            metadataDao.getById(id)
-        }
-}
-
-@Singleton
-class SmartCacheEngine @Inject constructor(
-    @ApplicationContext private val context: Context
-) {
-    private val memCache: LruCache<String, CacheEntry>
-    private val diskCacheDir = File(context.cacheDir, "smart_docs").apply { mkdirs() }
-
-    init {
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val maxMemory = min((am.memoryClass * 1024 * 1024 / 8), 128 * 1024 * 1024)
-
-        memCache = object : LruCache<String, CacheEntry>(maxMemory) {
-            override fun sizeOf(key: String, value: CacheEntry): Int {
-                return if (value is CacheEntry.PdfPage) value.bitmap.byteCount else 1
-            }
-
-            override fun entryRemoved(evicted: Boolean, key: String?, oldValue: CacheEntry?, newValue: CacheEntry?) {
-                super.entryRemoved(evicted, key, oldValue, newValue)
-                if (evicted && oldValue is CacheEntry.PdfPage) {
-                    oldValue.bitmap.recycle()
-                }
-            }
-        }
-    }
-
-    fun put(key: String, entry: CacheEntry) {
-        memCache.put(key, entry)
-    }
-
-    fun get(key: String): CacheEntry? {
-        return memCache.get(key)
-    }
-
-    fun clear() {
-        memCache.evictAll()
-        diskCacheDir.listFiles()?.forEach { it.delete() }
-    }
-}
-
-@Singleton
-class RecentDocumentsEngine @Inject constructor(
-    @ApplicationContext private val context: Context
-) {
-    private val prefs = context.getSharedPreferences("DocRecent", Context.MODE_PRIVATE)
-
-    fun addRecent(uri: Uri) {
-        prefs.edit().putString(
-            "list",
-            (listOf(uri.toString()) + getRecents().map { it.toString() }).distinct().take(100).joinToString(";")
-        ).apply()
-    }
-
-    fun getRecents(): List<Uri> {
-        return prefs.getString("list", "")?.split(";")?.filter { it.isNotBlank() }?.map { Uri.parse(it) } ?: emptyList()
-    }
-}
-
-
-
-@Singleton
-class SearchEngine @Inject constructor(
-    private val provider: DocumentDispatcherProvider
-) {
-    suspend fun searchWord(blocks: List<WordBlock>, options: SearchOptions): List<WordBlock> = withContext(provider.defaultDispatcher) {
-        blocks.filter { b ->
-            currentCoroutineContext().ensureActive()
-            when (b) {
-                is WordBlock.Paragraph -> b.runs.any { it.text.matchesOptions(options) }
-                else -> false
-            }
-        }
-    }
-
-    suspend fun searchExcel(sheets: List<VirtualSheet>, options: SearchOptions): List<String> = withContext(provider.defaultDispatcher) {
-        val res = mutableListOf<String>()
-        sheets.forEach { s ->
-            s.rows.forEach { r ->
-                r.cells.forEach { c ->
-                    currentCoroutineContext().ensureActive()
-                    if (c.displayValue.matchesOptions(options)) {
-                        res.add("${s.name}: R${r.rowIndex} C${c.columnIndex}")
-                    }
-                }
-            }
-        }
-        res
-    }
-
-    suspend fun searchText(content: String, options: SearchOptions): List<Int> = withContext(provider.defaultDispatcher) {
-        val lines = content.lines()
-        val res = mutableListOf<Int>()
-        lines.forEachIndexed { i, l ->
-            currentCoroutineContext().ensureActive()
-            if (l.matchesOptions(options)) {
-                res.add(i)
-            }
-        }
-        res
+        val path = uri.toString().lowercase(Locale.US)
+        path.endsWith(".ppt") || path.endsWith(".pptx")
     }
 }
 
@@ -414,7 +111,6 @@ class PdfRenderSession(
     private val pdfRenderer: PdfRenderer,
     private val fileDescriptor: ParcelFileDescriptor,
     private val tempFile: File?,
-    private val smartCache: SmartCacheEngine,
     private val provider: DocumentDispatcherProvider
 ) {
     val pageCount: Int = pdfRenderer.pageCount
@@ -443,13 +139,6 @@ class PdfRenderSession(
     suspend fun renderPage(index: Int, scale: Float = 1.0f, isDarkMode: Boolean = false): Bitmap? = withContext(provider.ioDispatcher) {
         if (isClosed || index < 0 || index >= pageCount) {
             return@withContext null
-        }
-
-        val cacheKey = "pdf_${fileDescriptor.statSize}_${index}_${scale}_$isDarkMode"
-        (smartCache.get(cacheKey) as? CacheEntry.PdfPage)?.bitmap?.let {
-            if (!it.isRecycled) {
-                return@withContext it
-            }
         }
 
         try {
@@ -485,7 +174,6 @@ class PdfRenderSession(
                 }
 
                 page.close()
-                smartCache.put(cacheKey, CacheEntry.PdfPage(bmp))
                 bmp
             }
         } catch (e: Exception) {
@@ -520,11 +208,10 @@ class PdfRenderSession(
 @Singleton
 class PdfEngine @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val smartCache: SmartCacheEngine,
-    private val provider: DocumentDispatcherProvider,
-    val thumbnail: PdfThumbnailEngine,
-    val search: PdfSearchEngine
+    private val provider: DocumentDispatcherProvider
 ) {
+    private val thumbDir = File(context.cacheDir, "doc_thumbs").apply { mkdirs() }
+
     suspend fun load(uri: Uri): PdfLoadResult = withContext(provider.ioDispatcher) {
         var fileDescriptor: ParcelFileDescriptor? = null
         var tempFile: File? = null
@@ -562,7 +249,7 @@ class PdfEngine @Inject constructor(
         try {
             val fileDescriptor = context.contentResolver.openFileDescriptor(uri, "r")
             if (fileDescriptor != null) {
-                return@withContext PdfRenderSession(PdfRenderer(fileDescriptor), fileDescriptor, null, smartCache, provider)
+                return@withContext PdfRenderSession(PdfRenderer(fileDescriptor), fileDescriptor, null, provider)
             } else {
                 val input = context.contentResolver.openInputStream(uri) ?: return@withContext null
                 val tempFile = File(context.cacheDir, "viewer_temp_${System.currentTimeMillis()}.pdf")
@@ -572,22 +259,14 @@ class PdfEngine @Inject constructor(
                     }
                 }
                 val fd = ParcelFileDescriptor.open(tempFile, ParcelFileDescriptor.MODE_READ_ONLY)
-                return@withContext PdfRenderSession(PdfRenderer(fd), fd, tempFile, smartCache, provider)
+                return@withContext PdfRenderSession(PdfRenderer(fd), fd, tempFile, provider)
             }
         } catch (e: Exception) {
             null
         }
     }
-}
 
-@Singleton
-class PdfThumbnailEngine @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val provider: DocumentDispatcherProvider
-) {
-    private val thumbDir = File(context.cacheDir, "doc_thumbs").apply { mkdirs() }
-
-    suspend fun generate(uri: Uri, id: Long): String? = withContext(provider.ioDispatcher) {
+    suspend fun generateThumbnail(uri: Uri, id: Long): String? = withContext(provider.ioDispatcher) {
         try {
             val fd = context.contentResolver.openFileDescriptor(uri, "r") ?: return@withContext null
             val r = PdfRenderer(fd)
@@ -606,52 +285,9 @@ class PdfThumbnailEngine @Inject constructor(
             bmp.recycle()
             f.absolutePath
         } catch (e: Exception) {
-            Log.e("PdfThumbnailEngine", "Failed to generate thumbnail", e)
+            Log.e("PdfEngine", "Failed to generate thumbnail", e)
             null
         }
-    }
-}
-
-@Singleton
-class PdfSearchEngine @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val provider: DocumentDispatcherProvider
-) {
-    private val textIndexCache = LruCache<String, Map<Int, String>>(3)
-
-    init {
-        PDFBoxResourceLoader.init(context)
-    }
-
-    suspend fun buildIndex(doc: DocumentFile): Map<Int, String> = withContext(provider.ioDispatcher) {
-        val cacheKey = "${doc.id}_${doc.size}_${doc.dateModified}"
-        textIndexCache.get(cacheKey)?.let { return@withContext it }
-        val index = mutableMapOf<Int, String>()
-        var pdDocument: PDDocument? = null
-        try {
-            pdDocument = PDDocument.load(context.contentResolver.openInputStream(doc.uri))
-            if (pdDocument.isEncrypted) {
-                return@withContext emptyMap()
-            }
-            val stripper = PDFTextStripper()
-            for (i in 1..pdDocument.numberOfPages) {
-                currentCoroutineContext().ensureActive()
-                stripper.startPage = i
-                stripper.endPage = i
-                index[i - 1] = stripper.getText(pdDocument)
-            }
-            textIndexCache.put(cacheKey, index)
-        } catch (e: Exception) {
-            Log.e("PdfSearchEngine", "Search indexing failed", e)
-        } finally {
-            pdDocument?.close()
-        }
-        index
-    }
-
-    suspend fun search(doc: DocumentFile, options: SearchOptions): List<Int> = withContext(provider.defaultDispatcher) {
-        val index = buildIndex(doc)
-        index.filterValues { it.matchesOptions(options) }.keys.toList().sorted()
     }
 }
 
@@ -718,8 +354,6 @@ class DocxEngine @Inject constructor(
                             i++
                         }
                     }
-                } else if (path.endsWith(".rtf")) {
-                    blocks.add(WordBlock.Paragraph(listOf(WordRun("Native RTF rendering is experimental. Loading as plain text fallback...", italic = true))))
                 } else {
                     val document = XWPFDocument(stream)
                     document.headerList.forEach { header ->
@@ -798,14 +432,6 @@ class XlsxEngine @Inject constructor(
 ) {
 
     suspend fun parse(uri: Uri): List<VirtualSheet> = withContext(provider.ioDispatcher) {
-        val path = uri.toString().lowercase()
-        if (path.endsWith(".xls")) {
-            return@withContext parseLegacy(uri)
-        }
-        return@withContext parseStreaming(uri)
-    }
-
-    private suspend fun parseLegacy(uri: Uri): List<VirtualSheet> {
         val sheets = mutableListOf<VirtualSheet>()
         try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
@@ -857,138 +483,12 @@ class XlsxEngine @Inject constructor(
                 }
             }
         } catch (e: Exception) {
-            Log.e("XlsxEngine", "Legacy Excel parsing failed", e)
+            Log.e("XlsxEngine", "Excel parsing failed", e)
         }
         if (sheets.isEmpty()) {
             sheets.add(VirtualSheet("Sheet 1", emptyList(), 0, 0))
         }
-        return sheets
-    }
-
-    private suspend fun parseStreaming(uri: Uri): List<VirtualSheet> {
-        val sheets = mutableListOf<VirtualSheet>()
-        try {
-            val sharedStrings = mutableListOf<String>()
-            val sheetMap = mutableMapOf<String, String>()
-
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                ZipInputStream(stream).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        if (entry.name == "xl/sharedStrings.xml") {
-                            val parser = Xml.newPullParser().apply { setInput(zis, "UTF-8") }
-                            var event = parser.eventType
-                            while (event != XmlPullParser.END_DOCUMENT) {
-                                if (event == XmlPullParser.START_TAG && parser.name == "t") {
-                                    event = parser.next()
-                                    if (event == XmlPullParser.TEXT) {
-                                        sharedStrings.add(parser.text)
-                                    }
-                                }
-                                event = parser.next()
-                            }
-                        } else if (entry.name == "xl/workbook.xml") {
-                            val parser = Xml.newPullParser().apply { setInput(zis, "UTF-8") }
-                            var event = parser.eventType
-                            while (event != XmlPullParser.END_DOCUMENT) {
-                                if (event == XmlPullParser.START_TAG && parser.name == "sheet") {
-                                    val name = parser.getAttributeValue(null, "name")
-                                    val rId = parser.getAttributeValue(null, "id") ?: parser.getAttributeValue("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")
-                                    if (name != null && rId != null) {
-                                        sheetMap[rId] = name
-                                    }
-                                }
-                                event = parser.next()
-                            }
-                        }
-                        entry = zis.nextEntry
-                    }
-                }
-            }
-
-            var sheetIndex = 1
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                ZipInputStream(stream).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        if (entry.name.startsWith("xl/worksheets/sheet") && entry.name.endsWith(".xml")) {
-                            currentCoroutineContext().ensureActive()
-                            val sheetName = sheetMap["rId$sheetIndex"] ?: "Sheet $sheetIndex"
-                            val virtualRows = mutableListOf<VirtualRow>()
-                            var maxColumns = 0
-                            val parser = Xml.newPullParser().apply { setInput(zis, "UTF-8") }
-
-                            var event = parser.eventType
-                            var currentRow = mutableListOf<VirtualCell>()
-                            var rowIndex = 0
-                            var colIndex = 0
-                            var isShared = false
-                            var cellValue = ""
-                            val style = CellStyle(null, null, false, false, "LEFT", false)
-
-                            while (event != XmlPullParser.END_DOCUMENT) {
-                                when (event) {
-                                    XmlPullParser.START_TAG -> {
-                                        when (parser.name) {
-                                            "row" -> {
-                                                currentRow = mutableListOf()
-                                                rowIndex = parser.getAttributeValue(null, "r")?.toIntOrNull()?.minus(1) ?: rowIndex
-                                                colIndex = 0
-                                            }
-                                            "c" -> {
-                                                isShared = parser.getAttributeValue(null, "t") == "s"
-                                                val rRef = parser.getAttributeValue(null, "r")
-                                                colIndex = if (rRef != null) {
-                                                    var c = 0
-                                                    rRef.takeWhile { it.isLetter() }.forEach { c = c * 26 + (it - 'A' + 1) }
-                                                    c - 1
-                                                } else {
-                                                    colIndex
-                                                }
-                                            }
-                                            "v", "t" -> {
-                                                event = parser.next()
-                                                if (event == XmlPullParser.TEXT) {
-                                                    cellValue = parser.text
-                                                }
-                                            }
-                                        }
-                                    }
-                                    XmlPullParser.END_TAG -> {
-                                        when (parser.name) {
-                                            "c" -> {
-                                                val finalVal = if (isShared) sharedStrings.getOrNull(cellValue.toIntOrNull() ?: -1) ?: cellValue else cellValue
-                                                if (colIndex > maxColumns) {
-                                                    maxColumns = colIndex
-                                                }
-                                                currentRow.add(VirtualCell(colIndex, finalVal, finalVal, false, null, null, style, false))
-                                                colIndex++
-                                                cellValue = ""
-                                                isShared = false
-                                            }
-                                            "row" -> {
-                                                virtualRows.add(VirtualRow(rowIndex, currentRow, false))
-                                                rowIndex++
-                                            }
-                                        }
-                                    }
-                                }
-                                event = parser.next()
-                            }
-                            sheets.add(VirtualSheet(sheetName, virtualRows, virtualRows.size, maxColumns, emptyList()))
-                            sheetIndex++
-                        }
-                        entry = zis.nextEntry
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("XlsxEngine", "Streaming Excel parsing failed", e)
-        }
-        if (sheets.isEmpty()) {
-            sheets.add(VirtualSheet("Sheet 1", emptyList(), 0, 0))
-        }
-        return sheets
+        return@withContext sheets
     }
 }
 
@@ -1080,71 +580,8 @@ class PptxEngine @Inject constructor(
 }
 
 @Singleton
-class CsvEngine @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val encodingEngine: EncodingDetectionEngine,
-    private val delimiterDetection: DelimiterDetectionEngine,
-    private val provider: DocumentDispatcherProvider
-) {
-    suspend fun parse(uri: Uri): VirtualSheet = withContext(provider.ioDispatcher) {
-        val rows = mutableListOf<List<String>>()
-        var maxColumns = 0
-        try {
-            val charset = encodingEngine.detectCharset(context, uri)
-            val delimiter = delimiterDetection.detect(context, uri, charset, ',')
-
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                InputStreamReader(stream, charset).use { reader ->
-                    val parser = CSVParserBuilder().withSeparator(delimiter).build()
-                    val csvReader = CSVReaderBuilder(reader).withCSVParser(parser).build()
-
-                    var record: Array<String>? = csvReader.readNext()
-                    while (record != null) {
-                        currentCoroutineContext().ensureActive()
-                        val rowList = record.toList()
-                        maxColumns = max(maxColumns, rowList.size)
-                        rows.add(rowList)
-                        record = csvReader.readNext()
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("CsvEngine", "CSV parsing failed", e)
-        }
-
-        val normalizedRows = if (maxColumns > 0) {
-            rows.map { r ->
-                if (r.size < maxColumns) {
-                    r.toMutableList().apply {
-                        while (size < maxColumns) {
-                            add("")
-                        }
-                    }
-                } else {
-                    r
-                }
-            }
-        } else {
-            rows
-        }
-
-        VirtualSheet(
-            "CSV Data",
-            normalizedRows.mapIndexed { i, r ->
-                VirtualRow(i, r.mapIndexed { ci, cv ->
-                    VirtualCell(ci, cv, cv, false)
-                }, false)
-            },
-            normalizedRows.size,
-            maxColumns
-        )
-    }
-}
-
-@Singleton
 class RawTextEngine @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val encodingEngine: EncodingDetectionEngine,
     private val provider: DocumentDispatcherProvider
 ) {
     companion object {
@@ -1179,15 +616,8 @@ class RawTextEngine @Inject constructor(
                     return@withContext TextReadResult.BinaryFile(0.99f)
                 }
 
-                val charset = encodingEngine.detectCharset(peekBytes.copyOf(bytesRead))
-                val peekText = String(peekBytes, 0, bytesRead, charset).trimStart()
-
-                val syntaxMode = when {
-                    peekText.startsWith("{") || peekText.startsWith("[") -> "JSON"
-                    peekText.startsWith("<?xml", true) -> "XML"
-                    peekText.startsWith("<!DOCTYPE", true) || peekText.startsWith("<html", true) -> "HTML"
-                    else -> "TXT"
-                }
+                val charset = Charset.forName("UTF-8")
+                val syntaxMode = "TXT"
 
                 bufferedStream.reset()
 
@@ -1223,203 +653,12 @@ class RawTextEngine @Inject constructor(
 }
 
 @Singleton
-class EpubEngine @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val provider: DocumentDispatcherProvider
-) {
-    suspend fun parse(uri: Uri): List<EpubChapter> = withContext(provider.ioDispatcher) {
-        val chapters = mutableListOf<EpubChapter>()
-        try {
-            var opfPath: String? = null
-
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                ZipInputStream(stream).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        if (entry.name == "META-INF/container.xml") {
-                            val parser = Xml.newPullParser().apply { setInput(zis, "UTF-8") }
-                            var event = parser.eventType
-                            while (event != XmlPullParser.END_DOCUMENT) {
-                                if (event == XmlPullParser.START_TAG && parser.name == "rootfile") {
-                                    opfPath = parser.getAttributeValue(null, "full-path")
-                                }
-                                event = parser.next()
-                            }
-                            break
-                        }
-                        entry = zis.nextEntry
-                    }
-                }
-            }
-
-            if (opfPath != null) {
-                val manifestMap = mutableMapOf<String, String>()
-                val spineRefs = mutableListOf<String>()
-                val basePath = if (opfPath!!.contains("/")) opfPath!!.substringBeforeLast("/") + "/" else ""
-
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    ZipInputStream(stream).use { zis ->
-                        var entry = zis.nextEntry
-                        while (entry != null) {
-                            if (entry.name == opfPath) {
-                                val parser = Xml.newPullParser().apply { setInput(zis, "UTF-8") }
-                                var event = parser.eventType
-                                while (event != XmlPullParser.END_DOCUMENT) {
-                                    if (event == XmlPullParser.START_TAG) {
-                                        if (parser.name == "item") {
-                                            manifestMap[parser.getAttributeValue(null, "id")] = basePath + parser.getAttributeValue(null, "href")
-                                        }
-                                        if (parser.name == "itemref") {
-                                            spineRefs.add(parser.getAttributeValue(null, "idref"))
-                                        }
-                                    }
-                                    event = parser.next()
-                                }
-                                break
-                            }
-                            entry = zis.nextEntry
-                        }
-                    }
-                }
-
-                val spinePaths = spineRefs.mapNotNull { manifestMap[it] }
-                val contentMap = mutableMapOf<String, String>()
-
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    ZipInputStream(stream).use { zis ->
-                        var entry = zis.nextEntry
-                        while (entry != null) {
-                            if (spinePaths.contains(entry.name)) {
-                                contentMap[entry.name] = String(zis.readBytes(), Charset.defaultCharset())
-                            }
-                            entry = zis.nextEntry
-                        }
-                    }
-                }
-
-                spinePaths.forEach { path ->
-                    contentMap[path]?.let {
-                        chapters.add(EpubChapter(path, path.substringAfterLast('/'), it))
-                    }
-                }
-            } else {
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    ZipInputStream(stream).use { zis ->
-                        var entry = zis.nextEntry
-                        while (entry != null) {
-                            if (entry.name.endsWith(".html") || entry.name.endsWith(".xhtml")) {
-                                chapters.add(EpubChapter(entry.name, entry.name.substringAfterLast('/'), String(zis.readBytes(), Charset.defaultCharset())))
-                            }
-                            entry = zis.nextEntry
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("EpubEngine", "Epub parsing failed", e)
-        }
-        chapters
-    }
-}
-
-@Singleton
-class ZipPreviewEngine @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val provider: DocumentDispatcherProvider
-) {
-    suspend fun parse(uri: Uri): List<ZipEntryItem> = withContext(provider.ioDispatcher) {
-        val items = mutableListOf<ZipEntryItem>()
-        try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                ZipInputStream(stream).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        currentCoroutineContext().ensureActive()
-                        items.add(ZipEntryItem(entry.name, entry.size, entry.compressedSize, entry.time, entry.crc, entry.isDirectory))
-                        entry = zis.nextEntry
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("ZipEngine", "Zip parsing failed", e)
-        }
-        items.sortedBy { !it.isDirectory }
-    }
-}
-
-@Singleton
-class CodeFormatterEngine @Inject constructor() {
-    fun format(rawCode: String, language: String = "javascript"): String {
-        val escapedCode = rawCode.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0\"><link href=\"file:///android_asset/prism.css\" rel=\"stylesheet\" /><style>body { margin: 0; padding: 0; background-color: #2d2d2d; } pre { margin: 0 !important; border-radius: 0 !important; font-size: 14px; }</style></head><body class=\"line-numbers\"><pre><code class=\"language-$language\">$escapedCode</code></pre><script src=\"file:///android_asset/prism.js\"></script></body></html>"
-    }
-}
-
-@Singleton
-class XmlFormatterEngine @Inject constructor(private val codeFormatter: CodeFormatterEngine) {
-    fun format(raw: String): String {
-        return try {
-            if (raw.isBlank()) {
-                raw
-            } else {
-                val t = TransformerFactory.newInstance().newTransformer().apply {
-                    setOutputProperty(OutputKeys.INDENT, "yes")
-                    setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "4")
-                    setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes")
-                }
-                val w = StringWriter()
-                t.transform(StreamSource(StringReader(raw.trim())), StreamResult(w))
-                codeFormatter.format(w.toString(), "xml")
-            }
-        } catch (e: Exception) {
-            codeFormatter.format(raw.replace("><", ">\n<"), "xml")
-        }
-    }
-}
-
-@Singleton
-class JsonFormatterEngine @Inject constructor(private val codeFormatter: CodeFormatterEngine) {
-    fun format(raw: String): String {
-        return codeFormatter.format(
-            try {
-                val t = raw.trim()
-                when {
-                    t.startsWith("[") -> JSONArray(t).toString(4)
-                    t.startsWith("{") -> JSONObject(t).toString(4)
-                    else -> raw
-                }
-            } catch (e: Exception) {
-                raw
-            },
-            "json"
-        )
-    }
-}
-
-@Singleton
-class HtmlFormatterEngine @Inject constructor() {
-    fun format(raw: String): String {
-        if (raw.trim().let { it.startsWith("<!DOCTYPE html>", true) || it.startsWith("<html", true) }) {
-            return raw
-        }
-        return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0\"><style>body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:1.6;padding:16px;margin:0;color:#1e1e1e;background-color:#ffffff;word-wrap:break-word;}img{max-width:100%;height:auto;border-radius:4px;}@media(prefers-color-scheme:dark){body{color:#e3e3e3;background-color:#121212;}}</style></head><body>$raw</body></html>"
-    }
-}
-
-@Singleton
-class MarkdownFormatterEngine @Inject constructor() {
-    fun format(raw: String): String {
-        return "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0\"><script src=\"file:///android_asset/marked.min.js\"></script><style>body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:1.6;padding:16px;margin:0;color:#1e1e1e;background-color:#ffffff;word-wrap:break-word;}pre{background:#f6f8fa;padding:16px;border-radius:8px;overflow-x:auto;}code{background:#f6f8fa;padding:2px 4px;border-radius:4px;font-family:monospace;}img{max-width:100%;height:auto;}@media(prefers-color-scheme:dark){body{color:#e3e3e3;background-color:#121212;}pre,code{background:#2d2d2d;}}</style></head><body><div id=\"content\"></div><script>document.getElementById('content').innerHTML = marked.parse(`${raw.replace("`", "\\`").replace("$", "\\$")}`);</script></body></html>"
-    }
-}
-
-@Singleton
 class ThumbnailEngine @Inject constructor(
     private val pdfEngine: PdfEngine,
     @ApplicationContext private val context: Context,
     private val provider: DocumentDispatcherProvider
 ) {
-    suspend fun generatePdfThumbnail(uri: Uri, id: Long) = pdfEngine.thumbnail.generate(uri, id)
+    suspend fun generatePdfThumbnail(uri: Uri, id: Long) = pdfEngine.generateThumbnail(uri, id)
 
     suspend fun getOoxmlThumbnail(uri: Uri): Bitmap? = withContext(provider.ioDispatcher) {
         try {
@@ -1456,13 +695,7 @@ class ThumbnailEngine @Inject constructor(
         DocumentType.WORD -> "res://ic_word"
         DocumentType.EXCEL -> "res://ic_excel"
         DocumentType.SLIDE -> "res://ic_slide"
-        DocumentType.EPUB -> "res://ic_epub"
-        DocumentType.MARKDOWN -> "res://ic_markdown"
-        DocumentType.ZIP -> "res://ic_zip"
-        DocumentType.HTML -> "res://ic_html"
-        DocumentType.RTF -> "res://ic_rtf"
-        DocumentType.CSV -> "res://ic_csv"
-        DocumentType.CODE, DocumentType.JSON, DocumentType.XML -> "res://ic_code"
+        DocumentType.TXT -> "res://ic_document"
         else -> "res://ic_document"
     }
 }
@@ -1471,24 +704,12 @@ class ThumbnailEngine @Inject constructor(
 class DocumentCoreEngine @Inject constructor(
     val fileDetection: FileDetectionEngine,
     val validation: ValidationEngine,
-    val metadata: MetadataEngine,
     val thumbnail: ThumbnailEngine,
-    val smartCache: SmartCacheEngine,
-    val search: SearchEngine,
-    val recent: RecentDocumentsEngine,
     val pdfEngine: PdfEngine,
     val docxEngine: DocxEngine,
     val xlsxEngine: XlsxEngine,
     val pptxEngine: PptxEngine,
     val rawTextEngine: RawTextEngine,
-    val csvEngine: CsvEngine,
-    val epubEngine: EpubEngine,
-    val zipEngine: ZipPreviewEngine,
-    val jsonEngine: JsonFormatterEngine,
-    val xmlEngine: XmlFormatterEngine,
-    val htmlEngine: HtmlFormatterEngine,
-    val codeEngine: CodeFormatterEngine,
-    val mdEngine: MarkdownFormatterEngine,
     private val provider: DocumentDispatcherProvider
 ) {
     suspend fun open(doc: DocumentFile): EngineResult = withContext(provider.ioDispatcher) {
@@ -1523,14 +744,10 @@ class DocumentCoreEngine @Inject constructor(
                         EngineResult.Unsupported("SLIDE", doc.mimeType ?: "*/*")
                     }
                 }
-                DocumentType.CSV -> EngineResult.OpenCsv(csvEngine.parse(doc.uri))
-                DocumentType.EPUB -> EngineResult.OpenEpub(epubEngine.parse(doc.uri))
-                DocumentType.ZIP -> EngineResult.OpenZip(zipEngine.parse(doc.uri))
-                DocumentType.RTF -> EngineResult.OpenWord(docxEngine.parse(doc.uri))
-                DocumentType.TXT, DocumentType.CODE, DocumentType.JSON, DocumentType.XML, DocumentType.HTML, DocumentType.MARKDOWN -> {
+                DocumentType.TXT -> {
                     when (val textRes = rawTextEngine.read(doc.uri)) {
-                        is TextReadResult.Success -> formatTextBasedOnType(textRes.text, doc.type)
-                        is TextReadResult.Preview -> formatTextBasedOnType(textRes.text, doc.type)
+                        is TextReadResult.Success -> EngineResult.OpenText(textRes.text, doc.type)
+                        is TextReadResult.Preview -> EngineResult.OpenText(textRes.text, doc.type)
                         is TextReadResult.Paged -> EngineResult.Error("File too large for immediate processing. Pagination required.")
                         is TextReadResult.BinaryFile -> EngineResult.Error("Binary file detected. Cannot parse as text.")
                         is TextReadResult.Error -> EngineResult.Error(textRes.message)
@@ -1541,19 +758,6 @@ class DocumentCoreEngine @Inject constructor(
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             EngineResult.Error("Failed to parse document: ${e.localizedMessage}")
-        }
-    }
-
-
-    private fun formatTextBasedOnType(rawText: String, type: DocumentType): EngineResult {
-        return when (type) {
-            DocumentType.TXT -> EngineResult.OpenText(rawText, type)
-            DocumentType.CODE -> EngineResult.OpenText(codeEngine.format(rawText), type)
-            DocumentType.JSON -> EngineResult.OpenText(jsonEngine.format(rawText), type)
-            DocumentType.XML -> EngineResult.OpenText(xmlEngine.format(rawText), type)
-            DocumentType.HTML -> EngineResult.OpenText(htmlEngine.format(rawText), type)
-            DocumentType.MARKDOWN -> EngineResult.OpenText(mdEngine.format(rawText), type)
-            else -> EngineResult.Error("Unsupported text type")
         }
     }
 }

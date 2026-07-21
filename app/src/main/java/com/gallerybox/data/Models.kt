@@ -3,6 +3,7 @@
 package com.gallerybox.data
 
 import android.content.Intent
+import android.content.IntentSender
 import android.graphics.Bitmap
 import android.graphics.RectF
 import android.net.Uri
@@ -81,6 +82,20 @@ class Converters {
     @TypeConverter
     fun toUri(uriString: String?): Uri? = uriString?.let { Uri.parse(it) }
 }
+
+private val supportedDocExtensions = setOf(
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt",
+    "json", "xml", "html", "htm", "md", "rtf", "odt", "ods", "odp",
+    "epub", "zip", "kt", "java", "cpp", "c", "py", "js", "ts",
+    "gradle", "sh", "bat", "cs", "swift", "go", "rs", "yaml"
+)
+
+fun isMediaDoc(item: MediaItem): Boolean {
+    if (item.isDocument) return true
+    val ext = item.name.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT)
+    return ext in supportedDocExtensions
+}
+
 
 data class MediaItem(
     val id: Long,

@@ -85,12 +85,15 @@ import coil.request.CachePolicy
 import coil.request.ImageRequest
 import coil.size.Precision
 import com.gallerybox.data.MediaItem
+import com.gallerybox.data.DocumentFile
+import com.gallerybox.data.DocumentType
 import com.gallerybox.ui.screens.album.formatDuration
 import com.gallerybox.viewmodel.GalleryEvent
 import com.gallerybox.viewmodel.GalleryViewModel
 import com.gallerybox.viewmodel.MediaTypeFilter
 import com.gallerybox.viewmodel.PhotoSort
 import com.gallerybox.viewmodel.TrashViewModel
+import com.gallerybox.viewmodel.DocumentViewModel
 import com.gallerybox.viewmodel.GalleryViewerState
 import kotlinx.collections.immutable.ImmutableSet
 import kotlinx.collections.immutable.persistentSetOf
@@ -107,6 +110,35 @@ import kotlin.math.roundToInt
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+enum class UiMediaFilter(val label: String) {
+    ALL("All"),
+    PHOTOS("Photos"),
+    VIDEOS("Videos"),
+    DOCUMENTS("Documents")
+}
+
+fun DocumentFile.toMediaItem(): MediaItem = MediaItem(
+    id = id,
+    uri = uri,
+    path = name,
+    relativePath = "",
+    name = name,
+    dateAdded = dateModified / 1000L,
+    size = size,
+    isVideo = false,
+    isPdf = type == DocumentType.PDF,
+    isDocument = true,
+    duration = 0L,
+    width = 0,
+    height = 0,
+    mimeType = mimeType ?: "",
+    bucketId = "",
+    bucketName = "",
+    isFavorite = false,
+    isHidden = false
+)
+
 fun isValidUri(context: Context, uri: Uri?): Boolean = uri != null && uri != Uri.EMPTY
 
 fun getSmartName(item: MediaItem): String {
@@ -171,6 +203,7 @@ sealed class PictureUiDialog {
 fun PictureScreen(
     viewModel: GalleryViewModel = hiltViewModel(),
     trashViewModel: TrashViewModel = hiltViewModel(),
+    documentViewModel: DocumentViewModel = hiltViewModel(),
     onViewerStateChanged: (Boolean) -> Unit = {},
     onNavigateToCamera: () -> Unit,
     onNavigateToTrash: () -> Unit,
@@ -196,16 +229,19 @@ fun PictureScreen(
 
     val gridState = rememberLazyGridState()
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
+
     val filters = remember {
         listOf(
-            MediaTypeFilter.ALL,
-            MediaTypeFilter.PHOTOS,
-            MediaTypeFilter.VIDEOS,
-            MediaTypeFilter.DOCUMENTS
+            UiMediaFilter.ALL,
+            UiMediaFilter.PHOTOS,
+            UiMediaFilter.VIDEOS,
+            UiMediaFilter.DOCUMENTS
         )
     }
+
+    var activeFilter by rememberSaveable { mutableStateOf(UiMediaFilter.ALL) }
+
     val isBusy by viewModel.isBusy.collectAsState()
-    val activeFilter by viewModel.activeFilter.collectAsState()
     val activeSort by viewModel.activeSort.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val viewerState by viewModel.viewerState.collectAsState()
@@ -219,7 +255,6 @@ fun PictureScreen(
     var columnCount by rememberSaveable { mutableIntStateOf(prefs.getInt("picture_grid_columns", if (isLowRam) 3 else 4)) }
     var isSelectionMode by rememberSaveable { mutableStateOf(false) }
 
-    // Explicit ImmutableSet to resolve WindowInsets assignment conflicts and optimize Compose tracking
     var selectedIds by remember { mutableStateOf<ImmutableSet<Long>>(persistentSetOf()) }
 
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
@@ -232,10 +267,19 @@ fun PictureScreen(
         trashViewModel.onPermissionResultGlobal(g)
         if (!g) Toast.makeText(context, "Permission Denied", Toast.LENGTH_SHORT).show()
     }
+    val documents by documentViewModel.documents.collectAsState()
+    val isDocLoading by documentViewModel.isListLoading.collectAsState()
 
     LaunchedEffect(trashViewModel) {
         trashViewModel.onRefreshGallery = {
-            scope.launch { viewModel.forceSync() }
+            scope.launch {
+                viewModel.forceSync()
+                // Fetch document SAF treeUri to reload docs smoothly
+                val savedUriStr = context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE).getString("document_tree_uri", null)
+                if (savedUriStr != null) {
+                    documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
+                }
+            }
         }
         trashViewModel.events.collect { event ->
             when (event) {
@@ -268,11 +312,23 @@ fun PictureScreen(
             isSelectionMode = false
             selectedIds = persistentSetOf()
         }
+        // Seamless document trigger if filter switched to Documents
+        if (activeFilter == UiMediaFilter.DOCUMENTS && documents.isEmpty()) {
+            val savedUriStr = context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE).getString("document_tree_uri", null)
+            if (savedUriStr != null) {
+                documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
+            }
+        }
     }
 
-    val selectedSizeStr by remember(selectedIds.size) {
+    fun getMediaItemFromId(id: Long): MediaItem? {
+        return mediaMap[id] ?: documents.find { it.id == id }?.toMediaItem()
+    }
+
+    val selectedSizeStr by remember(selectedIds, mediaMap, documents) {
         derivedStateOf {
-            Formatter.formatShortFileSize(context, selectedIds.sumOf { mediaMap[it]?.size ?: 0L })
+            val sum = selectedIds.sumOf { getMediaItemFromId(it)?.size ?: 0L }
+            Formatter.formatShortFileSize(context, sum)
         }
     }
 
@@ -309,6 +365,7 @@ fun PictureScreen(
     BackHandler(enabled = isSearchActive) {
         isSearchActive = false
         viewModel.setSearchQuery("")
+        documentViewModel.updateDocSearchQuery("")
     }
 
     BackHandler(enabled = isSelectionMode) {
@@ -346,27 +403,40 @@ fun PictureScreen(
                             selection -> MediaSelectionTopBar(
                                 selectedCount = selectedIds.size,
                                 selectedSizeStr = selectedSizeStr,
-                                totalCount = pagedMedia.itemCount,
+                                totalCount = if (activeFilter == UiMediaFilter.DOCUMENTS) documents.size else pagedMedia.itemCount,
                                 onClose = {
                                     isSelectionMode = false
                                     selectedIds = persistentSetOf()
                                 },
                                 onSelectAll = {
-                                    val mediaItems = pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>()
-                                    selectedIds = if (selectedIds.size == mediaItems.size && mediaItems.isNotEmpty()) {
-                                        persistentSetOf()
+                                    if (activeFilter == UiMediaFilter.DOCUMENTS) {
+                                        selectedIds = if (selectedIds.size == documents.size && documents.isNotEmpty()) {
+                                            persistentSetOf()
+                                        } else {
+                                            val newSelection = documents.map { it.id }.toSet()
+                                            if (newSelection.size < 5000) newSelection.toImmutableSet() else selectedIds
+                                        }
                                     } else {
-                                        val newSelection = mediaItems.map { it.item.id }.toSet()
-                                        if (newSelection.size < 5000) newSelection.toImmutableSet() else selectedIds
+                                        val mediaItems = pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>()
+                                        selectedIds = if (selectedIds.size == mediaItems.size && mediaItems.isNotEmpty()) {
+                                            persistentSetOf()
+                                        } else {
+                                            val newSelection = mediaItems.map { it.item.id }.toSet()
+                                            if (newSelection.size < 5000) newSelection.toImmutableSet() else selectedIds
+                                        }
                                     }
                                 }
                             )
                             search -> SearchTopBar(
                                 query = searchQuery,
-                                onQueryChange = { viewModel.setSearchQuery(it) },
+                                onQueryChange = {
+                                    viewModel.setSearchQuery(it)
+                                    documentViewModel.updateDocSearchQuery(it)
+                                },
                                 onClose = {
                                     isSearchActive = false
                                     viewModel.setSearchQuery("")
+                                    documentViewModel.updateDocSearchQuery("")
                                 }
                             )
                             else -> ModernTopBar(
@@ -396,7 +466,15 @@ fun PictureScreen(
                         ModernFilterRow(
                             filters = filters,
                             activeFilter = activeFilter,
-                            onFilterSelected = { filter -> viewModel.updateFilter(filter) }
+                            onFilterSelected = { filter ->
+                                activeFilter = filter
+                                val galleryFilter = when(filter) {
+                                    UiMediaFilter.PHOTOS -> MediaTypeFilter.PHOTOS
+                                    UiMediaFilter.VIDEOS -> MediaTypeFilter.VIDEOS
+                                    else -> MediaTypeFilter.ALL
+                                }
+                                viewModel.updateFilter(galleryFilter)
+                            }
                         )
                     }
                 }
@@ -426,57 +504,106 @@ fun PictureScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                if (isBusy && pagedMedia.itemCount == 0) {
-                    Box(
-                        Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator()
-                    }
-                } else if (pagedMedia.itemCount == 0) {
-                    EmptyMediaOverlay()
-                } else {
-                    GalleryGridContent(
-                        pagedMedia = pagedMedia,
-                        gridState = gridState,
-                        columnCount = columnCount,
-                        isSelectionMode = isSelectionMode,
-                        selectedIds = selectedIds,
-                        mediaMap = mediaMap,
-                        isLowRam = isLowRam,
-                        onSelectionChange = { selectedIds = it.toImmutableSet() },
-                        onSelectionModeChange = { isSelectionMode = it },
-                        onItemClick = { item ->
-                            try {
+                if (activeFilter == UiMediaFilter.DOCUMENTS) {
+                    if (isDocLoading && documents.isEmpty()) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator()
+                        }
+                    } else if (documents.isEmpty()) {
+                        EmptyMediaOverlay(isDocument = true)
+                    } else {
+                        DocumentGridContent(
+                            documents = documents,
+                            gridState = gridState,
+                            columnCount = columnCount,
+                            isSelectionMode = isSelectionMode,
+                            selectedIds = selectedIds,
+                            isLowRam = isLowRam,
+                            onSelectionChange = { selectedIds = it.toImmutableSet() },
+                            onSelectionModeChange = { isSelectionMode = it },
+                            onItemClick = { item ->
+                                try {
+                                    if (isSelectionMode) {
+                                        selectedIds = if (selectedIds.contains(item.id)) {
+                                            (selectedIds - item.id).toImmutableSet()
+                                        } else {
+                                            (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
+                                        }
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    } else {
+                                        onNavigateToDocViewer(item.id)
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("GalleryBox", "Open Error", e)
+                                }
+                            },
+                            onItemLongClick = { item ->
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 if (isSelectionMode) {
                                     selectedIds = if (selectedIds.contains(item.id)) {
                                         (selectedIds - item.id).toImmutableSet()
                                     } else {
                                         (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
                                     }
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                } else if (item.isDocument) {
-                                    onNavigateToDocViewer(item.id)
                                 } else {
-                                    viewModel.openViewer(item.id)
+                                    activeDialog = PictureUiDialog.QuickAction(item)
                                 }
-                            } catch (e: Exception) {
-                                Log.e("GalleryBox", "Open Error", e)
                             }
-                        },
-                        onItemLongClick = { item ->
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            if (isSelectionMode) {
-                                selectedIds = if (selectedIds.contains(item.id)) {
-                                    (selectedIds - item.id).toImmutableSet()
-                                } else {
-                                    (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
-                                }
-                            } else {
-                                activeDialog = PictureUiDialog.QuickAction(item)
-                            }
+                        )
+                    }
+                } else {
+                    if (isBusy && pagedMedia.itemCount == 0) {
+                        Box(
+                            Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
                         }
-                    )
+                    } else if (pagedMedia.itemCount == 0) {
+                        EmptyMediaOverlay(isDocument = false)
+                    } else {
+                        GalleryGridContent(
+                            pagedMedia = pagedMedia,
+                            gridState = gridState,
+                            columnCount = columnCount,
+                            isSelectionMode = isSelectionMode,
+                            selectedIds = selectedIds,
+                            mediaMap = mediaMap,
+                            isLowRam = isLowRam,
+                            onSelectionChange = { selectedIds = it.toImmutableSet() },
+                            onSelectionModeChange = { isSelectionMode = it },
+                            onItemClick = { item ->
+                                try {
+                                    if (isSelectionMode) {
+                                        selectedIds = if (selectedIds.contains(item.id)) {
+                                            (selectedIds - item.id).toImmutableSet()
+                                        } else {
+                                            (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
+                                        }
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    } else if (item.isDocument) {
+                                        onNavigateToDocViewer(item.id)
+                                    } else {
+                                        viewModel.openViewer(item.id)
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("GalleryBox", "Open Error", e)
+                                }
+                            },
+                            onItemLongClick = { item ->
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                if (isSelectionMode) {
+                                    selectedIds = if (selectedIds.contains(item.id)) {
+                                        (selectedIds - item.id).toImmutableSet()
+                                    } else {
+                                        (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
+                                    }
+                                } else {
+                                    activeDialog = PictureUiDialog.QuickAction(item)
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -493,7 +620,7 @@ fun PictureScreen(
                         Button(
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                             onClick = {
-                                val itemsToTrash = dialog.mediaIds.mapNotNull { mediaMap[it] }
+                                val itemsToTrash = dialog.mediaIds.mapNotNull { getMediaItemFromId(it) }
                                 if (itemsToTrash.isNotEmpty()) {
                                     trashViewModel.confirmPendingGalleryTrash(itemsToTrash)
                                 }
@@ -545,7 +672,7 @@ fun PictureScreen(
                             horizontalArrangement = Arrangement.SpaceEvenly
                         ) {
                             item {
-                                ActionItem(Icons.Outlined.Edit, "Edit") {
+                                ActionItem(Icons.Outlined.Edit, "Edit", enabled = !item.isDocument) {
                                     activeDialog = PictureUiDialog.None
                                     onNavigateToEditor(item.uri.toString(), item.id)
                                 }
@@ -578,30 +705,32 @@ fun PictureScreen(
                                         activeDialog = PictureUiDialog.MetadataInfo(item)
                                     }
                                 )
-                                ListItem(
-                                    headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) },
-                                    leadingContent = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) },
-                                    modifier = Modifier.clickable {
-                                        activeDialog = PictureUiDialog.None
-                                        onNavigateToMoveCopy("MOVE", item.id.toString(), null)
-                                    }
-                                )
-                                ListItem(
-                                    headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) },
-                                    leadingContent = { Icon(Icons.Outlined.FileCopy, null) },
-                                    modifier = Modifier.clickable {
-                                        activeDialog = PictureUiDialog.None
-                                        onNavigateToMoveCopy("COPY", item.id.toString(), null)
-                                    }
-                                )
-                                ListItem(
-                                    headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) },
-                                    leadingContent = { Icon(Icons.Outlined.Wallpaper, null) },
-                                    modifier = Modifier.clickable {
-                                        activeDialog = PictureUiDialog.None
-                                        onNavigateToWallpaper(item.uri.toString(), item.id)
-                                    }
-                                )
+                                if (!item.isDocument) {
+                                    ListItem(
+                                        headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) },
+                                        leadingContent = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) },
+                                        modifier = Modifier.clickable {
+                                            activeDialog = PictureUiDialog.None
+                                            onNavigateToMoveCopy("MOVE", item.id.toString(), null)
+                                        }
+                                    )
+                                    ListItem(
+                                        headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) },
+                                        leadingContent = { Icon(Icons.Outlined.FileCopy, null) },
+                                        modifier = Modifier.clickable {
+                                            activeDialog = PictureUiDialog.None
+                                            onNavigateToMoveCopy("COPY", item.id.toString(), null)
+                                        }
+                                    )
+                                    ListItem(
+                                        headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) },
+                                        leadingContent = { Icon(Icons.Outlined.Wallpaper, null) },
+                                        modifier = Modifier.clickable {
+                                            activeDialog = PictureUiDialog.None
+                                            onNavigateToWallpaper(item.uri.toString(), item.id)
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -738,6 +867,98 @@ fun GalleryGridImagePrefetcher(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun DocumentGridContent(
+    documents: List<DocumentFile>,
+    gridState: LazyGridState,
+    columnCount: Int,
+    isSelectionMode: Boolean,
+    selectedIds: Set<Long>,
+    isLowRam: Boolean,
+    onSelectionChange: (Set<Long>) -> Unit,
+    onSelectionModeChange: (Boolean) -> Unit,
+    onItemClick: (MediaItem) -> Unit,
+    onItemLongClick: (MediaItem) -> Unit
+) {
+    val mediaItems = remember(documents) { documents.map { it.toMediaItem() } }
+    val haptic = LocalHapticFeedback.current
+    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
+
+    val dynamicThumbSize = 160
+
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(columnCount),
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(isSelectionMode) {
+                    if (!isSelectionMode) return@pointerInput
+                    var initialKey: Long? = null
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            val itemInfo = gridState.layoutInfo.visibleItemsInfo.find {
+                                offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) &&
+                                        offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width)
+                            }
+                            itemInfo?.let { info ->
+                                val item = mediaItems.getOrNull(info.index)
+                                if (item != null) {
+                                    initialKey = item.id
+                                    onSelectionChange(
+                                        (selectedIds + item.id).toSet().takeIf { set -> set.size < 5000 } ?: selectedIds
+                                    )
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                            }
+                        },
+                        onDrag = { change, _ ->
+                            val offset = change.position
+                            val itemInfo = gridState.layoutInfo.visibleItemsInfo.find {
+                                offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) &&
+                                        offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width)
+                            }
+                            itemInfo?.let { info ->
+                                val item = mediaItems.getOrNull(info.index)
+                                if (item != null && item.id != initialKey && !selectedIds.contains(item.id)) {
+                                    onSelectionChange(
+                                        (selectedIds + item.id).toSet().takeIf { set -> set.size < 5000 } ?: selectedIds
+                                    )
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                            }
+                        },
+                        onDragEnd = { initialKey = null },
+                        onDragCancel = { initialKey = null }
+                    )
+                },
+            contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp, start = 3.dp, end = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            items(
+                count = mediaItems.size,
+                key = { index -> mediaItems[index].id },
+                contentType = { "media" }
+            ) { index ->
+                val modifierWithAnim = if (isScrolling) Modifier else Modifier.animateItem()
+                val mediaItem = mediaItems[index]
+
+                ModernMediaGridTile(
+                    modifier = modifierWithAnim,
+                    item = mediaItem,
+                    thumbSize = dynamicThumbSize,
+                    isSelected = selectedIds.contains(mediaItem.id),
+                    isSelectionMode = isSelectionMode,
+                    isLowRam = isLowRam,
+                    onClick = { onItemClick(mediaItem) },
+                    onLongClick = { onItemLongClick(mediaItem) }
+                )
             }
         }
     }
@@ -2482,18 +2703,12 @@ fun MediaSelectionTopBar(
         }
     }
 }
-enum class MediaTypeFilter(val label: String) {
-    ALL("All"),
-    PHOTOS("Photos"),
-    VIDEOS("Videos"),
-    DOCUMENTS("Documents")
-}
 
 @Composable
 fun ModernFilterRow(
-    filters: List<MediaTypeFilter>,
-    activeFilter: MediaTypeFilter,
-    onFilterSelected: (MediaTypeFilter) -> Unit
+    filters: List<UiMediaFilter>,
+    activeFilter: UiMediaFilter,
+    onFilterSelected: (UiMediaFilter) -> Unit
 ) {
     LazyRow(
         Modifier.fillMaxWidth(),
@@ -2546,7 +2761,7 @@ fun ModernFilterRow(
 }
 
 @Composable
-fun EmptyMediaOverlay() {
+fun EmptyMediaOverlay(isDocument: Boolean = false) {
     Box(
         Modifier
             .fillMaxSize()
@@ -2562,7 +2777,7 @@ fun EmptyMediaOverlay() {
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Outlined.PhotoLibrary,
+                    imageVector = if (isDocument) Icons.Outlined.InsertDriveFile else Icons.Outlined.PhotoLibrary,
                     contentDescription = null,
                     modifier = Modifier.size(58.dp),
                     tint = MaterialTheme.colorScheme.primary
@@ -2570,14 +2785,14 @@ fun EmptyMediaOverlay() {
             }
             Spacer(Modifier.height(28.dp))
             Text(
-                text = "No Media Found",
+                text = if (isDocument) "No Documents Found" else "No Media Found",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                text = "No images or videos are currently available.",
+                text = if (isDocument) "No documents are currently available." else "No images or videos are currently available.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center

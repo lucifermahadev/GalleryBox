@@ -24,6 +24,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.util.LruCache
 import androidx.core.net.toUri
+import com.gallerybox.data.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
@@ -32,7 +33,6 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.paging.*
 import androidx.work.*
-import com.gallerybox.data.*
 import com.gallerybox.engine.*
 import com.gallerybox.ui.screens.picture.GalleryGridItem
 import com.gallerybox.ui.screens.trash.TrashCleanupWorker
@@ -62,24 +62,6 @@ const val ID_DOWNLOADS = "virtual_downloads"
 const val ID_WHATSAPP = "virtual_whatsapp"
 const val ID_INSTAGRAM = "virtual_instagram"
 
-enum class SaveMode { SAVE_AS_NEW, REPLACE_ORIGINAL }
-enum class LockType { NONE, PIN, PATTERN }
-enum class AlbumSort { DateDesc, DateAsc, NameAsc, NameDesc, SizeDesc, CountDesc, Custom }
-enum class PhotoSort { NameAsc, NameDesc, SizeDesc, DateAsc, DateDesc }
-enum class MediaTypeFilter(val label: String) { ALL("All"), PHOTOS("Photos"), VIDEOS("Videos"), DOCUMENTS("Documents") }
-enum class MergeMode { MOVE, COPY, MOVE_AND_DELETE }
-
-data class ExportAdvanced(val bitrate: Int = 10000000, val fps: Int = 30, val codec: String = "video/avc")
-data class MediaIndexes(val all: List<MediaItem> = emptyList(), val photos: List<MediaItem> = emptyList(), val videos: List<MediaItem> = emptyList(), val gifs: List<MediaItem> = emptyList(), val docs: List<MediaItem> = emptyList(), val recent: List<MediaItem> = emptyList())
-private data class FilterState(val f: MediaTypeFilter, val q: String, val s: List<Long>, val t: List<TrashEntity>)
-
-data class VideoPlaybackState(
-    val uri: String? = null,
-    val position: Long = 0L,
-    val speed: Float = 1f,
-    val playWhenReady: Boolean = true
-)
-
 fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
     val (height: Int, width: Int) = options.outHeight to options.outWidth
     var inSampleSize = 1
@@ -93,30 +75,12 @@ fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeig
     return inSampleSize
 }
 
-private val supportedDocExtensions = setOf(
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt",
-    "json", "xml", "html", "htm", "md", "rtf", "odt", "ods", "odp",
-    "kt", "java", "cpp", "c", "py", "js", "ts", "gradle", "sh",
-    "bat", "cs", "swift", "go", "rs", "yaml"
-)
-
-fun isMediaDoc(item: MediaItem): Boolean {
-    val ext = item.name.substringAfterLast('.', "").lowercase(Locale.ROOT)
-    return ext in supportedDocExtensions
-}
-
 // --- States & Events ---
 sealed class GalleryEvent {
     data class ShowToast(val message: String) : GalleryEvent()
     data class RequestPermission(val intentSender: IntentSender) : GalleryEvent()
     data object OperationSuccess : GalleryEvent()
-    data class DocumentError(val message: String) : GalleryEvent()
     data class LaunchIntent(val intent: Intent) : GalleryEvent()
-    data class OpenPdf(val uri: Uri, val doc: DocumentFile) : GalleryEvent()
-    data class OpenWord(val blocks: List<WordBlock>, val doc: DocumentFile) : GalleryEvent()
-    data class OpenExcel(val sheets: List<VirtualSheet>, val doc: DocumentFile) : GalleryEvent()
-    data class OpenSlide(val pages: List<SlidePage>, val doc: DocumentFile) : GalleryEvent()
-    data class OpenText(val content: String, val doc: DocumentFile) : GalleryEvent()
 }
 
 sealed interface GalleryViewerState {
@@ -145,14 +109,31 @@ sealed class FileOperationState {
     data class Editing(val progress: Float) : FileOperationState()
 }
 
+enum class SaveMode { SAVE_AS_NEW, REPLACE_ORIGINAL }
+enum class LockType { NONE, PIN, PATTERN }
+enum class AlbumSort { DateDesc, DateAsc, NameAsc, NameDesc, SizeDesc, CountDesc, Custom }
+enum class PhotoSort { NameAsc, NameDesc, SizeDesc, DateAsc, DateDesc }
+enum class MediaTypeFilter { ALL, PHOTOS, VIDEOS }
+enum class MergeMode { MOVE, COPY, MOVE_AND_DELETE }
+
+data class ExportAdvanced(val bitrate: Int = 10000000, val fps: Int = 30, val codec: String = "video/avc")
+data class MediaIndexes(val all: List<MediaItem> = emptyList(), val photos: List<MediaItem> = emptyList(), val videos: List<MediaItem> = emptyList(), val gifs: List<MediaItem> = emptyList(), val recent: List<MediaItem> = emptyList())
+private data class FilterState(val f: MediaTypeFilter, val q: String, val s: List<Long>, val t: List<TrashEntity>)
+
+data class VideoPlaybackState(
+    val uri: String? = null,
+    val position: Long = 0L,
+    val speed: Float = 1f,
+    val playWhenReady: Boolean = true
+)
+
 // --- ViewModel ---
 @HiltViewModel
 class GalleryViewModel @Inject constructor(
     application: Application,
     val dao: GalleryDao,
     val editingEngine: EditingEngine,
-    val engine: GalleryEngine,
-    val documentEngine: DocumentCoreEngine
+    val engine: GalleryEngine
 ) : AndroidViewModel(application), ComponentCallbacks2 {
 
     companion object {
@@ -298,17 +279,14 @@ class GalleryViewModel @Inject constructor(
 
     val processedMedia: StateFlow<List<MediaItem>> = combine(_mediaIndexes, _searchQuery.debounce(300), _activeFilter, _activeSort, usageStatsMap) { indexes, query, filter, sort, usageStats ->
         val q = query.trim().lowercase()
-        // Include library generation in cache key to force invalidation on library changes
         val cacheKey = "${lastMediaStoreGeneration}_${filter.name}_${sort.name}_$q"
         val cached = sortedCache.get(cacheKey)
         if (cached != null) return@combine cached
 
         var result = when (filter) {
-            MediaTypeFilter.ALL -> indexes.all.filter { !isMediaDoc(it) }
+            MediaTypeFilter.ALL -> indexes.all
             MediaTypeFilter.PHOTOS -> indexes.photos
             MediaTypeFilter.VIDEOS -> indexes.videos
-            MediaTypeFilter.DOCUMENTS -> indexes.docs
-
         }
 
         if (q.isNotBlank()) {
@@ -540,7 +518,7 @@ class GalleryViewModel @Inject constructor(
 
     private fun cacheAlbumPreviews(validMedia: List<MediaItem>) {
         albumPreviewCacheMap.clear()
-        validMedia.filter { !isMediaDoc(it) }.sortedByDescending { item ->
+        validMedia.sortedByDescending { item ->
             val ageDays = maxOf(0L, (System.currentTimeMillis() / 1000L - item.dateAdded)) / 86400.0
             val recencyScore = exp(-ageDays / 30.0)
             val favScore = if (favoriteIds.value.contains(item.id)) 1.0 else 0.0
@@ -610,7 +588,6 @@ class GalleryViewModel @Inject constructor(
                 photos = old.photos.map { if (it.id == id) updated else it },
                 videos = old.videos.map { if (it.id == id) updated else it },
                 gifs = old.gifs.map { if (it.id == id) updated else it },
-                docs = old.docs.map { if (it.id == id) updated else it },
                 recent = old.recent.map { if (it.id == id) updated else it }
             )
         }
@@ -627,7 +604,6 @@ class GalleryViewModel @Inject constructor(
                 photos = old.photos.filterNot { ids.contains(it.id) },
                 videos = old.videos.filterNot { ids.contains(it.id) },
                 gifs = old.gifs.filterNot { ids.contains(it.id) },
-                docs = old.docs.filterNot { ids.contains(it.id) },
                 recent = old.recent.filterNot { ids.contains(it.id) }
             )
         }
@@ -685,7 +661,7 @@ class GalleryViewModel @Inject constructor(
                     deletedTimestamp = System.currentTimeMillis(),
                     originalPath = media.path,
                     contentUri = media.uri.toString(),
-                    mediaType = when { media.isVideo -> "video"; media.isDocument -> "document"; else -> "image" },
+                    mediaType = when { media.isVideo -> "video"; else -> "image" },
                     name = media.name,
                     size = media.size
                 )
@@ -715,7 +691,6 @@ class GalleryViewModel @Inject constructor(
         val map = java.util.HashMap<Long, MediaItem>(localMedia.size * 2)
         val photos = ArrayList<MediaItem>()
         val videos = ArrayList<MediaItem>()
-        val docs = ArrayList<MediaItem>()
         val gifs = ArrayList<MediaItem>()
         val recents = ArrayList<MediaItem>()
 
@@ -731,14 +706,10 @@ class GalleryViewModel @Inject constructor(
             map[mappedItem.id] = mappedItem
             validMedia.add(mappedItem)
 
-            if (isMediaDoc(mappedItem)) {
-                docs.add(mappedItem)
+            if (mappedItem.isVideo) {
+                videos.add(mappedItem)
             } else {
-                if (mappedItem.isVideo) {
-                    videos.add(mappedItem)
-                } else {
-                    if (mappedItem.mimeType.contains("gif", true)) gifs.add(mappedItem) else photos.add(mappedItem)
-                }
+                if (mappedItem.mimeType.contains("gif", true)) gifs.add(mappedItem) else photos.add(mappedItem)
             }
         }
 
@@ -747,10 +718,10 @@ class GalleryViewModel @Inject constructor(
 
         val favorites = validMedia.filter { favSet.contains(it.id) }
         _mediaMap.value = map
-        _mediaIndexes.value = MediaIndexes(validMedia, photos, videos, gifs, docs, recents)
+        _mediaIndexes.value = MediaIndexes(validMedia, photos, videos, gifs, recents)
 
         val metaMap = albumMeta.value.associateBy { it.id }
-        val mappedAlbums = validMedia.filterNot { isMediaDoc(it) }.groupBy { it.bucketId }.mapNotNull { (bucketId, items) ->
+        val mappedAlbums = validMedia.groupBy { it.bucketId }.mapNotNull { (bucketId, items) ->
             val latestItem = items.maxByOrNull { it.dateAdded } ?: return@mapNotNull null
             val albumName = metaMap[bucketId]?.customName?.takeIf { it.isNotBlank() } ?: latestItem.bucketName.ifBlank { "Unknown" }
             if (albumName.matches(Regex("^\\d+$"))) return@mapNotNull null
@@ -862,79 +833,13 @@ class GalleryViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) { dao.incrementUsageStats(mediaId, System.currentTimeMillis()) }
         if (item.uri == Uri.EMPTY) { _events.trySend(GalleryEvent.ShowToast("Media file is unavailable.")); return }
 
-        if (!isMediaDoc(item)) {
-            val current = _viewerState.value
-            if (current !is GalleryViewerState.Open || current.mediaId != mediaId) {
-                _viewerState.value = GalleryViewerState.Open(
-                    mediaId = item.id,
-                    isVideo = item.isVideo,
-                    uri = item.uri
-                )
-            }
-            return
-        }
-
-        viewModelScope.launch {
-            busyMutex.withLock { _isBusy.value = true }
-            try {
-                val ext = item.name.substringAfterLast('.', "").lowercase(Locale.ROOT)
-                val mime = item.mimeType
-                val docType = when {
-                    mime == "application/pdf" || ext == "pdf" -> DocumentType.PDF
-                    ext in listOf("doc", "docx") || mime.contains("word") -> DocumentType.WORD
-                    ext in listOf("xls", "xlsx", "csv") || mime.contains("spreadsheet") -> DocumentType.EXCEL
-                    ext in listOf("ppt", "pptx") || mime.contains("presentation") -> DocumentType.SLIDE
-                    ext in listOf("txt", "xml", "json", "html", "htm", "kt", "java") || mime.startsWith("text/") -> DocumentType.TXT
-                    else -> DocumentType.UNKNOWN
-                }
-                val docFile = DocumentFile(id = item.id, name = item.name, uri = item.uri, size = item.size, dateModified = item.dateAdded * 1000L, mimeType = mime, type = docType)
-                val event = when (val res = documentEngine.open(docFile)) {
-                    is EngineResult.OpenPdf -> GalleryEvent.OpenPdf(res.uri, docFile)
-                    is EngineResult.OpenWord -> GalleryEvent.OpenWord(res.blocks, docFile)
-                    is EngineResult.OpenExcel -> GalleryEvent.OpenExcel(res.sheets, docFile)
-                    is EngineResult.OpenCsv -> GalleryEvent.OpenExcel(listOf(res.sheet), docFile)
-                    is EngineResult.OpenSlide -> GalleryEvent.OpenSlide(res.pages, docFile)
-                    is EngineResult.OpenText -> GalleryEvent.OpenText(res.content, docFile)
-                    is EngineResult.OpenEpub -> {
-                        val content = buildString {
-                            res.chapters.forEachIndexed { index, chapter ->
-                                appendLine("Chapter ${index + 1}: ${chapter.title}")
-                                appendLine()
-                                appendLine(chapter.contentHtml)
-                                appendLine()
-                                appendLine("--------------------------------")
-                                appendLine()
-                            }
-                        }
-                        GalleryEvent.OpenText(content, docFile)
-                    }
-                    is EngineResult.OpenZip -> {
-                        val content = buildString {
-                            appendLine("ZIP Archive")
-                            appendLine()
-                            appendLine("Total Entries: ${res.contents.size}")
-                            appendLine()
-                            res.contents.forEach { entry ->
-                                appendLine("${if (entry.isDirectory) "[DIR]" else "[FILE]"} ${entry.name} (${entry.size} bytes)")
-                            }
-                        }
-                        GalleryEvent.OpenText(content, docFile)
-                    }
-                    is EngineResult.Unsupported,
-                    is EngineResult.Error -> {
-                        val intent = Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(item.uri, item.mimeType)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        GalleryEvent.LaunchIntent(intent)
-                    }
-                }
-                _events.send(event)
-            } catch (e: Exception) {
-                _events.send(GalleryEvent.DocumentError("Failed to open document: ${e.localizedMessage}"))
-            } finally {
-                busyMutex.withLock { _isBusy.value = false }
-            }
+        val current = _viewerState.value
+        if (current !is GalleryViewerState.Open || current.mediaId != mediaId) {
+            _viewerState.value = GalleryViewerState.Open(
+                mediaId = item.id,
+                isVideo = item.isVideo,
+                uri = item.uri
+            )
         }
     }
 
@@ -956,14 +861,13 @@ class GalleryViewModel @Inject constructor(
 
         fileOperationJob = viewModelScope.launch(Dispatchers.IO) {
 
-            // Check storage constraints before beginning
             val actManager = getApplication<Application>().getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             val memInfo = ActivityManager.MemoryInfo()
             actManager.getMemoryInfo(memInfo)
 
             val totalBytesRequired = ids.sumOf { _mediaMap.value[it]?.size ?: 0L }
             val storageDir = Environment.getExternalStorageDirectory()
-            if (storageDir.usableSpace < totalBytesRequired + (50 * 1024 * 1024)) { // Needs required + 50MB safety
+            if (storageDir.usableSpace < totalBytesRequired + (50 * 1024 * 1024)) {
                 _events.send(GalleryEvent.ShowToast("Insufficient storage space"))
                 return@launch
             }
@@ -993,7 +897,7 @@ class GalleryViewModel @Inject constructor(
                     var counter = 1
                     var insertSucceeded = false
 
-                    while (!insertSucceeded && counter < 100) { // Fix 8: Expand counter significantly
+                    while (!insertSucceeded && counter < 100) {
                         val contentValues = ContentValues().apply {
                             put(MediaStore.MediaColumns.DISPLAY_NAME, newDisplayName)
                             put(MediaStore.MediaColumns.MIME_TYPE, item.mimeType)
@@ -1006,10 +910,8 @@ class GalleryViewModel @Inject constructor(
                             }
                         }
 
-                        // Fix 5: Proper Document Support Target URI
                         val targetUri = when {
                             item.isVideo -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                            isMediaDoc(item) -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) else MediaStore.Files.getContentUri("external")
                             else -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                         }
 
@@ -1017,7 +919,7 @@ class GalleryViewModel @Inject constructor(
                             destUri = resolver.insert(targetUri, contentValues)
                             if (destUri != null) insertSucceeded = true
                         } catch (e: Exception) {
-                            // MediaStore often throws when names clash
+                            // MediaStore throws when names clash
                         }
 
                         if (!insertSucceeded) {
@@ -1048,7 +950,6 @@ class GalleryViewModel @Inject constructor(
                                     resolver.update(destUri, cvUpdate, null, null)
                                 } catch (e: Exception) {
                                     Log.e(TAG, "Failed to clear pending state", e)
-                                    // Fix 6: If update fails, delete incomplete file
                                     resolver.delete(destUri, null, null)
                                     copySuccessful = false
                                 }
@@ -1056,7 +957,6 @@ class GalleryViewModel @Inject constructor(
                                 MediaScannerConnection.scanFile(getApplication(), arrayOf(File(absoluteTargetDir, newDisplayName).absolutePath), arrayOf(item.mimeType), null)
                             }
                         } else {
-                            // Fix 3 & 4: Zero-byte cleanup on stream failure
                             try { resolver.delete(destUri, null, null) } catch (e: Exception) {}
                         }
 
@@ -1078,17 +978,15 @@ class GalleryViewModel @Inject constructor(
             if (isActive) {
                 if (isMove && urisToDelete.isNotEmpty()) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        // Fix 9: Update state to WaitingForPermission
                         _fileOperationState.value = FileOperationState.WaitingForPermission
                         val intentSender = MediaStore.createDeleteRequest(resolver, urisToDelete).intentSender
                         synchronized(this@GalleryViewModel) {
                             pendingDeleteUris = urisToDelete
-                            pendingOperationType = PendingOp.DELETE // Fix 1: Properly set Operation Type
+                            pendingOperationType = PendingOp.DELETE
                             pendingOperationIds = idsToDelete
                         }
                         _events.send(GalleryEvent.RequestPermission(intentSender))
                     } else {
-                        // Fix 2: Validate Deletions on older devices
                         var deletedCount = 0
                         urisToDelete.forEach { uri ->
                             try {
@@ -1125,7 +1023,6 @@ class GalleryViewModel @Inject constructor(
                 fileOperationState.first { it is FileOperationState.Processing }
                 fileOperationState.first { it is FileOperationState.Idle || it is FileOperationState.WaitingForPermission }
 
-                // Only delete folders if we aren't waiting for permission (handled later in onPermissionResult)
                 if (_fileOperationState.value == FileOperationState.Idle) {
                     sourceAlbumIds.forEach { albumId -> deleteEmptyAlbum(albumId) }
                     _events.send(GalleryEvent.ShowToast("${sourceAlbumIds.size} albums merged successfully"))
@@ -1187,11 +1084,10 @@ class GalleryViewModel @Inject constructor(
         performRealFileOperation(ids, existingRelativePath, false)
     }
 
-    // Fix 10: Defer movement until folder exists and Sync completes
     fun createAndMove(ids: List<Long>, newAlbumName: String) {
         viewModelScope.launch {
             createAlbum(newAlbumName, false)
-            delay(500) // Allow OS to register folder
+            delay(500)
             performRealFileOperation(ids, "${Environment.DIRECTORY_PICTURES}/$newAlbumName/", true)
         }
     }
@@ -1257,7 +1153,6 @@ class GalleryViewModel @Inject constructor(
                         var deletedCount = 0
                         pendingDeleteUris.forEach { uri ->
                             try {
-                                // Fix 2 validation again
                                 if (resolver.delete(uri, null, null) > 0) deletedCount++
                             } catch (_: Exception) {}
                         }
@@ -1427,23 +1322,6 @@ class MediaPagingSource(
                 MediaTypeFilter.ALL -> "(${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (1, 3))"
                 MediaTypeFilter.PHOTOS -> "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE} AND ${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'application/%' AND ${MediaStore.Files.FileColumns.MIME_TYPE} NOT LIKE 'text/%'"
                 MediaTypeFilter.VIDEOS -> "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO}"
-                MediaTypeFilter.DOCUMENTS -> """
-                    (
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.pdf' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.doc' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.docx' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.xls' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.xlsx' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.ppt' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.pptx' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.csv' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.txt' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.json' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.xml' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.html' OR
-                    ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE '%.htm'
-                    )
-                """.trimIndent()
             }
 
             val selectionArgsList = mutableListOf<String>()
@@ -1518,9 +1396,7 @@ class MediaPagingSource(
             val m = c.getString(mC) ?: ""
             val rd = c.getLong(dC)
 
-            val ext = (c.getString(nC) ?: "").substringAfterLast('.', "").lowercase(Locale.ROOT)
             val isV = m.startsWith("video/")
-            val isD = ext in supportedDocExtensions
 
             val id = c.getLong(iC)
             val w = if (wC >= 0) c.getInt(wC) else 0
@@ -1528,15 +1404,15 @@ class MediaPagingSource(
 
             list.add(MediaItem(
                 id = id,
-                uri = if (isV) ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id) else if (isD) ContentUris.withAppendedId(MediaStore.Files.getContentUri("external"), id) else ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id),
+                uri = if (isV) ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id) else ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id),
                 path = p,
                 relativePath = rp,
                 name = c.getString(nC) ?: "",
                 dateAdded = if (rd > 1000000000000L) rd / 1000L else if (rd > 0) rd else System.currentTimeMillis() / 1000L,
                 size = c.getLong(sC),
                 isVideo = isV,
-                isPdf = m == "application/pdf",
-                isDocument = isD,
+                isPdf = false,
+                isDocument = false,
                 duration = 0L,
                 width = w,
                 height = h,

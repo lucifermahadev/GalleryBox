@@ -1,4 +1,4 @@
-@file:Suppress("unused")
+@file:Suppress("UnsafeOptInUsageError", "OPT_IN_USAGE")
 
 package com.gallerybox
 
@@ -6,312 +6,181 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AudioFile
-import androidx.compose.material.icons.rounded.FolderSpecial
-import androidx.compose.material.icons.rounded.PermMedia
 import androidx.compose.material.icons.rounded.PhotoLibrary
-import androidx.compose.material.icons.rounded.VideoLibrary
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import coil.imageLoader
 import com.gallerybox.navigation.GalleryNavHost
 import com.gallerybox.ui.theme.GalleryBoxTheme
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.isGranted
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    @RequiresApi(Build.VERSION_CODES.Q)
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+        // Enables edge-to-edge content drawing behind system bars
         enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
 
         setContent {
             GalleryBoxTheme {
-                Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-                    PermissionWrapper {
-                        GalleryNavHost()
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    PermissionGuard {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            GalleryNavHost()
+                        }
                     }
                 }
             }
         }
     }
+}
 
-    override fun onTrimMemory(level: Int) {
-        super.onTrimMemory(level)
-        if (level >= TRIM_MEMORY_UI_HIDDEN) {
-            this.imageLoader.memoryCache?.clear()
+
+fun Context.findActivity(): Activity? {
+    var currentContext = this
+    while (currentContext is ContextWrapper) {
+        if (currentContext is Activity) {
+            return currentContext
         }
+        currentContext = currentContext.baseContext
     }
+    return null
 }
 
-fun Context.findActivity(): Activity {
-    var context = this
-    while (context is ContextWrapper) {
-        if (context is Activity) return context
-        context = context.baseContext
-    }
-    throw IllegalStateException("Activity not found")
-}
-
+@OptIn(ExperimentalPermissionsApi::class)
 @Composable
-fun PermissionWrapper(content: @Composable () -> Unit) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-
-    val checkPermissions = remember {
-        {
+fun PermissionGuard(content: @Composable () -> Unit) {
+    val permissionsToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        mutableListOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.READ_MEDIA_AUDIO
+        ).apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val images = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-                val videos = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
-                val audio = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED
-                val partial = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
-
-                (images && videos && audio) || partial
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val images = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-                val videos = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
-                val audio = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED
-
-                images && videos && audio
-            } else {
-                val read = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-                val write = ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-
-                read && write
+                add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
             }
-        }
+        }.toList()
+    } else {
+        listOf(
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE
+        )
     }
 
-    var granted by remember { mutableStateOf(checkPermissions()) }
+    val permissionState = rememberMultiplePermissionsState(permissionsToRequest)
 
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                granted = checkPermissions()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    val hasRequiredPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        permissionState.permissions.any { it.permission == Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED && it.status.isGranted } ||
+                permissionState.allPermissionsGranted
+    } else {
+        permissionState.allPermissionsGranted
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        granted = checkPermissions()
-    }
-
-    val requestPermissions = {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            permissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.READ_MEDIA_IMAGES,
-                    Manifest.permission.READ_MEDIA_VIDEO,
-                    Manifest.permission.READ_MEDIA_AUDIO,
-                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
-                )
-            )
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.READ_MEDIA_IMAGES,
-                    Manifest.permission.READ_MEDIA_VIDEO,
-                    Manifest.permission.READ_MEDIA_AUDIO
-                )
-            )
-        } else {
-            permissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.READ_EXTERNAL_STORAGE,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE
-                )
-            )
+    if (hasRequiredPermissions) {
+        content()
+    } else {
+        LaunchedEffect(Unit) {
+            permissionState.launchMultiplePermissionRequest()
         }
-    }
 
-    AnimatedContent(
-        targetState = granted,
-        transitionSpec = {
-            fadeIn(animationSpec = tween(600)) togetherWith fadeOut(animationSpec = tween(400))
-        },
-        label = "PermissionTransition"
-    ) { isGranted ->
-        if (isGranted) {
-            content()
-        } else {
-            PermissionFallbackScreen(onRequest = requestPermissions)
-        }
+        PermissionDeniedScreen(
+            onRequestPermission = { permissionState.launchMultiplePermissionRequest() }
+        )
     }
 }
 
 @Composable
-private fun PermissionFallbackScreen(onRequest: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-
-    val infiniteTransition = rememberInfiniteTransition(label = "FloatingAnimation")
-    val floatOffset by infiniteTransition.animateFloat(
-        initialValue = -12f,
-        targetValue = 12f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = EaseInOut),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "FloatOffset"
-    )
-
-    var isVisible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { isVisible = true }
-
-    Column(
+fun PermissionDeniedScreen(onRequestPermission: () -> Unit) {
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(colors.background)
-            .systemBarsPadding()
-            .padding(horizontal = 32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center
     ) {
-
-        AnimatedVisibility(
-            visible = isVisible,
-            enter = slideInVertically(initialOffsetY = { -50 }, animationSpec = tween(700, easing = FastOutSlowInEasing)) + fadeIn(tween(700))
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(32.dp)
         ) {
             Box(
                 modifier = Modifier
-                    .offset(y = floatOffset.dp)
-                    .size(160.dp),
+                    .size(120.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
                 contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(120.dp)
-                        .clip(CircleShape)
-                        .background(colors.primary.copy(alpha = 0.1f))
-                )
-
                 Icon(
-                    imageVector = Icons.Rounded.VideoLibrary,
-                    contentDescription = null,
-                    tint = colors.secondary.copy(alpha = 0.5f),
-                    modifier = Modifier
-                        .size(64.dp)
-                        .offset(x = (-30).dp, y = 15.dp)
-                )
-                Icon(
-                    imageVector = Icons.Rounded.AudioFile,
-                    contentDescription = null,
-                    tint = colors.tertiary.copy(alpha = 0.5f),
-                    modifier = Modifier
-                        .size(64.dp)
-                        .offset(x = 30.dp, y = 15.dp)
-                )
-                Icon(
-                    imageVector = Icons.Rounded.PermMedia,
-                    contentDescription = null,
-                    tint = colors.primary,
-                    modifier = Modifier.size(80.dp)
+                    imageVector = Icons.Rounded.PhotoLibrary,
+                    contentDescription = "Permissions Required",
+                    modifier = Modifier.size(60.dp),
+                    tint = MaterialTheme.colorScheme.primary
                 )
             }
-        }
 
-        Spacer(modifier = Modifier.height(48.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
-        AnimatedVisibility(
-            visible = isVisible,
-            enter = slideInVertically(initialOffsetY = { 30 }, animationSpec = tween(700, delayMillis = 100, easing = FastOutSlowInEasing)) + fadeIn(tween(700, delayMillis = 100))
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "Welcome to GalleryBox",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Black,
-                    color = colors.onBackground,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = "To organize, view, and enjoy your photos, videos, and music, we need access to your device's media library.",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = colors.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    lineHeight = 24.sp
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(48.dp))
-
-        AnimatedVisibility(
-            visible = isVisible,
-            enter = slideInVertically(initialOffsetY = { 30 }, animationSpec = tween(700, delayMillis = 200, easing = FastOutSlowInEasing)) + fadeIn(tween(700, delayMillis = 200))
-        ) {
-            Button(
-                onClick = onRequest,
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = colors.primary,
-                    contentColor = colors.onPrimary
-                ),
-                contentPadding = PaddingValues(horizontal = 32.dp, vertical = 16.dp),
-                modifier = Modifier.fillMaxWidth(0.9f)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.FolderSpecial,
-                    contentDescription = null,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = "Grant Media Access",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        AnimatedVisibility(
-            visible = isVisible,
-            enter = fadeIn(tween(700, delayMillis = 300))
-        ) {
             Text(
-                text = "Your privacy is protected. GalleryBox only accesses the files locally on your device.",
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant.copy(alpha = 0.6f),
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 24.dp)
+                text = "Permissions Required",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
             )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "GalleryBox needs access to your device storage to display photos, videos, and music.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                lineHeight = 22.sp
+            )
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            Button(
+                onClick = onRequestPermission,
+                modifier = Modifier.height(56.dp)
+            ) {
+                Text(
+                    text = "Grant Permissions",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    modifier = Modifier.padding(horizontal = 24.dp)
+                )
+            }
         }
     }
 }

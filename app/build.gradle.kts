@@ -129,6 +129,7 @@ dependencies {
     implementation(libs.androidx.foundation)
     implementation(libs.androidx.ui)
 
+
     // KotlinX & Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
@@ -262,6 +263,7 @@ dependencies {
     // PDF Support
     implementation("androidx.pdf:pdf-viewer-fragment:1.0.0-alpha11")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     // Testing
     testImplementation("junit:junit:4.13.2")
