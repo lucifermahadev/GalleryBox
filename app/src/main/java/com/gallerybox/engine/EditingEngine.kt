@@ -502,42 +502,6 @@ class PhotoEditorEngine @Inject constructor(
                 val sCan = Canvas(out)
                 val resV = max(out.width, out.height)
 
-                if (state.mosaicRegions.isNotEmpty()) {
-                    val mosaicPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-                    val visibleMosaics = state.mosaicRegions.filter { it.isVisible }
-
-                    for (mosaic in visibleMosaics) {
-                        val rw = (out.width * mosaic.region.width()).toInt()
-                        val rh = (out.height * mosaic.region.height()).toInt()
-
-                        if (rw > 0 && rh > 0) {
-                            val rx = (out.width * mosaic.region.left).toInt()
-                            val ry = (out.height * mosaic.region.top).toInt()
-
-                            val pixSize = max(1, (mosaic.intensity * 50f).toInt())
-                            val smallW = max(1, rw / pixSize)
-                            val smallH = max(1, rh / pixSize)
-
-                            val safeRx = rx.coerceIn(0, out.width - 1)
-                            val safeRy = ry.coerceIn(0, out.height - 1)
-                            val safeRw = rw.coerceAtMost(out.width - safeRx)
-                            val safeRh = rh.coerceAtMost(out.height - safeRy)
-
-                            if (safeRw > 0 && safeRh > 0) {
-                                val cropBmp = Bitmap.createBitmap(out, safeRx, safeRy, safeRw, safeRh)
-                                val smallBmp = Bitmap.createScaledBitmap(cropBmp, smallW, smallH, false)
-                                val pixelated = Bitmap.createScaledBitmap(smallBmp, safeRw, safeRh, false)
-
-                                sCan.drawBitmap(pixelated, safeRx.toFloat(), safeRy.toFloat(), mosaicPaint)
-
-                                cropBmp.recycle()
-                                smallBmp.recycle()
-                                pixelated.recycle()
-                            }
-                        }
-                    }
-                }
-
                 val matrix = Matrix()
                 val overlayPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG)
 
@@ -568,28 +532,6 @@ class PhotoEditorEngine @Inject constructor(
                         overlayPaint.alpha = (t.opacity * 255).toInt().coerceIn(0, 255)
                         sCan.drawBitmap(bmp, matrix, overlayPaint)
                     }
-                }
-
-                val drawPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    style = Paint.Style.STROKE
-                    strokeCap = Paint.Cap.ROUND
-                    strokeJoin = Paint.Join.ROUND
-                }
-
-                val activeDrawLayers = state.drawLayers.filter { it.isVisible }.sortedBy { it.zIndex }
-                for (stroke in activeDrawLayers) {
-                    drawPaint.color = stroke.color
-                    drawPaint.strokeWidth = stroke.width
-
-                    val path = Path()
-                    if (stroke.points.isNotEmpty()) {
-                        val first = stroke.points.first()
-                        path.moveTo(first.x * out.width, first.y * out.height)
-                        for (i in 1 until stroke.points.size) {
-                            path.lineTo(stroke.points[i].x * out.width, stroke.points[i].y * out.height)
-                        }
-                    }
-                    sCan.drawPath(path, drawPaint)
                 }
             }
 

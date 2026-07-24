@@ -1411,8 +1411,6 @@ class MediaPagingSource(
                 dateAdded = if (rd > 1000000000000L) rd / 1000L else if (rd > 0) rd else System.currentTimeMillis() / 1000L,
                 size = c.getLong(sC),
                 isVideo = isV,
-                isPdf = false,
-                isDocument = false,
                 duration = 0L,
                 width = w,
                 height = h,

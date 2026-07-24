@@ -871,7 +871,7 @@ fun SlideshowScreen(albumId: String?, viewModel: GalleryViewModel = hiltViewMode
     var slideDelayMs by remember { mutableLongStateOf(4000L) }
 
     val slideshowItems = remember(allMedia, albumId, isShuffleEnabled) {
-        val filtered = (if (albumId != null) allMedia.filter { it.bucketId == albumId } else allMedia).filter { !it.isPdf && !it.isVideo }
+        val filtered = (if (albumId != null) allMedia.filter { it.bucketId == albumId } else allMedia).filter { !it.isVideo }
         if (isShuffleEnabled) filtered.shuffled() else filtered
     }
 

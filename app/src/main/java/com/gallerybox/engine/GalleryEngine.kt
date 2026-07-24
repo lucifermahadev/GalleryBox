@@ -152,8 +152,6 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                             size = c.getLong(sizeC),
                             dateAdded = dSec,
                             isVideo = isV,
-                            isPdf = isPdfFile,
-                            isDocument = isDocFile,
                             isHidden = hidden.contains(id.toString()),
                             isFavorite = false,
                             bucketId = c.getString(bIdC) ?: "unknown",

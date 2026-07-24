@@ -85,15 +85,12 @@ import coil.request.CachePolicy
 import coil.request.ImageRequest
 import coil.size.Precision
 import com.gallerybox.data.MediaItem
-import com.gallerybox.data.DocumentFile
-import com.gallerybox.data.DocumentType
 import com.gallerybox.ui.screens.album.formatDuration
 import com.gallerybox.viewmodel.GalleryEvent
 import com.gallerybox.viewmodel.GalleryViewModel
 import com.gallerybox.viewmodel.MediaTypeFilter
 import com.gallerybox.viewmodel.PhotoSort
 import com.gallerybox.viewmodel.TrashViewModel
-import com.gallerybox.viewmodel.DocumentViewModel
 import com.gallerybox.viewmodel.GalleryViewerState
 import kotlinx.collections.immutable.ImmutableSet
 import kotlinx.collections.immutable.persistentSetOf
@@ -114,30 +111,8 @@ import kotlin.math.roundToInt
 enum class UiMediaFilter(val label: String) {
     ALL("All"),
     PHOTOS("Photos"),
-    VIDEOS("Videos"),
-    DOCUMENTS("Documents")
+    VIDEOS("Videos")
 }
-
-fun DocumentFile.toMediaItem(): MediaItem = MediaItem(
-    id = id,
-    uri = uri,
-    path = name,
-    relativePath = "",
-    name = name,
-    dateAdded = dateModified / 1000L,
-    size = size,
-    isVideo = false,
-    isPdf = type == DocumentType.PDF,
-    isDocument = true,
-    duration = 0L,
-    width = 0,
-    height = 0,
-    mimeType = mimeType ?: "",
-    bucketId = "",
-    bucketName = "",
-    isFavorite = false,
-    isHidden = false
-)
 
 fun isValidUri(context: Context, uri: Uri?): Boolean = uri != null && uri != Uri.EMPTY
 
@@ -148,7 +123,6 @@ fun getSmartName(item: MediaItem): String {
         "instagram" in name -> "Instagram Video"
         "whatsapp" in name -> "WhatsApp Media"
         "screenshot" in name -> "Screenshot"
-        item.isDocument -> "Document"
         item.isVideo -> "Video"
         else -> "Photo"
     }
@@ -203,7 +177,6 @@ sealed class PictureUiDialog {
 fun PictureScreen(
     viewModel: GalleryViewModel = hiltViewModel(),
     trashViewModel: TrashViewModel = hiltViewModel(),
-    documentViewModel: DocumentViewModel = hiltViewModel(),
     onViewerStateChanged: (Boolean) -> Unit = {},
     onNavigateToCamera: () -> Unit,
     onNavigateToTrash: () -> Unit,
@@ -215,8 +188,6 @@ fun PictureScreen(
     onNavigateToScan: () -> Unit,
     onNavigateToAlbum: (String) -> Unit,
     onNavigateToSettings: () -> Unit,
-    onNavigateToDocs: () -> Unit,
-    onNavigateToDocViewer: (Long) -> Unit,
     onNavigateToVideoPlayer: (String, List<String>) -> Unit,
     onNavigateToEditor: (String, Long) -> Unit,
     onNavigateToMoveCopy: (String, String, String?) -> Unit
@@ -234,8 +205,7 @@ fun PictureScreen(
         listOf(
             UiMediaFilter.ALL,
             UiMediaFilter.PHOTOS,
-            UiMediaFilter.VIDEOS,
-            UiMediaFilter.DOCUMENTS
+            UiMediaFilter.VIDEOS
         )
     }
 
@@ -267,18 +237,11 @@ fun PictureScreen(
         trashViewModel.onPermissionResultGlobal(g)
         if (!g) Toast.makeText(context, "Permission Denied", Toast.LENGTH_SHORT).show()
     }
-    val documents by documentViewModel.documents.collectAsState()
-    val isDocLoading by documentViewModel.isListLoading.collectAsState()
 
     LaunchedEffect(trashViewModel) {
         trashViewModel.onRefreshGallery = {
             scope.launch {
                 viewModel.forceSync()
-                // Fetch document SAF treeUri to reload docs smoothly
-                val savedUriStr = context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE).getString("document_tree_uri", null)
-                if (savedUriStr != null) {
-                    documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
-                }
             }
         }
         trashViewModel.events.collect { event ->
@@ -312,20 +275,13 @@ fun PictureScreen(
             isSelectionMode = false
             selectedIds = persistentSetOf()
         }
-        // Seamless document trigger if filter switched to Documents
-        if (activeFilter == UiMediaFilter.DOCUMENTS && documents.isEmpty()) {
-            val savedUriStr = context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE).getString("document_tree_uri", null)
-            if (savedUriStr != null) {
-                documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
-            }
-        }
     }
 
     fun getMediaItemFromId(id: Long): MediaItem? {
-        return mediaMap[id] ?: documents.find { it.id == id }?.toMediaItem()
+        return mediaMap[id]
     }
 
-    val selectedSizeStr by remember(selectedIds, mediaMap, documents) {
+    val selectedSizeStr by remember(selectedIds, mediaMap) {
         derivedStateOf {
             val sum = selectedIds.sumOf { getMediaItemFromId(it)?.size ?: 0L }
             Formatter.formatShortFileSize(context, sum)
@@ -337,14 +293,12 @@ fun PictureScreen(
         val uris = items.map { it.uri }
         val intent = Intent().apply {
             action = if (uris.size > 1) Intent.ACTION_SEND_MULTIPLE else Intent.ACTION_SEND
-            val hasImage = items.any { !it.isVideo && !it.isDocument }
+            val hasImage = items.any { !it.isVideo }
             val hasVideo = items.any { it.isVideo }
-            val hasDocument = items.any { it.isDocument }
 
             type = when {
-                hasDocument && !hasImage && !hasVideo -> if (items.size == 1) items.first().mimeType.takeIf { it.isNotBlank() } ?: "*/*" else "*/*"
-                hasVideo && !hasImage && !hasDocument -> "video/*"
-                hasImage && !hasVideo && !hasDocument -> "image/*"
+                hasVideo && !hasImage -> "video/*"
+                hasImage && !hasVideo -> "image/*"
                 else -> "*/*"
             }
 
@@ -365,7 +319,6 @@ fun PictureScreen(
     BackHandler(enabled = isSearchActive) {
         isSearchActive = false
         viewModel.setSearchQuery("")
-        documentViewModel.updateDocSearchQuery("")
     }
 
     BackHandler(enabled = isSelectionMode) {
@@ -403,27 +356,18 @@ fun PictureScreen(
                             selection -> MediaSelectionTopBar(
                                 selectedCount = selectedIds.size,
                                 selectedSizeStr = selectedSizeStr,
-                                totalCount = if (activeFilter == UiMediaFilter.DOCUMENTS) documents.size else pagedMedia.itemCount,
+                                totalCount = pagedMedia.itemCount,
                                 onClose = {
                                     isSelectionMode = false
                                     selectedIds = persistentSetOf()
                                 },
                                 onSelectAll = {
-                                    if (activeFilter == UiMediaFilter.DOCUMENTS) {
-                                        selectedIds = if (selectedIds.size == documents.size && documents.isNotEmpty()) {
-                                            persistentSetOf()
-                                        } else {
-                                            val newSelection = documents.map { it.id }.toSet()
-                                            if (newSelection.size < 5000) newSelection.toImmutableSet() else selectedIds
-                                        }
+                                    val mediaItems = pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>()
+                                    selectedIds = if (selectedIds.size == mediaItems.size && mediaItems.isNotEmpty()) {
+                                        persistentSetOf()
                                     } else {
-                                        val mediaItems = pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>()
-                                        selectedIds = if (selectedIds.size == mediaItems.size && mediaItems.isNotEmpty()) {
-                                            persistentSetOf()
-                                        } else {
-                                            val newSelection = mediaItems.map { it.item.id }.toSet()
-                                            if (newSelection.size < 5000) newSelection.toImmutableSet() else selectedIds
-                                        }
+                                        val newSelection = mediaItems.map { it.item.id }.toSet()
+                                        if (newSelection.size < 5000) newSelection.toImmutableSet() else selectedIds
                                     }
                                 }
                             )
@@ -431,12 +375,10 @@ fun PictureScreen(
                                 query = searchQuery,
                                 onQueryChange = {
                                     viewModel.setSearchQuery(it)
-                                    documentViewModel.updateDocSearchQuery(it)
                                 },
                                 onClose = {
                                     isSearchActive = false
                                     viewModel.setSearchQuery("")
-                                    documentViewModel.updateDocSearchQuery("")
                                 }
                             )
                             else -> ModernTopBar(
@@ -455,7 +397,6 @@ fun PictureScreen(
                                         "trash" -> onNavigateToTrash()
                                         "hidden" -> onNavigateToHidden()
                                         "lock_app" -> onLockApp()
-                                        "docs" -> onNavigateToDocs()
                                         "settings" -> onNavigateToSettings()
                                     }
                                 }
@@ -504,106 +445,55 @@ fun PictureScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                if (activeFilter == UiMediaFilter.DOCUMENTS) {
-                    if (isDocLoading && documents.isEmpty()) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
-                        }
-                    } else if (documents.isEmpty()) {
-                        EmptyMediaOverlay(isDocument = true)
-                    } else {
-                        DocumentGridContent(
-                            documents = documents,
-                            gridState = gridState,
-                            columnCount = columnCount,
-                            isSelectionMode = isSelectionMode,
-                            selectedIds = selectedIds,
-                            isLowRam = isLowRam,
-                            onSelectionChange = { selectedIds = it.toImmutableSet() },
-                            onSelectionModeChange = { isSelectionMode = it },
-                            onItemClick = { item ->
-                                try {
-                                    if (isSelectionMode) {
-                                        selectedIds = if (selectedIds.contains(item.id)) {
-                                            (selectedIds - item.id).toImmutableSet()
-                                        } else {
-                                            (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
-                                        }
-                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    } else {
-                                        onNavigateToDocViewer(item.id)
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e("GalleryBox", "Open Error", e)
-                                }
-                            },
-                            onItemLongClick = { item ->
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                if (isSelectionMode) {
-                                    selectedIds = if (selectedIds.contains(item.id)) {
-                                        (selectedIds - item.id).toImmutableSet()
-                                    } else {
-                                        (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
-                                    }
-                                } else {
-                                    activeDialog = PictureUiDialog.QuickAction(item)
-                                }
-                            }
-                        )
+                if (isBusy && pagedMedia.itemCount == 0) {
+                    Box(
+                        Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
                     }
+                } else if (pagedMedia.itemCount == 0) {
+                    EmptyMediaOverlay()
                 } else {
-                    if (isBusy && pagedMedia.itemCount == 0) {
-                        Box(
-                            Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator()
-                        }
-                    } else if (pagedMedia.itemCount == 0) {
-                        EmptyMediaOverlay(isDocument = false)
-                    } else {
-                        GalleryGridContent(
-                            pagedMedia = pagedMedia,
-                            gridState = gridState,
-                            columnCount = columnCount,
-                            isSelectionMode = isSelectionMode,
-                            selectedIds = selectedIds,
-                            mediaMap = mediaMap,
-                            isLowRam = isLowRam,
-                            onSelectionChange = { selectedIds = it.toImmutableSet() },
-                            onSelectionModeChange = { isSelectionMode = it },
-                            onItemClick = { item ->
-                                try {
-                                    if (isSelectionMode) {
-                                        selectedIds = if (selectedIds.contains(item.id)) {
-                                            (selectedIds - item.id).toImmutableSet()
-                                        } else {
-                                            (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
-                                        }
-                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    } else if (item.isDocument) {
-                                        onNavigateToDocViewer(item.id)
-                                    } else {
-                                        viewModel.openViewer(item.id)
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e("GalleryBox", "Open Error", e)
-                                }
-                            },
-                            onItemLongClick = { item ->
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    GalleryGridContent(
+                        pagedMedia = pagedMedia,
+                        gridState = gridState,
+                        columnCount = columnCount,
+                        isSelectionMode = isSelectionMode,
+                        selectedIds = selectedIds,
+                        mediaMap = mediaMap,
+                        isLowRam = isLowRam,
+                        onSelectionChange = { selectedIds = it.toImmutableSet() },
+                        onSelectionModeChange = { isSelectionMode = it },
+                        onItemClick = { item ->
+                            try {
                                 if (isSelectionMode) {
                                     selectedIds = if (selectedIds.contains(item.id)) {
                                         (selectedIds - item.id).toImmutableSet()
                                     } else {
                                         (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
                                     }
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 } else {
-                                    activeDialog = PictureUiDialog.QuickAction(item)
+                                    viewModel.openViewer(item.id)
                                 }
+                            } catch (e: Exception) {
+                                Log.e("GalleryBox", "Open Error", e)
                             }
-                        )
-                    }
+                        },
+                        onItemLongClick = { item ->
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (isSelectionMode) {
+                                selectedIds = if (selectedIds.contains(item.id)) {
+                                    (selectedIds - item.id).toImmutableSet()
+                                } else {
+                                    (selectedIds + item.id).toImmutableSet().takeIf { it.size < 5000 } ?: selectedIds
+                                }
+                            } else {
+                                activeDialog = PictureUiDialog.QuickAction(item)
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -672,7 +562,7 @@ fun PictureScreen(
                             horizontalArrangement = Arrangement.SpaceEvenly
                         ) {
                             item {
-                                ActionItem(Icons.Outlined.Edit, "Edit", enabled = !item.isDocument) {
+                                ActionItem(Icons.Outlined.Edit, "Edit", enabled = true) {
                                     activeDialog = PictureUiDialog.None
                                     onNavigateToEditor(item.uri.toString(), item.id)
                                 }
@@ -705,23 +595,23 @@ fun PictureScreen(
                                         activeDialog = PictureUiDialog.MetadataInfo(item)
                                     }
                                 )
-                                if (!item.isDocument) {
-                                    ListItem(
-                                        headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) },
-                                        leadingContent = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) },
-                                        modifier = Modifier.clickable {
-                                            activeDialog = PictureUiDialog.None
-                                            onNavigateToMoveCopy("MOVE", item.id.toString(), null)
-                                        }
-                                    )
-                                    ListItem(
-                                        headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) },
-                                        leadingContent = { Icon(Icons.Outlined.FileCopy, null) },
-                                        modifier = Modifier.clickable {
-                                            activeDialog = PictureUiDialog.None
-                                            onNavigateToMoveCopy("COPY", item.id.toString(), null)
-                                        }
-                                    )
+                                ListItem(
+                                    headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) },
+                                    leadingContent = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) },
+                                    modifier = Modifier.clickable {
+                                        activeDialog = PictureUiDialog.None
+                                        onNavigateToMoveCopy("MOVE", item.id.toString(), null)
+                                    }
+                                )
+                                ListItem(
+                                    headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) },
+                                    leadingContent = { Icon(Icons.Outlined.FileCopy, null) },
+                                    modifier = Modifier.clickable {
+                                        activeDialog = PictureUiDialog.None
+                                        onNavigateToMoveCopy("COPY", item.id.toString(), null)
+                                    }
+                                )
+                                if (!item.isVideo) {
                                     ListItem(
                                         headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) },
                                         leadingContent = { Icon(Icons.Outlined.Wallpaper, null) },
@@ -771,16 +661,10 @@ fun PictureScreen(
             enter = scaleIn(initialScale = 0.9f, animationSpec = tween(250, easing = FastOutSlowInEasing)) + fadeIn(tween(200)),
             exit = scaleOut(targetScale = 0.9f, animationSpec = tween(200)) + fadeOut(tween(150))
         ) {
-            if (currentItem?.isDocument == true) {
-                LaunchedEffect(currentItem.id) {
-                    onNavigateToDocViewer(currentItem.id)
-                    viewModel.closeViewer()
-                }
-            } else if (currentItem != null) {
+            if (currentItem != null) {
                 val stableMediaList = pagedMedia.itemSnapshotList.items
                     .filterIsInstance<GalleryGridItem.Media>()
                     .map { mediaMap[it.item.id] ?: it.item }
-                    .filter { !it.isDocument }
 
                 val stableStartIndex = stableMediaList.indexOfFirst {
                     it.id == currentItem.id
@@ -799,10 +683,6 @@ fun PictureScreen(
                         },
                         onDelete = { item ->
                             activeDialog = PictureUiDialog.TrashConfirm(listOf(item.id))
-                        },
-                        onNavigateToDocViewer = { id ->
-                            viewModel.closeViewer()
-                            onNavigateToDocViewer(id)
                         },
                         onNavigateToVideoPlayer = { uri ->
                             viewModel.closeViewer()
@@ -856,7 +736,7 @@ fun GalleryGridImagePrefetcher(
                     val gridItem = pagedMedia.peek(i)
                     if (gridItem is GalleryGridItem.Media) {
                         val mediaItem = mediaMap[gridItem.item.id] ?: gridItem.item
-                        if (!mediaItem.isDocument && isValidUri(context, mediaItem.uri)) {
+                        if (isValidUri(context, mediaItem.uri)) {
                             val request = ImageRequest.Builder(context)
                                 .data(mediaItem.uri)
                                 .size(160) // explicitly small size for prefetching
@@ -867,98 +747,6 @@ fun GalleryGridImagePrefetcher(
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-fun DocumentGridContent(
-    documents: List<DocumentFile>,
-    gridState: LazyGridState,
-    columnCount: Int,
-    isSelectionMode: Boolean,
-    selectedIds: Set<Long>,
-    isLowRam: Boolean,
-    onSelectionChange: (Set<Long>) -> Unit,
-    onSelectionModeChange: (Boolean) -> Unit,
-    onItemClick: (MediaItem) -> Unit,
-    onItemLongClick: (MediaItem) -> Unit
-) {
-    val mediaItems = remember(documents) { documents.map { it.toMediaItem() } }
-    val haptic = LocalHapticFeedback.current
-    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
-
-    val dynamicThumbSize = 160
-
-    Box(Modifier.fillMaxSize()) {
-        LazyVerticalGrid(
-            state = gridState,
-            columns = GridCells.Fixed(columnCount),
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(isSelectionMode) {
-                    if (!isSelectionMode) return@pointerInput
-                    var initialKey: Long? = null
-                    detectDragGestures(
-                        onDragStart = { offset ->
-                            val itemInfo = gridState.layoutInfo.visibleItemsInfo.find {
-                                offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) &&
-                                        offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width)
-                            }
-                            itemInfo?.let { info ->
-                                val item = mediaItems.getOrNull(info.index)
-                                if (item != null) {
-                                    initialKey = item.id
-                                    onSelectionChange(
-                                        (selectedIds + item.id).toSet().takeIf { set -> set.size < 5000 } ?: selectedIds
-                                    )
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                }
-                            }
-                        },
-                        onDrag = { change, _ ->
-                            val offset = change.position
-                            val itemInfo = gridState.layoutInfo.visibleItemsInfo.find {
-                                offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) &&
-                                        offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width)
-                            }
-                            itemInfo?.let { info ->
-                                val item = mediaItems.getOrNull(info.index)
-                                if (item != null && item.id != initialKey && !selectedIds.contains(item.id)) {
-                                    onSelectionChange(
-                                        (selectedIds + item.id).toSet().takeIf { set -> set.size < 5000 } ?: selectedIds
-                                    )
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                }
-                            }
-                        },
-                        onDragEnd = { initialKey = null },
-                        onDragCancel = { initialKey = null }
-                    )
-                },
-            contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp, start = 3.dp, end = 3.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp)
-        ) {
-            items(
-                count = mediaItems.size,
-                key = { index -> mediaItems[index].id },
-                contentType = { "media" }
-            ) { index ->
-                val modifierWithAnim = if (isScrolling) Modifier else Modifier.animateItem()
-                val mediaItem = mediaItems[index]
-
-                ModernMediaGridTile(
-                    modifier = modifierWithAnim,
-                    item = mediaItem,
-                    thumbSize = dynamicThumbSize,
-                    isSelected = selectedIds.contains(mediaItem.id),
-                    isSelectionMode = isSelectionMode,
-                    isLowRam = isLowRam,
-                    onClick = { onItemClick(mediaItem) },
-                    onLongClick = { onItemLongClick(mediaItem) }
-                )
             }
         }
     }
@@ -1155,7 +943,6 @@ fun FullscreenMediaPager(
     onClose: () -> Unit,
     onEdit: (MediaItem) -> Unit,
     onDelete: (MediaItem) -> Unit,
-    onNavigateToDocViewer: (Long) -> Unit,
     onNavigateToVideoPlayer: (String) -> Unit,
     onMove: (MediaItem) -> Unit,
     onCopy: (MediaItem) -> Unit,
@@ -1235,12 +1022,6 @@ fun FullscreenMediaPager(
         ) { page ->
             val item = mediaList[page]
             when {
-                item.isDocument -> {
-                    DocumentPage(
-                        item = item,
-                        onNavigateToDocViewer = onNavigateToDocViewer
-                    )
-                }
                 item.isVideo -> {
                     VideoPreviewPage(
                         item = item,
@@ -1429,7 +1210,7 @@ fun FullscreenMediaPager(
                         onCopy(currentItem)
                     }
                 )
-                if (!currentItem.isDocument && !currentItem.isVideo) {
+                if (!currentItem.isVideo) {
                     ListItem(
                         headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) },
                         leadingContent = { Icon(Icons.Outlined.Wallpaper, null) },
@@ -1603,93 +1384,38 @@ fun ModernMediaGridTile(
                 onLongClick = onLongClick
             )
     ) {
-        if (item.isDocument) {
-            val ext = item.name.substringAfterLast('.', "").uppercase(Locale.ROOT)
-            val tintColor = when (ext) {
-                "PDF" -> Color(0xFFE53935)
-                "DOC", "DOCX" -> Color(0xFF1E88E5)
-                "XLS", "XLSX", "CSV" -> Color(0xFF43A047)
-                "PPT", "PPTX" -> Color(0xFFFFB300)
-                "TXT", "JSON", "XML", "HTML", "MD" -> Color(0xFF757575)
-                "KT", "JAVA", "CPP", "C", "H", "PY", "JS", "TS", "CSS", "PHP", "SQL", "SH" -> Color(0xFF00897B)
-                else -> MaterialTheme.colorScheme.primary
+        val requestBuilder = ImageRequest.Builder(LocalContext.current)
+            .data(item.uri)
+            .size(thumbSize)
+            .allowRgb565(true)
+            .bitmapConfig(Bitmap.Config.RGB_565)
+            .memoryCacheKey("thumb_${item.id}")
+            .diskCacheKey("thumb_${item.id}")
+            .networkCachePolicy(CachePolicy.ENABLED)
+            .memoryCachePolicy(CachePolicy.ENABLED)
+            .diskCachePolicy(CachePolicy.ENABLED)
+            .precision(Precision.INEXACT)
+            .allowHardware(!item.isVideo)
+            .crossfade(false)
+            .error(android.R.drawable.ic_menu_report_image)
+            .fallback(android.R.drawable.ic_menu_report_image)
+            .apply {
+                if (item.isVideo) decoderFactory(coil.decode.VideoFrameDecoder.Factory())
             }
 
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(
-                        Modifier
-                            .size(74.dp)
-                            .clip(CircleShape)
-                            .background(tintColor.copy(alpha = 0.12f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(Icons.Outlined.InsertDriveFile, null, tint = tintColor, modifier = Modifier.size(36.dp))
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = "Document",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+        AsyncImage(
+            model = requestBuilder.build(),
+            placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            filterQuality = FilterQuality.None,
+            modifier = Modifier.fillMaxSize(),
+            onError = { state ->
+                Log.e("GalleryBox", "GridTile error: ${item.uri}", state.result.throwable)
             }
+        )
 
-            if (ext.isNotBlank()) {
-                Box(
-                    Modifier
-                        .align(Alignment.TopStart)
-                        .padding(8.dp)
-                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                ) {
-                    Text(
-                        text = ext,
-                        color = Color.White,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold
-                    )
-                }
-            }
-        } else {
-            val requestBuilder = ImageRequest.Builder(LocalContext.current)
-                .data(item.uri)
-                .size(thumbSize)
-                .allowRgb565(true)
-                .bitmapConfig(Bitmap.Config.RGB_565)
-                .memoryCacheKey("thumb_${item.id}")
-                .diskCacheKey("thumb_${item.id}")
-                .networkCachePolicy(CachePolicy.ENABLED)
-                .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(CachePolicy.ENABLED)
-                .precision(Precision.INEXACT)
-                .allowHardware(!item.isVideo)
-                .crossfade(false)
-                .error(android.R.drawable.ic_menu_report_image)
-                .fallback(android.R.drawable.ic_menu_report_image)
-                .apply {
-                    if (item.isVideo) decoderFactory(coil.decode.VideoFrameDecoder.Factory())
-                }
-
-            AsyncImage(
-                model = requestBuilder.build(),
-                placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceContainerHigh),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                filterQuality = FilterQuality.None,
-                modifier = Modifier.fillMaxSize(),
-                onError = { state ->
-                    Log.e("GalleryBox", "GridTile error: ${item.uri}", state.result.throwable)
-                }
-            )
-        }
-
-        if (!item.isDocument && item.isVideo) {
+        if (item.isVideo) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -1865,124 +1591,6 @@ fun ZoomableImagePage(
     }
 }
 
-@Composable
-fun DocumentPage(item: MediaItem, onNavigateToDocViewer: (Long) -> Unit) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Color(0xFF101114), Color(0xFF181A1F), Color.Black))),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(
-            Modifier
-                .size(320.dp)
-                .blur(40.dp)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f), CircleShape)
-        )
-        ElevatedCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 28.dp),
-            shape = RoundedCornerShape(36.dp),
-            elevation = CardDefaults.elevatedCardElevation(12.dp),
-            colors = CardDefaults.elevatedCardColors(containerColor = Color.White.copy(alpha = 0.06f))
-        ) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 28.dp, vertical = 34.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Box(
-                    Modifier
-                        .size(120.dp)
-                        .clip(RoundedCornerShape(34.dp))
-                        .background(
-                            Brush.linearGradient(
-                                listOf(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
-                                )
-                            )
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.InsertDriveFile,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(64.dp)
-                    )
-                }
-                Spacer(Modifier.height(28.dp))
-                Text(
-                    text = item.name,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    textAlign = TextAlign.Center,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = item.path,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.65f),
-                    textAlign = TextAlign.Center,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(26.dp))
-                Surface(
-                    shape = RoundedCornerShape(24.dp),
-                    color = Color.White.copy(alpha = 0.06f)
-                ) {
-                    Row(
-                        Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Description,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            text = "Tap below to open document viewer",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White.copy(alpha = 0.85f)
-                        )
-                    }
-                }
-                Spacer(Modifier.height(34.dp))
-                Button(
-                    onClick = { onNavigateToDocViewer(item.id) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(62.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    elevation = ButtonDefaults.buttonElevation(6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.OpenInNew,
-                        contentDescription = null,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        text = "Open Document",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-    }
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) {
@@ -2058,7 +1666,7 @@ fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) {
                         MetadataRow(Icons.Outlined.Timer, "Duration", formatDuration(item.duration))
                     }
 
-                    if (!item.isVideo && !item.isDocument) {
+                    if (!item.isVideo) {
                         HorizontalDivider(Modifier.padding(vertical = 12.dp))
                         Text(
                             text = "Camera Information",
@@ -2519,7 +2127,6 @@ fun ModernTopBar(
                     PremiumMenuItem("Sort Media", Icons.AutoMirrored.Filled.Sort) { onMenuAction("sort"); showMenu = false }
                     PremiumMenuItem("Slideshow", Icons.Rounded.Slideshow) { onMenuAction("slideshow"); showMenu = false }
                     HorizontalDivider()
-                    PremiumMenuItem("Documents", Icons.Outlined.InsertDriveFile) { onMenuAction("docs"); showMenu = false }
                     PremiumMenuItem("Duplicates", Icons.Outlined.FileCopy) { onMenuAction("duplicates"); showMenu = false }
                     PremiumMenuItem("Scan Library", Icons.Outlined.ImageSearch) { onMenuAction("scan"); showMenu = false }
                     HorizontalDivider()
@@ -2761,7 +2368,7 @@ fun ModernFilterRow(
 }
 
 @Composable
-fun EmptyMediaOverlay(isDocument: Boolean = false) {
+fun EmptyMediaOverlay() {
     Box(
         Modifier
             .fillMaxSize()
@@ -2777,7 +2384,7 @@ fun EmptyMediaOverlay(isDocument: Boolean = false) {
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = if (isDocument) Icons.Outlined.InsertDriveFile else Icons.Outlined.PhotoLibrary,
+                    imageVector = Icons.Outlined.PhotoLibrary,
                     contentDescription = null,
                     modifier = Modifier.size(58.dp),
                     tint = MaterialTheme.colorScheme.primary
@@ -2785,14 +2392,14 @@ fun EmptyMediaOverlay(isDocument: Boolean = false) {
             }
             Spacer(Modifier.height(28.dp))
             Text(
-                text = if (isDocument) "No Documents Found" else "No Media Found",
+                text = "No Media Found",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                text = if (isDocument) "No documents are currently available." else "No images or videos are currently available.",
+                text = "No images or videos are currently available.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center

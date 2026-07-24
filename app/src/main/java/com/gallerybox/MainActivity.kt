@@ -47,7 +47,6 @@ import dagger.hilt.android.AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Enables edge-to-edge content drawing behind system bars
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 

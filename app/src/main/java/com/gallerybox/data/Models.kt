@@ -15,7 +15,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import com.gallerybox.engine.PdfRenderSession
 import kotlinx.coroutines.flow.Flow
 import kotlinx.parcelize.IgnoredOnParcel
 import kotlinx.parcelize.Parcelize
@@ -30,14 +29,6 @@ private val headerDateFormatter = object : ThreadLocal<SimpleDateFormat>() {
     override fun initialValue() = SimpleDateFormat("MMMM dd, yyyy", Locale.getDefault())
 }
 
-@Dao
-interface DocumentMetadataDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(metadata: DocumentMetadata)
-
-    @Query("SELECT * FROM document_metadata WHERE id = :id")
-    suspend fun getById(id: Long): DocumentMetadata?
-}
 
 class Converters {
     @TypeConverter
@@ -83,20 +74,24 @@ class Converters {
     fun toUri(uriString: String?): Uri? = uriString?.let { Uri.parse(it) }
 }
 
-private val supportedDocExtensions = setOf(
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt",
-    "json", "xml", "html", "htm", "md", "rtf", "odt", "ods", "odp",
-    "epub", "zip", "kt", "java", "cpp", "c", "py", "js", "ts",
-    "gradle", "sh", "bat", "cs", "swift", "go", "rs", "yaml"
+data class MosaicRegion(
+    val region: RectF,
+    val intensity: Float = 1f,
+    val isVisible: Boolean = true
+)
+data class DrawLayer(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val points: List<DrawPoint> = emptyList(),
+    val color: Int,
+    val width: Float,
+    val zIndex: Int = 0,
+    val isVisible: Boolean = true
 )
 
-fun isMediaDoc(item: MediaItem): Boolean {
-    if (item.isDocument) return true
-    val ext = item.name.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT)
-    return ext in supportedDocExtensions
-}
-
-
+data class DrawPoint(
+    val x: Float,
+    val y: Float
+)
 data class MediaItem(
     val id: Long,
     val uri: Uri,
@@ -106,8 +101,6 @@ data class MediaItem(
     val dateAdded: Long,
     val size: Long,
     val isVideo: Boolean,
-    val isPdf: Boolean = false,
-    val isDocument: Boolean = false,
     val duration: Long = 0,
     val width: Int = 0,
     val height: Int = 0,
@@ -250,21 +243,7 @@ data class ExportSettings(
     val resolution: Pair<Int, Int> = Pair(1920, 1080)
 )
 
-data class DrawLayer(
-    val id: String,
-    val points: List<Offset> = emptyList(),
-    val color: Int,
-    val width: Float,
-    val isVisible: Boolean = true,
-    val zIndex: Int = 0
-)
 
-data class MosaicLayer(
-    val id: String = UUID.randomUUID().toString(),
-    val region: RectF,
-    val intensity: Float = 0.5f,
-    val isVisible: Boolean = true
-)
 
 // --- EDITOR STATE ---
 
@@ -299,7 +278,7 @@ data class EditState(
     val trimEndMs: Long = 0L,
     val cutOutStartMs: Long = 0L, // Added for Ripple Delete
     val cutOutEndMs: Long = 0L,   // Added for Ripple Delete
-    val mosaicRegions: List<MosaicLayer> = emptyList(),
+
 
     // Audio
     val videoVolume: Float = 1f,
@@ -308,8 +287,7 @@ data class EditState(
     // Overlays
     val frames: List<FrameLayer> = emptyList(),
     val stickers: List<StickerLayer> = emptyList(),
-    val textLayers: List<TextLayer> = emptyList(),
-    val drawLayers: List<DrawLayer> = emptyList()
+    val textLayers: List<TextLayer> = emptyList()
 )
 
 data class FullMediaMetadata(
@@ -340,17 +318,7 @@ data class PlaylistWithTracks(
     @Relation(parentColumn = "id", entityColumn = "playlistId") val trackRefs: List<PlaylistTrackCrossRef>
 )
 
-data class PdfStroke(
-    val start: Offset,
-    val end: Offset,
-    val color: Color,
-    val width: Float
-)
 
-data class PdfAnnotationState(
-    val pageIndex: Int,
-    val strokes: MutableList<PdfStroke>
-)
 @Entity(tableName = "music_playlists")
 data class PlaylistEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -447,16 +415,6 @@ data class MediaEntity(
     @IgnoredOnParcel
     val isVideo: Boolean
         get() = mediaType.equals("video", ignoreCase = true)
-
-    @IgnoredOnParcel
-    val isPdf: Boolean
-        get() = mimeType == "application/pdf"
-
-    @IgnoredOnParcel
-    val isDocument: Boolean
-        get() = mediaType.equals("document", ignoreCase = true) ||
-                mimeType.startsWith("application/") ||
-                mimeType.startsWith("text/")
 
     fun formatDuration(): String {
         if (duration <= 0) return ""
@@ -606,38 +564,7 @@ data class ManualAlbumEntity(
     val createdAt: Long = System.currentTimeMillis(),
     val hasBeenUsed: Boolean = false
 )
-@Entity(tableName = "document_extra_metadata")
-data class DocumentEntity(
-    @PrimaryKey val mediaId: Long,
-    val pageCount: Int,
-    val wordCount: Int,
-    val sheetCount: Int,
-    val slideCount: Int,
-    val lastOpened: Long
-)
 
-@Entity(tableName = "document_bookmarks")
-data class BookmarkEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val mediaId: Long,
-    val pageIndex: Int,
-    val label: String,
-    val timestamp: Long = System.currentTimeMillis()
-)
-
-@Entity(
-    tableName = "document_search_index",
-    indices = [
-        Index(value = ["mediaId"]),
-        Index(value = ["content"])
-    ]
-)
-data class SearchIndexEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val mediaId: Long,
-    val pageIndex: Int,
-    val content: String
-)
 @Dao
 @JvmSuppressWildcards
 interface MusicDao {
@@ -726,14 +653,8 @@ abstract class GalleryDao {
     @Query("SELECT * FROM media_table ORDER BY dateAdded DESC")
     abstract fun getAllMedia(): Flow<List<MediaEntity>>
 
-    @Query("SELECT * FROM media_table WHERE mediaType = 'document' OR mimeType LIKE 'application/%' OR mimeType LIKE 'text/%' ORDER BY dateAdded DESC")
-    abstract fun getAllDocuments(): Flow<List<MediaEntity>>
-
     @Query("SELECT * FROM media_table")
     abstract fun getAllMediaSync(): List<MediaEntity>
-
-    @Query("SELECT * FROM media_table WHERE mediaType = 'document' OR mimeType LIKE 'application/%' OR mimeType LIKE 'text/%'")
-    abstract fun getDocumentsSync(): List<MediaEntity>
 
     @Query("SELECT * FROM media_table ORDER BY dateAdded DESC LIMIT :limit OFFSET :offset")
     abstract suspend fun getMediaChunk(limit: Int, offset: Int): List<MediaEntity>
@@ -771,7 +692,7 @@ abstract class GalleryDao {
     @Query("SELECT COUNT(*) FROM trash WHERE mediaType = :mediaType")
     abstract suspend fun getTrashCountByType(mediaType: String): Int
 
-    @Query("SELECT * FROM trash WHERE mediaType IN ('image', 'video', 'audio', 'document', 'story') ORDER BY deletedTimestamp DESC")
+    @Query("SELECT * FROM trash WHERE mediaType IN ('image', 'video', 'audio', 'story') ORDER BY deletedTimestamp DESC")
     abstract fun getUnifiedTrash(): Flow<List<TrashEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -925,38 +846,7 @@ interface AlbumThumbnailDao {
     fun getAlbumThumbnailsFlow(): Flow<List<AlbumThumbnail>>
 }
 
-@Dao
-interface DocumentDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertDocumentMetadata(meta: DocumentEntity)
 
-    @Query("SELECT * FROM document_extra_metadata WHERE mediaId = :mediaId")
-    suspend fun getDocumentMetadata(mediaId: Long): DocumentEntity?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertBookmark(bookmark: BookmarkEntity): Long
-
-    @Query("SELECT * FROM document_bookmarks WHERE mediaId = :mediaId ORDER BY timestamp DESC")
-    fun getBookmarksForMedia(mediaId: Long): Flow<List<BookmarkEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertSearchIndex(items: List<SearchIndexEntity>)
-
-    @Query("SELECT mediaId FROM document_search_index WHERE content LIKE '%' || :query || '%'")
-    suspend fun searchDocuments(query: String): List<Long>
-}
-
-@Entity(tableName = "document_metadata")
-data class DocumentMetadata(
-    @PrimaryKey val id: Long,
-    val pageCount: Int = 0,
-    val wordCount: Int = 0,
-    val sheetCount: Int = 0,
-    val slideCount: Int = 0,
-    val fileSize: Long = 0,
-    val lastOpened: Long = 0,
-    val lastViewedPage: Int = 0
-)
 
 @Database(
     entities = [
@@ -982,11 +872,7 @@ data class DocumentMetadata(
         PlaylistTrackCrossRef::class,
         TrackStatEntity::class,
         ManualAlbumEntity::class,
-        UsageEntity::class,
-        DocumentMetadata::class,
-        DocumentEntity::class,
-        BookmarkEntity::class,
-        SearchIndexEntity::class
+        UsageEntity::class
     ],
     version = 15,
     exportSchema = false
@@ -996,8 +882,6 @@ abstract class GalleryDatabase : RoomDatabase() {
     abstract fun galleryDao(): GalleryDao
     abstract fun albumThumbnailDao(): AlbumThumbnailDao
     abstract fun musicDao(): MusicDao
-    abstract fun documentMetadataDao(): DocumentMetadataDao
-    abstract fun documentDao(): DocumentDao
 
     companion object {
         const val DATABASE_NAME = "gallerybox_db"
@@ -1013,17 +897,6 @@ abstract class GalleryDatabase : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS `media_usage_stats` (`mediaId` INTEGER NOT NULL, `openCount` INTEGER NOT NULL, `lastOpened` INTEGER NOT NULL, PRIMARY KEY(`mediaId`))")
             }
         }
-
-        val MIGRATION_14_15 = object : Migration(14, 15) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("CREATE TABLE IF NOT EXISTS `document_metadata` (`id` INTEGER NOT NULL, `pageCount` INTEGER NOT NULL, `wordCount` INTEGER NOT NULL, `sheetCount` INTEGER NOT NULL, `slideCount` INTEGER NOT NULL, `fileSize` INTEGER NOT NULL, `lastOpened` INTEGER NOT NULL, `lastViewedPage` INTEGER NOT NULL, PRIMARY KEY(`id`))")
-                db.execSQL("CREATE TABLE IF NOT EXISTS `document_extra_metadata` (`mediaId` INTEGER NOT NULL, `pageCount` INTEGER NOT NULL, `wordCount` INTEGER NOT NULL, `sheetCount` INTEGER NOT NULL, `slideCount` INTEGER NOT NULL, `lastOpened` INTEGER NOT NULL, PRIMARY KEY(`mediaId`))")
-                db.execSQL("CREATE TABLE IF NOT EXISTS `document_bookmarks` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `mediaId` INTEGER NOT NULL, `pageIndex` INTEGER NOT NULL, `label` TEXT NOT NULL, `timestamp` INTEGER NOT NULL)")
-                db.execSQL("CREATE TABLE IF NOT EXISTS `document_search_index` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `mediaId` INTEGER NOT NULL, `pageIndex` INTEGER NOT NULL, `content` TEXT NOT NULL)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS `index_document_search_index_mediaId` ON `document_search_index` (`mediaId`)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS `index_document_search_index_content` ON `document_search_index` (`content`)")
-            }
-        }
     }
 }
 
@@ -1035,7 +908,6 @@ fun MediaItem.toEntity() = MediaEntity(
     size = size,
     mediaType = when {
         isVideo -> "video"
-        isDocument || isPdf -> "document"
         else -> "image"
     },
     mimeType = mimeType,
@@ -1060,10 +932,6 @@ fun MediaEntity.toMediaItem() = MediaItem(
     dateAdded = dateAdded,
     size = size,
     isVideo = mediaType.equals("video", ignoreCase = true),
-    isPdf = mimeType == "application/pdf",
-    isDocument = mediaType.equals("document", ignoreCase = true) ||
-            mimeType.startsWith("application/") ||
-            mimeType.startsWith("text/"),
     duration = duration,
     width = width,
     height = height,
@@ -1072,260 +940,3 @@ fun MediaEntity.toMediaItem() = MediaItem(
     bucketName = bucketName,
     isHidden = false
 )
-
-
-enum class DocumentType(val priority: Int) {
-    PDF(0), WORD(1), EXCEL(2), SLIDE(3), JSON(4), XML(5), HTML(6), CODE(7), TXT(8), CSV(9), EPUB(10), MARKDOWN(11), ZIP(12), RTF(13), SYSTEM(14), UNKNOWN(15)
-}
-
-enum class DocumentSortType {
-    DATE, SIZE, NAME, RECENT
-}
-
-data class SearchOptions(
-    val query: String,
-    val caseSensitive: Boolean = false,
-    val wholeWord: Boolean = false,
-    val isRegex: Boolean = false
-)
-
-data class WordRun(
-    val text: String,
-    val bold: Boolean = false,
-    val italic: Boolean = false,
-    val underline: Boolean = false,
-    val fontSize: Int? = 16,
-    val colorHex: String? = "#000000",
-    val isSubscript: Boolean = false,
-    val isSuperscript: Boolean = false,
-    val fontFamily: String? = null,
-    val isHighlighted: Boolean = false
-)
-
-data class PageMargins(
-    val top: Float,
-    val bottom: Float,
-    val left: Float,
-    val right: Float,
-    val isLandscape: Boolean
-)
-
-data class TableRow(val cells: List<TableCell>)
-
-data class TableCell(val blocks: List<WordBlock>)
-
-sealed class WordBlock {
-    data class Paragraph(
-        val runs: List<WordRun>,
-        val alignment: String? = null,
-        val headingLevel: Int? = null,
-        val isListItem: Boolean = false
-    ) : WordBlock()
-
-    data class Table(val rows: List<TableRow>) : WordBlock()
-
-    data class Image(
-        val byteArray: ByteArray,
-        val extension: String,
-        val fileName: String,
-        val inline: Boolean = false
-    ) : WordBlock() {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (javaClass != other?.javaClass) return false
-            other as Image
-            if (!byteArray.contentEquals(other.byteArray)) return false
-            return true
-        }
-
-        override fun hashCode(): Int {
-            return byteArray.contentHashCode()
-        }
-    }
-
-    data class Header(val blocks: List<WordBlock>) : WordBlock()
-
-    data class Footer(val blocks: List<WordBlock>) : WordBlock()
-}
-
-data class VirtualSheet(
-    val name: String,
-    val rows: List<VirtualRow>,
-    val rowCount: Int,
-    val columnCount: Int,
-    val mergedRegions: List<String> = emptyList()
-)
-
-data class VirtualRow(
-    val rowIndex: Int,
-    val cells: List<VirtualCell>,
-    val isHidden: Boolean
-)
-
-data class VirtualCell(
-    val columnIndex: Int,
-    val displayValue: String,
-    val rawValue: String,
-    val isFormula: Boolean,
-    val formulaString: String? = null,
-    val comment: String? = null,
-    val style: CellStyle? = null,
-    val isHidden: Boolean = false
-)
-
-data class CellStyle(
-    val bgColor: String?,
-    val textColor: String?,
-    val bold: Boolean,
-    val italic: Boolean,
-    val alignment: String,
-    val hasBorders: Boolean
-)
-
-sealed class TextReadResult {
-    data class Success(val text: String, val syntaxMode: String, val lineOffsets: List<Long>) : TextReadResult()
-    data class Preview(val text: String, val syntaxMode: String, val lineOffsets: List<Long>, val totalBytes: Long) : TextReadResult()
-    data class Paged(val uri: Uri, val encoding: Charset, val totalBytes: Long) : TextReadResult()
-    data class BinaryFile(val confidence: Float) : TextReadResult()
-    data class Error(val message: String, val exception: Throwable? = null) : TextReadResult()
-}
-
-data class ZipEntryItem(
-    val name: String,
-    val size: Long,
-    val compressedSize: Long,
-    val time: Long,
-    val crc: Long,
-    val isDirectory: Boolean
-)
-
-data class EpubChapter(
-    val id: String,
-    val title: String,
-    val contentHtml: String,
-    val isCover: Boolean = false
-)
-
-sealed class PdfLoadResult {
-    data class Success(val pageCount: Int) : PdfLoadResult()
-    data class Encrypted(val message: String) : PdfLoadResult()
-    data class Error(val message: String, val exception: Throwable? = null) : PdfLoadResult()
-}
-
-sealed class EngineResult {
-    data class OpenPdf(val uri: Uri, val session: PdfRenderSession) : EngineResult()
-    data class OpenWord(val blocks: List<WordBlock>) : EngineResult()
-    data class OpenExcel(val sheets: List<VirtualSheet>) : EngineResult()
-    data class OpenCsv(val sheet: VirtualSheet) : EngineResult()
-    data class OpenSlide(val pages: List<SlidePage>) : EngineResult()
-    data class OpenEpub(val chapters: List<EpubChapter>) : EngineResult()
-    data class OpenZip(val contents: List<ZipEntryItem>) : EngineResult()
-    data class OpenText(val content: String, val type: DocumentType) : EngineResult()
-    data class Unsupported(val format: String, val mimeType: String) : EngineResult()
-    data class Error(val message: String) : EngineResult()
-}
-
-data class SlidePage(
-    val width: Float,
-    val height: Float,
-    val elements: List<SlideElement>
-)
-
-sealed class SlideElement {
-    abstract val x: Float
-    abstract val y: Float
-    abstract val width: Float
-    abstract val height: Float
-
-    data class Text(
-        val text: String,
-        override val x: Float,
-        override val y: Float,
-        override val width: Float,
-        override val height: Float,
-        val fontSize: Float? = null
-    ) : SlideElement()
-
-    data class Image(
-        val byteArray: ByteArray,
-        val extension: String,
-        override val x: Float,
-        override val y: Float,
-        override val width: Float,
-        override val height: Float
-    ) : SlideElement() {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (javaClass != other?.javaClass) return false
-            other as Image
-            if (!byteArray.contentEquals(other.byteArray)) return false
-            return true
-        }
-
-        override fun hashCode(): Int {
-            return byteArray.contentHashCode()
-        }
-    }
-
-    data class Table(
-        override val x: Float,
-        override val y: Float,
-        override val width: Float,
-        override val height: Float,
-        val rows: Int,
-        val cols: Int
-    ) : SlideElement()
-
-    data class Shape(
-        val shapeType: String,
-        val text: String?,
-        override val x: Float,
-        override val y: Float,
-        override val width: Float,
-        override val height: Float
-    ) : SlideElement()
-}
-
-sealed class CacheEntry {
-    data class PdfPage(val bitmap: Bitmap, val timestamp: Long = System.currentTimeMillis()) : CacheEntry()
-}
-
-data class DocumentFile(
-    val id: Long,
-    val name: String,
-    val uri: Uri,
-    val size: Long,
-    val dateModified: Long,
-    val mimeType: String?,
-    val type: DocumentType
-)
-data class ReadingState(
-    val uri: Uri,
-    val page: Int,
-    val scale: Float,
-    val offsetX: Float,
-    val offsetY: Float,
-    val timestamp: Long = System.currentTimeMillis()
-)
-
-sealed class DocumentErrorType {
-    data object PasswordProtected : DocumentErrorType()
-    data object Corrupted : DocumentErrorType()
-    data object Unsupported : DocumentErrorType()
-    data object Timeout : DocumentErrorType()
-    data class Generic(val message: String) : DocumentErrorType()
-}
-
-sealed class DocumentUiEvent {
-    data class LaunchIntent(val intent: Intent) : DocumentUiEvent()
-    data class ShowToast(val message: String) : DocumentUiEvent()
-    data class DocumentError(val error: DocumentErrorType) : DocumentUiEvent()
-    data class OpenPdf(val uri: Uri, val pageCount: Int) : DocumentUiEvent()
-    data class OpenWord(val blocks: List<WordBlock>) : DocumentUiEvent()
-    data class OpenExcel(val sheets: List<VirtualSheet>) : DocumentUiEvent()
-    data class OpenSlide(val pages: List<SlidePage>) : DocumentUiEvent()
-    data class OpenText(val content: String) : DocumentUiEvent()
-    data class OpenHtml(val uri: Uri) : DocumentUiEvent()
-    data class OpenEpub(val chapters: List<EpubChapter>) : DocumentUiEvent()
-    data class OpenZip(val contents: List<ZipEntryItem>) : DocumentUiEvent()
-}

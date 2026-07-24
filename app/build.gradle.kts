@@ -255,15 +255,6 @@ dependencies {
     implementation("androidx.paging:paging-compose:$pagingVersion")
     implementation("androidx.paging:paging-common:$pagingVersion")
 
-    // Apache POI
-    implementation("org.apache.poi:poi-ooxml:5.2.5")
-    implementation("org.apache.poi:poi:5.2.5")
-    implementation("org.apache.xmlbeans:xmlbeans:5.2.0")
-
-    // PDF Support
-    implementation("androidx.pdf:pdf-viewer-fragment:1.0.0-alpha11")
-    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
-    implementation("androidx.documentfile:documentfile:1.0.1")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

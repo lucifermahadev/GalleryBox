@@ -3,8 +3,6 @@ package com.gallerybox.di
 import android.content.Context
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.room.Room
-import com.gallerybox.data.DocumentDao
-import com.gallerybox.data.DocumentMetadataDao
 import com.gallerybox.data.GalleryDao
 import com.gallerybox.data.GalleryDatabase
 import com.gallerybox.data.MusicDao
@@ -44,13 +42,4 @@ object AppModule {
     @Singleton
     fun provideMusicDao(database: GalleryDatabase): MusicDao = database.musicDao()
 
-    @Provides
-    @Singleton
-    fun provideDocumentMetadataDao(database: GalleryDatabase): DocumentMetadataDao =
-        database.documentMetadataDao()
-
-    @Provides
-    @Singleton
-    fun provideDocumentDao(database: GalleryDatabase): DocumentDao =
-        database.documentDao()
 }

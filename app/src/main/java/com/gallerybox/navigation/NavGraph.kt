@@ -1,3 +1,4 @@
+@file:Suppress("unused")
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 
 package com.gallerybox.navigation
@@ -17,6 +18,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -46,7 +48,6 @@ import com.gallerybox.ui.screens.album.*
 import com.gallerybox.ui.screens.editor.EditorScreen
 import com.gallerybox.ui.screens.file.*
 import com.gallerybox.ui.screens.music.*
-import com.gallerybox.ui.screens.pdf.*
 import com.gallerybox.ui.screens.picture.PictureScreen
 import com.gallerybox.ui.screens.setting.SettingScreen
 import com.gallerybox.ui.screens.stories.StoriesScreen
@@ -66,9 +67,6 @@ sealed interface Route {
     // Camera Shortcut
     @Serializable data object Camera : Route
 
-    // Documents
-    @Serializable data object DocumentReader : Route
-    @Serializable data class DocumentViewer(val fileId: Long) : Route
 
     // General Utilities
     @Serializable data object Vault : Route
@@ -262,8 +260,6 @@ private fun NavGraphBuilder.mainTabs(
             onNavigateToAlbum = { raw -> nav.navigate(Route.AlbumView(raw.toSafeRouteArgs())) },
             onNavigateToScan = { nav.navigate(Route.ScanLibrary) },
             onNavigateToSettings = { nav.navigate(Route.Settings) },
-            onNavigateToDocs = { nav.navigate(Route.DocumentReader) },
-            onNavigateToDocViewer = { id -> nav.navigate(Route.DocumentViewer(id)) },
             onNavigateToVideoPlayer = navToVid,
             onNavigateToEditor = { uri, id -> nav.navigate(Route.MediaEditor(uri.toSafeRouteArgs(), id)) },
             onNavigateToMoveCopy = { m, ids, src -> nav.navigate(Route.MoveCopy(m, ids, src?.toSafeRouteArgs())) }
@@ -364,21 +360,6 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     composable<Route.DuoMusic> { DuoMusicScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
     composable<Route.Settings> { SettingScreen(onBack = { nav.popBackStack() }) }
 
-    composable<Route.DocumentReader> {
-        AllDocumentReaderScreen(
-            onBack = { nav.popBackStack() },
-            onOpenDocument = { fileId -> nav.navigate(Route.DocumentViewer(fileId)) }
-        )
-    }
-
-    composable<Route.DocumentViewer> { backStackEntry ->
-        val route = backStackEntry.toRoute<Route.DocumentViewer>()
-        DocumentViewerScreen(
-            fileId = route.fileId,
-            onBack = { nav.popBackStack() }
-        )
-    }
-
     composable<Route.Wallpaper> { backStack ->
         val galVM: GalleryViewModel = hiltViewModel()
         val args = backStack.toRoute<Route.Wallpaper>()
@@ -462,7 +443,6 @@ fun BottomNavigationBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                // FIX: Chained padding to safely apply horizontal and vertical separately
                 .padding(horizontal = 12.dp)
                 .padding(top = 12.dp, bottom = 16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,

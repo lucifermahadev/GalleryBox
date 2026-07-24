@@ -315,17 +315,17 @@ fun AlbumScreen(
 
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
+    var isDragging by remember { mutableStateOf(false) }
 
     LaunchedEffect(viewerState) {
         onViewerStateChanged(viewerState is GalleryViewerState.Open)
     }
 
-    // Explicitly converting Map values to ImmutableList to fix Type Mismatch error
     val albumPreviews = remember(rawAlbumPreviews) {
         rawAlbumPreviews.mapValues { it.value.toImmutableList() }.toImmutableMap()
     }
 
-    val displayAlbums = remember(vmAlbums, searchQuery, sortOption) {
+    val displayAlbums: ImmutableList<Album> = remember(vmAlbums, searchQuery, sortOption) {
         val virtualAlbums = vmAlbums
             .filter { it.id.startsWith("virtual_") && albumMatchesQuery(it, searchQuery) }
             .sortedBy {
@@ -342,7 +342,6 @@ fun AlbumScreen(
         val sortedUserAlbums = if (sortOption == AlbumSort.Custom) {
             userAlbums
         } else {
-            // Explicit Comparator completely fixes the 'Comparable.compareTo' operator error
             userAlbums.sortedWith(Comparator { a, b ->
                 if (a.isPinned != b.isPinned) {
                     b.isPinned.compareTo(a.isPinned)
@@ -360,7 +359,13 @@ fun AlbumScreen(
         (virtualAlbums + sortedUserAlbums).toImmutableList()
     }
 
-    var dynamicList by remember(displayAlbums) { mutableStateOf(displayAlbums) }
+    var dynamicList: ImmutableList<Album> by remember { mutableStateOf(displayAlbums) }
+
+    LaunchedEffect(displayAlbums) {
+        if (!isDragging) {
+            dynamicList = displayAlbums
+        }
+    }
 
     val configuration = LocalConfiguration.current
     val screenWidthDp = configuration.screenWidthDp.toFloat()
@@ -494,8 +499,6 @@ fun AlbumScreen(
                     onOrderSaved = { viewModel.saveCustomAlbumOrder(it) },
                     onAlbumClick = { album ->
                         if (isSelectionMode) {
-                            // Using standard plus/minus operators explicitly returns a new set,
-                            // fixing the WindowInsets clash error.
                             selectedIds = if (selectedIds.contains(album.id)) {
                                 (selectedIds - album.id).toImmutableSet()
                             } else {
@@ -517,7 +520,8 @@ fun AlbumScreen(
                         } else {
                             dynamicList.map { it.id }.toImmutableSet()
                         }
-                    }
+                    },
+                    onDragStateChange = { isDragging = it }
                 )
             }
         }
@@ -835,7 +839,8 @@ fun AlbumScreen(
                 containerColor = MaterialTheme.colorScheme.surface
             ) {
                 val hiddenAlbums by viewModel.hiddenAlbums.collectAsState()
-                val filterAlbums = allAlbums.filter { !it.id.startsWith("virtual_") }
+
+                val initialAlbums = remember { allAlbums.filter { !it.id.startsWith("virtual_") } }
 
                 Column(
                     Modifier
@@ -852,7 +857,7 @@ fun AlbumScreen(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(bottom = 12.dp)
                     ) {
-                        items(filterAlbums, key = { it.id }) { album ->
+                        items(initialAlbums, key = { it.id }) { album ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -888,7 +893,7 @@ fun AlbumScreen(
 }
 
 // ============================================================================
-// 2. ALBUM DETAIL SCREEN (Optimized)
+// 2. ALBUM DETAIL SCREEN (Optimized & Strongly Typed)
 // ============================================================================
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -908,9 +913,25 @@ fun AlbumDetailScreen(
 
     val mediaMap by viewModel.mediaMap.collectAsState()
     val favoriteIds by viewModel.favoriteIds.collectAsState()
-    val rawMedia by viewModel.rawMedia.collectAsState()
     val vmAlbums by viewModel.albumsState.collectAsState(initial = emptyList())
     val viewerState by viewModel.viewerState.collectAsState()
+    val rawMedia by viewModel.rawMedia.collectAsState()
+
+    // Fully typed explicit cache to resolve all compiler inference issues
+    val albumMedia: List<MediaItem> = remember(rawMedia, albumId, favoriteIds) {
+        rawMedia.filter { item ->
+            when (albumId) {
+                ID_FAVORITES -> favoriteIds.contains(item.id)
+                ID_VIDEOS -> item.isVideo
+                ID_SCREENSHOTS -> item.path.contains("Screenshot", true) || item.path.contains("Screenshots", true)
+                ID_DOWNLOADS -> item.path.contains("Download", true)
+                ID_WHATSAPP -> item.path.contains("WhatsApp", true)
+                ID_INSTAGRAM -> item.path.contains("Instagram", true)
+                ID_RECENT -> true
+                else -> item.bucketId == albumId
+            }
+        }
+    }
 
     var activeDialog by remember { mutableStateOf<DetailUiDialog>(DetailUiDialog.None) }
     var metadataItemToShow by remember { mutableStateOf<MediaItem?>(null) }
@@ -967,8 +988,8 @@ fun AlbumDetailScreen(
 
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
-    val screenWidthDp = configuration.screenWidthDp.toFloat()
     val screenWidthPx = with(density) { configuration.screenWidthDp.dp.roundToPx() }
+    val screenWidthDp = configuration.screenWidthDp.toFloat()
 
     val adaptiveCols = remember(screenWidthDp) {
         when {
@@ -1003,23 +1024,13 @@ fun AlbumDetailScreen(
         viewModel.closeViewer()
     }
 
-    val filteredMedia = remember(rawMedia, albumId, mediaFilter, localSearchQuery, currentPhotoSort, favoriteIds) {
-        val base = rawMedia.filter { item ->
-            when (albumId) {
-                ID_FAVORITES -> favoriteIds.contains(item.id)
-                ID_VIDEOS -> item.isVideo
-                ID_SCREENSHOTS -> item.path.contains("Screenshot", true) || item.path.contains("Screenshots", true)
-                ID_DOWNLOADS -> item.path.contains("Download", true)
-                ID_WHATSAPP -> item.path.contains("WhatsApp", true)
-                ID_INSTAGRAM -> item.path.contains("Instagram", true)
-                ID_RECENT -> true
-                else -> item.bucketId == albumId
-            }
-        }.filter {
+    // Fully typed explicit cache to resolve all compiler inference issues
+    val filteredMedia: ImmutableList<MediaItem> = remember(albumMedia, mediaFilter, localSearchQuery, currentPhotoSort) {
+        val base = albumMedia.filter { item ->
             when (mediaFilter) {
                 AlbumMediaFilter.ALL -> true
-                AlbumMediaFilter.PHOTOS -> !it.isVideo
-                AlbumMediaFilter.VIDEOS -> it.isVideo
+                AlbumMediaFilter.PHOTOS -> !item.isVideo
+                AlbumMediaFilter.VIDEOS -> item.isVideo
             }
         }
 
@@ -1030,7 +1041,6 @@ fun AlbumDetailScreen(
             base.filter { it.name.lowercase().contains(q) || getSmartName(it).lowercase().contains(q) }
         }
 
-        // Using explicit Comparator to avoid Comparable operator issues inside generic maps
         val comparator = when (currentPhotoSort) {
             PhotoSort.DateDesc -> Comparator<MediaItem> { a, b -> b.dateAdded.compareTo(a.dateAdded) }
             PhotoSort.DateAsc -> Comparator<MediaItem> { a, b -> a.dateAdded.compareTo(b.dateAdded) }
@@ -1589,7 +1599,7 @@ fun AlbumDetailScreen(
                     Button(
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         onClick = {
-                            val itemsToTrash = rawMedia.filter { dialog.mediaIds.contains(it.id) }
+                            val itemsToTrash = albumMedia.filter { dialog.mediaIds.contains(it.id) }
                             trashViewModel.confirmPendingGalleryTrash(itemsToTrash)
                             activeDialog = DetailUiDialog.None
                             isSelectionMode = false
@@ -1733,7 +1743,8 @@ fun StatelessAlbumGrid(
     onOrderSaved: (List<Album>) -> Unit,
     onAlbumClick: (Album) -> Unit,
     onAlbumLongClick: (Album) -> Unit,
-    onSelectAll: (Boolean) -> Unit
+    onSelectAll: (Boolean) -> Unit,
+    onDragStateChange: (Boolean) -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
     var draggedIndex by remember { mutableIntStateOf(-1) }
@@ -1822,6 +1833,7 @@ fun StatelessAlbumGrid(
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     draggedIndex = index
                                     dragOffset = Offset.Zero
+                                    onDragStateChange(true)
                                 },
                                 onDrag = { change, dragAmount ->
                                     change.consume()
@@ -1869,11 +1881,13 @@ fun StatelessAlbumGrid(
                                     draggedIndex = -1
                                     dragOffset = Offset.Zero
                                     scrollVelocity = 0f
+                                    onDragStateChange(false)
                                 },
                                 onDragCancel = {
                                     draggedIndex = -1
                                     dragOffset = Offset.Zero
                                     scrollVelocity = 0f
+                                    onDragStateChange(false)
                                 }
                             )
                         }
@@ -3492,11 +3506,6 @@ fun FullscreenMediaPager(
                         tint = if (favoriteIds.contains(currentItem.id)) Color.Red else Color.White
                     ) {
                         onToggleFavorite(currentItem.id)
-                    }
-                    if (!currentItem.isDocument) {
-                        PremiumViewerAction(Icons.Outlined.Edit, "Edit") {
-                            onEdit(currentItem)
-                        }
                     }
                     PremiumViewerAction(Icons.Outlined.Share, "Share") {
                         val mimeType = if (currentItem.isVideo) "video/*" else "image/*"

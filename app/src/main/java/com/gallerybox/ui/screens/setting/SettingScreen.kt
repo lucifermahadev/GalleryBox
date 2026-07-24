@@ -1,3 +1,5 @@
+@file:Suppress("unused", "OPT_IN_USAGE", "DEPRECATION")
+
 package com.gallerybox.ui.screens.setting
 
 import android.content.Context
@@ -284,7 +286,6 @@ class SettingsViewModel @Inject constructor(
             repository.setNsfwProtection(enabled)
         }
     }
-
 
     fun toggleVaultHideIcon(enabled: Boolean) {
         viewModelScope.launch {

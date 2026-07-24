@@ -142,8 +142,7 @@ class EditorViewModel @Inject constructor(
                 filterId = null,
                 textLayers = emptyList(),
                 stickers = emptyList(),
-                drawLayers = emptyList(),
-                mosaicRegions = emptyList()
+                frames = emptyList()
             )
             editHistory.add(initialState)
             currentEditIndex = 0
@@ -357,12 +356,6 @@ class EditorViewModel @Inject constructor(
     fun rotateRight() = updateEditState { it.copy(rotationDegrees = (it.rotationDegrees + 90f) % 360f) }
     fun toggleFlipHorizontal() = updateEditState { it.copy(flipHorizontal = !it.flipHorizontal) }
     fun toggleFlipVertical() = updateEditState { it.copy(flipVertical = !it.flipVertical) }
-
-    fun addDrawStroke(stroke: DrawLayer) = updateEditState { it.copy(drawLayers = it.drawLayers + stroke) }
-    fun clearDrawings() = updateEditState { it.copy(drawLayers = emptyList()) }
-    fun addMosaicRegion(region: RectF, intensity: Float) = updateEditState {
-        it.copy(mosaicRegions = it.mosaicRegions + MosaicLayer(id = UUID.randomUUID().toString(), region = region, intensity = intensity))
-    }
 
     fun addText(text: String, color: Int = Color.WHITE, size: Float = 40f) = updateEditState { state ->
         val offset = (state.textLayers.size % 5) * 0.04f

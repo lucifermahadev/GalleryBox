@@ -3,7 +3,6 @@
 package com.gallerybox.ui.screens
 
 import android.content.Context
-import android.net.Uri
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
@@ -31,7 +30,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Lock
-import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Photo
 import androidx.compose.material.icons.rounded.Storage
@@ -66,7 +64,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.gallerybox.viewmodel.DocumentViewModel
 import com.gallerybox.viewmodel.GalleryViewModel
 import com.gallerybox.viewmodel.MusicViewModel
 import kotlinx.coroutines.isActive
@@ -78,22 +75,20 @@ fun ScanLibraryScreen(
     onBack: () -> Unit,
     onLockApp: () -> Unit = {},
     galleryViewModel: GalleryViewModel = hiltViewModel(),
-    musicViewModel: MusicViewModel = hiltViewModel(),
-    documentViewModel: DocumentViewModel = hiltViewModel()
+    musicViewModel: MusicViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-
-    // Access SharedPreferences to fetch the SAF folder URI
-    val prefs = remember { context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE) }
-
-    val isGalleryBusy by galleryViewModel.isBusy.collectAsState()
-    val isDocsBusy by documentViewModel.isListLoading.collectAsState()
-    val isScanning = isGalleryBusy || isDocsBusy
-
     val mediaList by galleryViewModel.media.collectAsState()
-    val docList by documentViewModel.documents.collectAsState()
     val allSongs by musicViewModel.allAudioTracks.collectAsState()
+
+    // Automatically trigger scanning when the screen opens
+    LaunchedEffect(Unit) {
+        launch {
+            galleryViewModel.forceSync()
+        }
+        musicViewModel.loadAllAudioTracks()
+    }
 
     val photoCount = remember(mediaList) {
         mediaList.count { !it.isVideo }
@@ -103,19 +98,8 @@ fun ScanLibraryScreen(
         mediaList.count { it.isVideo }
     }
 
-    val docCount = remember(docList) {
-        docList.size
-    }
-
     val songCount = remember(allSongs) {
         allSongs.size
-    }
-
-    val totalSize = remember(mediaList, docList) {
-        Formatter.formatShortFileSize(
-            context,
-            mediaList.sumOf { it.size } + docList.sumOf { it.size }
-        )
     }
 
     Scaffold(
@@ -157,39 +141,15 @@ fun ScanLibraryScreen(
         ) {
             Spacer(modifier = Modifier.height(32.dp))
 
-            ScannerVisual(isScanning = isScanning)
-
-            Spacer(modifier = Modifier.height(40.dp))
-
-            ScannerStatusText(
-                isScanning = isScanning,
-                totalSize = totalSize
-            )
-
             Spacer(modifier = Modifier.height(48.dp))
 
             LibraryStatsGrid(
                 photos = photoCount,
                 videos = videoCount,
-                audio = songCount,
-                docs = docCount
+                audio = songCount
             )
 
             Spacer(modifier = Modifier.weight(1f))
-
-            RefreshButton(isScanning = isScanning) {
-                coroutineScope.launch {
-                    galleryViewModel.forceSync()
-                }
-
-                // Fetch URI and pass it to the updated document scanner
-                val savedUriStr = prefs.getString("document_tree_uri", null)
-                if (savedUriStr != null) {
-                    documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
-                }
-
-                musicViewModel.loadAllAudioTracks()
-            }
         }
     }
 }
@@ -278,7 +238,7 @@ fun ScannerStatusText(isScanning: Boolean, totalSize: String) {
     ) { scanning ->
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                text = if (scanning) "Scanning Photos, Videos and Documents..." else "Library Up to Date",
+                text = if (scanning) "Scanning Photos, Videos and Audio..." else "Library Up to Date",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center
@@ -295,7 +255,7 @@ fun ScannerStatusText(isScanning: Boolean, totalSize: String) {
 }
 
 @Composable
-fun LibraryStatsGrid(photos: Int, videos: Int, audio: Int, docs: Int) {
+fun LibraryStatsGrid(photos: Int, videos: Int, audio: Int) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -324,12 +284,7 @@ fun LibraryStatsGrid(photos: Int, videos: Int, audio: Int, docs: Int) {
                 label = "Audio",
                 icon = Icons.Rounded.MusicNote
             )
-            StatCard(
-                modifier = Modifier.weight(1f),
-                count = docs.toString(),
-                label = "Docs",
-                icon = Icons.Rounded.Description
-            )
+            Spacer(modifier = Modifier.weight(1f))
         }
     }
 }

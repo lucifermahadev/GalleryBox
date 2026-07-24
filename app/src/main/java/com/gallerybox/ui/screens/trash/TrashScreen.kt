@@ -67,7 +67,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import kotlin.random.Random
 
-enum class TrashMediaType { Image, Video, Audio, Document, Story }
+enum class TrashMediaType { Image, Video, Audio, Story }
 
 data class TrashUiItem(
     val id: Long,
@@ -86,7 +86,7 @@ sealed class TrashGridItem {
 }
 
 enum class TrashSort { NewestDeleted, OldestDeleted }
-enum class TrashFilter { All, Images, Videos, Audio, Documents, Stories }
+enum class TrashFilter { All, Images, Videos, Audio, Stories }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -94,7 +94,6 @@ fun TrashScreen(
     trashViewModel: TrashViewModel = hiltViewModel(),
     galleryViewModel: GalleryViewModel = hiltViewModel(),
     musicViewModel: MusicViewModel = hiltViewModel(),
-    documentViewModel: DocumentViewModel = hiltViewModel(),
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -102,9 +101,6 @@ fun TrashScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val lifecycleOwner = LocalLifecycleOwner.current
     val haptics = LocalHapticFeedback.current
-
-    // Fetch SAF preferences for documents
-    val prefs = remember { context.getSharedPreferences("DocPrefs", Context.MODE_PRIVATE) }
 
     val trashEntities by galleryViewModel.trashBin.collectAsState(initial = emptyList())
     val isGalleryBusy by galleryViewModel.isBusy.collectAsState(initial = false)
@@ -115,19 +111,9 @@ fun TrashScreen(
     LaunchedEffect(Unit) {
         trashViewModel.onRefreshGallery = { galleryViewModel.forceSync() }
         trashViewModel.onRefreshMusic = { musicViewModel.loadAllAudioTracks() }
-        trashViewModel.onRefreshDocuments = {
-            val savedUriStr = prefs.getString("document_tree_uri", null)
-            if (savedUriStr != null) {
-                documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
-            }
-        }
+
         galleryViewModel.refreshData()
         musicViewModel.loadAllAudioTracks()
-
-        val savedUriStr = prefs.getString("document_tree_uri", null)
-        if (savedUriStr != null) {
-            documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
-        }
     }
 
     var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -151,7 +137,6 @@ fun TrashScreen(
             val type = when (entity.mediaType) {
                 "video" -> TrashMediaType.Video
                 "audio" -> TrashMediaType.Audio
-                "document" -> TrashMediaType.Document
                 "story" -> TrashMediaType.Story
                 else -> TrashMediaType.Image
             }
@@ -192,7 +177,6 @@ fun TrashScreen(
             TrashFilter.Images -> trashUiItems.filter { it.type == TrashMediaType.Image }
             TrashFilter.Videos -> trashUiItems.filter { it.type == TrashMediaType.Video }
             TrashFilter.Audio -> trashUiItems.filter { it.type == TrashMediaType.Audio }
-            TrashFilter.Documents -> trashUiItems.filter { it.type == TrashMediaType.Document }
             TrashFilter.Stories -> trashUiItems.filter { it.type == TrashMediaType.Story }
         }
 
@@ -250,10 +234,6 @@ fun TrashScreen(
 
                     galleryViewModel.refreshData()
                     musicViewModel.loadAllAudioTracks()
-                    val savedUriStr = prefs.getString("document_tree_uri", null)
-                    if (savedUriStr != null) {
-                        documentViewModel.loadAllDocuments(Uri.parse(savedUriStr))
-                    }
                 }
                 else -> {}
             }
@@ -404,7 +384,6 @@ fun TrashScreen(
                                                 TrashFilter.Images -> Icons.Rounded.Image
                                                 TrashFilter.Videos -> Icons.Rounded.VideoLibrary
                                                 TrashFilter.Audio -> Icons.Rounded.MusicNote
-                                                TrashFilter.Documents -> Icons.Rounded.Description
                                                 TrashFilter.Stories -> Icons.Rounded.AutoStories
                                             },
                                             contentDescription = null,
@@ -644,7 +623,6 @@ fun TrashScreen(
                             }
                         }
                         TrashMediaType.Audio -> Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(56.dp))
-                        TrashMediaType.Document -> Icon(Icons.Rounded.Description, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(56.dp))
                         TrashMediaType.Story -> Icon(Icons.Rounded.AutoStories, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
                     }
                 }
@@ -754,15 +732,13 @@ fun TrashTile(
                     Icon(Icons.Default.PlayCircleOutline, contentDescription = null, tint = Color.White, modifier = Modifier.align(Alignment.Center))
                 }
             }
-            TrashMediaType.Audio, TrashMediaType.Document, TrashMediaType.Story -> {
+            TrashMediaType.Audio, TrashMediaType.Story -> {
                 val iconRes = when (item.type) {
                     TrashMediaType.Audio -> Icons.Rounded.MusicNote
-                    TrashMediaType.Document -> Icons.Rounded.Description
                     else -> Icons.Rounded.AutoStories
                 }
                 val iconTint = when (item.type) {
                     TrashMediaType.Audio -> MaterialTheme.colorScheme.secondary
-                    TrashMediaType.Document -> MaterialTheme.colorScheme.tertiary
                     else -> MaterialTheme.colorScheme.primary
                 }
 
