@@ -213,7 +213,9 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
         }
     }
 
+    val sharedGalleryViewModel: GalleryViewModel = hiltViewModel()
     val sharedMusicViewModel: MusicViewModel = hiltViewModel()
+    val sharedTrashViewModel: TrashViewModel = hiltViewModel()
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -228,10 +230,34 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
             startDestination = initialStartDestination,
             modifier = Modifier.padding(padding)
         ) {
-            mainTabs(navController, context, navigateToVideo, onLockApp, { isFullScreenMediaOpen = it }, sharedMusicViewModel)
-            albumGraphs(navController, navigateToVideo, onLockApp) { isFullScreenMediaOpen = it }
+            mainTabs(
+                nav = navController,
+                ctx = context,
+                navToVid = navigateToVideo,
+                onLock = onLockApp,
+                onViewerStateChanged = { isFullScreenMediaOpen = it },
+                galleryViewModel = sharedGalleryViewModel,
+                trashViewModel = sharedTrashViewModel,
+                musicViewModel = sharedMusicViewModel
+            )
+            albumGraphs(
+                nav = navController,
+                navToVid = navigateToVideo,
+                onLock = onLockApp,
+                onViewerStateChanged = { isFullScreenMediaOpen = it },
+                galleryViewModel = sharedGalleryViewModel,
+                trashViewModel = sharedTrashViewModel
+            )
             editorGraphs(navController)
-            toolsAndUtilityGraphs(navController, navigateToVideo, context, onLockApp, sharedMusicViewModel)
+            toolsAndUtilityGraphs(
+                nav = navController,
+                navToVid = navigateToVideo,
+                ctx = context,
+                onLock = onLockApp,
+                galleryViewModel = sharedGalleryViewModel,
+                trashViewModel = sharedTrashViewModel,
+                musicViewModel = sharedMusicViewModel
+            )
         }
     }
 }
@@ -243,12 +269,14 @@ private fun NavGraphBuilder.mainTabs(
     navToVid: (String, List<String>) -> Unit,
     onLock: () -> Unit,
     onViewerStateChanged: (Boolean) -> Unit,
+    galleryViewModel: GalleryViewModel,
+    trashViewModel: TrashViewModel,
     musicViewModel: MusicViewModel
 ) {
     composable<Route.Pictures> {
         PictureScreen(
-            viewModel = hiltViewModel(),
-            trashViewModel = hiltViewModel(),
+            viewModel = galleryViewModel,
+            trashViewModel = trashViewModel,
             onViewerStateChanged = onViewerStateChanged,
             onNavigateToCamera = { safeLaunchCamera(ctx) },
             onNavigateToTrash = { nav.navigate(Route.Trash) },
@@ -268,8 +296,8 @@ private fun NavGraphBuilder.mainTabs(
 
     composable<Route.Albums> {
         AlbumScreen(
-            viewModel = hiltViewModel(),
-            trashViewModel = hiltViewModel(),
+            viewModel = galleryViewModel,
+            trashViewModel = trashViewModel,
             onViewerStateChanged = onViewerStateChanged,
             actions = AlbumActions(
                 onAlbumClick = { a -> nav.navigate(Route.AlbumView(a.id.toSafeRouteArgs())) },
@@ -286,14 +314,16 @@ private fun NavGraphBuilder.mainTabs(
 
     composable<Route.Stories> {
         StoriesScreen(
-            viewModel = hiltViewModel(),
-            trashViewModel = hiltViewModel()
+            viewModel = galleryViewModel,
+            storyViewModel = hiltViewModel(),
+            trashViewModel = trashViewModel
         )
     }
 
     composable<Route.Music> {
         MusicScreen(
             viewModel = musicViewModel,
+            trashViewModel = trashViewModel,
             onViewerStateChanged = onViewerStateChanged,
             onNavigateToEqualizer = { nav.navigate(Route.Equalizer) },
             onNavigateToRadio = { nav.navigate(Route.Radio) },
@@ -307,13 +337,15 @@ private fun NavGraphBuilder.albumGraphs(
     nav: NavHostController,
     navToVid: (String, List<String>) -> Unit,
     onLock: () -> Unit,
-    onViewerStateChanged: (Boolean) -> Unit
+    onViewerStateChanged: (Boolean) -> Unit,
+    galleryViewModel: GalleryViewModel,
+    trashViewModel: TrashViewModel
 ) {
     composable<Route.AlbumView> { backStack ->
         AlbumDetailScreen(
             albumId = backStack.toRoute<Route.AlbumView>().albumId.fromSafeRouteArgs(),
-            viewModel = hiltViewModel(),
-            trashViewModel = hiltViewModel(),
+            viewModel = galleryViewModel,
+            trashViewModel = trashViewModel,
             onViewerStateChanged = onViewerStateChanged,
             actions = DetailActions(
                 onBack = { nav.popBackStack() },
@@ -353,6 +385,8 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     navToVid: (String, List<String>) -> Unit,
     ctx: Context,
     onLock: () -> Unit,
+    galleryViewModel: GalleryViewModel,
+    trashViewModel: TrashViewModel,
     musicViewModel: MusicViewModel
 ) {
     composable<Route.Radio> { RadioScreen(viewModel = hiltViewModel<RadioViewModel>(), onBack = { nav.popBackStack() }) }
@@ -361,28 +395,41 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     composable<Route.Settings> { SettingScreen(onBack = { nav.popBackStack() }) }
 
     composable<Route.Wallpaper> { backStack ->
-        val galVM: GalleryViewModel = hiltViewModel()
         val args = backStack.toRoute<Route.Wallpaper>()
         val decodedUri = args.uri.fromSafeRouteArgs()
-        val rawMedia by galVM.rawMedia.collectAsState()
-        val mediaItem = galVM.getMediaItemById(args.mediaId ?: -1L) ?: rawMedia.find { m -> m.uri.toString() == decodedUri }
+        val rawMedia by galleryViewModel.rawMedia.collectAsState()
+        val mediaItem = galleryViewModel.getMediaItemById(args.mediaId ?: -1L) ?: rawMedia.find { m -> m.uri.toString() == decodedUri }
 
         if (mediaItem != null) {
             WallpaperScreen(item = mediaItem, onBack = { nav.popBackStack() })
         } else {
-            val isBusy by galVM.isBusy.collectAsState()
+            val isBusy by galleryViewModel.isBusy.collectAsState()
             if (!isBusy) LaunchedEffect(Unit) { nav.popBackStack() }
         }
     }
 
-    composable<Route.Trash> { TrashScreen(onBack = { nav.popBackStack() }) }
-    composable<Route.Duplicates> { DuplicatesScreen(viewModel = hiltViewModel(), trashViewModel = hiltViewModel(), onBack = { nav.popBackStack() }) }
+    composable<Route.Trash> {
+        TrashScreen(
+            trashViewModel = trashViewModel,
+            galleryViewModel = galleryViewModel,
+            musicViewModel = musicViewModel,
+            onBack = { nav.popBackStack() }
+        )
+    }
+
+    composable<Route.Duplicates> {
+        DuplicatesScreen(
+            viewModel = galleryViewModel,
+            trashViewModel = trashViewModel,
+            onBack = { nav.popBackStack() }
+        )
+    }
 
     composable<Route.ScanLibrary> {
         ScanLibraryScreen(
             onBack = { nav.popBackStack() },
-            galleryViewModel = hiltViewModel(),
-            musicViewModel = hiltViewModel(),
+            galleryViewModel = galleryViewModel,
+            musicViewModel = musicViewModel,
             onLockApp = onLock
         )
     }
@@ -390,7 +437,7 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     composable<Route.Slideshow> {
         SlideshowScreen(
             albumId = it.toRoute<Route.Slideshow>().albumId?.fromSafeRouteArgs(),
-            viewModel = hiltViewModel(),
+            viewModel = galleryViewModel,
             onBack = { nav.popBackStack() }
         )
     }
@@ -414,13 +461,12 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     }
 
     composable<Route.VideoPlayer>(deepLinks = listOf(navDeepLink<Route.VideoPlayer>(basePath = "gallerybox://video"))) {
-        val galVM: GalleryViewModel = hiltViewModel()
         val args = it.toRoute<Route.VideoPlayer>()
         val decodedUri = args.uri.fromSafeRouteArgs()
 
         VideoPlayerScreen(
             initialVideoUrl = decodedUri,
-            viewModel = galVM,
+            viewModel = galleryViewModel,
             onBackPress = { nav.popBackStack() },
             onLockApp = onLock
         )
