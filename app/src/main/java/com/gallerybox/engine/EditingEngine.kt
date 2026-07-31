@@ -13,6 +13,7 @@ package com.gallerybox.engine
 
 import android.content.Context
 import android.graphics.*
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -678,6 +679,7 @@ class ExportEngine @Inject constructor(
                     out.recycle()
 
                     onProgress(1f)
+                    MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null) { _, _ -> }
                     return@withContext file
                 }
 
@@ -744,6 +746,7 @@ class ExportEngine @Inject constructor(
                 suspendCancellableCoroutine<Unit> { cont ->
                     val listener = object : Transformer.Listener {
                         override fun onCompleted(c: Composition, r: ExportResult) {
+                            Log.d("EXPORT", "Completed")
                             activeTransformer = null
                             onProgress(1f)
                             if (cont.isActive) {
@@ -752,6 +755,7 @@ class ExportEngine @Inject constructor(
                         }
 
                         override fun onError(c: Composition, r: ExportResult, e: ExportException) {
+                            Log.e("EXPORT", "Error", e)
                             activeTransformer = null
                             if (cont.isActive) {
                                 cont.resumeWithException(e)
@@ -762,12 +766,15 @@ class ExportEngine @Inject constructor(
                     activeTransformer?.addListener(listener)
 
                     val composition = Composition.Builder(seqs).build()
+
+                    Log.d("EXPORT", "Starting export")
                     activeTransformer?.start(composition, file.absolutePath)
 
                     CoroutineScope(Dispatchers.Main).launch {
                         while (cont.isActive) {
                             val stateProgress = activeTransformer?.getProgress(p)
                             if (stateProgress == Transformer.PROGRESS_STATE_AVAILABLE) {
+                                Log.d("EXPORT", "Progress = ${p.progress}")
                                 onProgress(p.progress / 100f)
                             }
                             delay(100)
@@ -779,6 +786,8 @@ class ExportEngine @Inject constructor(
                         activeTransformer = null
                     }
                 }
+
+                MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null) { _, _ -> }
 
                 file
             } catch (e: Exception) {

@@ -1,9 +1,8 @@
-@file:Suppress("UnsafeOptInUsageError", "UnstableApiUsage", "OPT_IN_USAGE", "unused", "UNCHECKED_CAST", "DEPRECATION", "SpellCheckingInspection", "NonSkippableComposable", "RedundantRequireNotNullCall")
-
 package com.gallerybox.ui.screens.editor
 
 import android.graphics.Bitmap
 import android.graphics.RectF
+import android.media.MediaMetadataRetriever
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
@@ -44,6 +43,7 @@ import androidx.media3.common.*
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.effect.*
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.ui.PlayerView
 import coil.ImageLoader
 import coil.compose.AsyncImage
@@ -272,7 +272,7 @@ fun EditorScreen(
                                         EditorTab.LUT -> FilterToolPanel(editorViewModel, selectedLutCategory, lutCategories) { selectedLutCategory = it }
                                         EditorTab.TEXT -> TextToolPanel(editorViewModel)
                                         EditorTab.STICKER -> StickerToolPanel(editorViewModel)
-                                        EditorTab.TRIM -> TrimToolPanel(editorViewModel, editState, videoDuration) { seekRequest = it }
+                                        EditorTab.TRIM -> TrimToolPanel(editorViewModel, editState, videoDuration, currentPlayerPos, mediaItem.uri.toString()) { seekRequest = it }
                                     }
                                 }
                             }
@@ -323,10 +323,21 @@ fun EditorScreen(
                         item = mediaItem,
                         state = editState,
                         isComp = isComparing,
+                        isCropping = isCropping,
                         seekRequest = seekRequest,
                         onDurationReady = { videoDuration = it },
                         onPos = { currentPlayerPos = it }
                     )
+
+                    if (isCropping && !isComparing) {
+                        InteractiveCropOverlay(
+                            cCrop = editState.cropRect,
+                            cAsp = editState.aspectRatio,
+                            grid = gridType
+                        ) {
+                            editorViewModel.updateCropRect(it)
+                        }
+                    }
                 } else {
                     // 2. The perfectly aspect-ratio matched canvas
                     Box(
@@ -391,32 +402,31 @@ fun EditorScreen(
                 }
             }
 
-            if (!mediaItem.isVideo) {
-                Box(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(16.dp)
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(if (isComparing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(0.85f))
-                        .pointerInput(Unit) {
-                            awaitEachGesture {
-                                awaitFirstDown()
-                                editorViewModel.setComparing(true)
-                                do {
-                                    val event = awaitPointerEvent()
-                                } while (event.changes.any { it.pressed })
-                                editorViewModel.setComparing(false)
-                            }
-                        },
-                    Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Rounded.Compare,
-                        "Compare",
-                        tint = if (isComparing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            // Compare Button (Always Available for Photo & Video)
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(if (isComparing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(0.85f))
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            awaitFirstDown()
+                            editorViewModel.setComparing(true)
+                            do {
+                                val event = awaitPointerEvent()
+                            } while (event.changes.any { it.pressed })
+                            editorViewModel.setComparing(false)
+                        }
+                    },
+                Alignment.Center
+            ) {
+                Icon(
+                    Icons.Rounded.Compare,
+                    "Compare",
+                    tint = if (isComparing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
@@ -483,16 +493,24 @@ fun ModernEditorTopBar(onBack: () -> Unit, onUndo: () -> Unit, onRedo: () -> Uni
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun EditorVideoPreview(item: MediaItem, state: EditState, isComp: Boolean, seekRequest: Long?, onDurationReady: (Long) -> Unit, onPos: (Long) -> Unit) {
+fun EditorVideoPreview(
+    item: MediaItem,
+    state: EditState,
+    isComp: Boolean,
+    isCropping: Boolean,
+    seekRequest: Long?,
+    onDurationReady: (Long) -> Unit,
+    onPos: (Long) -> Unit
+) {
     val ctx = LocalContext.current
     var ctrlVis by remember { mutableStateOf(true) }
     var isPlay by remember { mutableStateOf(false) }
-    var dur by remember { mutableLongStateOf(0L) }
 
     val exo = remember {
         ExoPlayer.Builder(ctx).build().apply {
-            repeatMode = Player.REPEAT_MODE_ONE
+            repeatMode = Player.REPEAT_MODE_OFF
             playWhenReady = true
+            setSeekParameters(SeekParameters.EXACT)
         }
     }
 
@@ -508,36 +526,64 @@ fun EditorVideoPreview(item: MediaItem, state: EditState, isComp: Boolean, seekR
             exo.pause()
             exo.seekTo(it)
             onPos(it)
+            ctrlVis = true
         }
     }
 
-    LaunchedEffect(isComp, state) {
-        exo.volume = if(state.isMuted) 0f else state.videoVolume / 100f
+    LaunchedEffect(isComp, state, isCropping) {
+        exo.volume = if (state.isMuted) 0f else state.videoVolume / 100f
 
         if (isComp) {
             exo.setVideoEffects(emptyList())
         } else {
             val ef = mutableListOf<Effect>()
-            state.cropRect?.let { r ->
-                if(r.left > 0f || r.top > 0f || r.right < 1f || r.bottom < 1f) {
-                    ef.add(Crop(r.left * 2f - 1f, r.right * 2f - 1f, 1f - r.bottom * 2f, 1f - r.top * 2f))
-                }
-            }
-            if(state.rotationDegrees != 0f || state.flipHorizontal || state.flipVertical) {
+
+            // Apply Straighten and Flip
+            if (state.rotationDegrees != 0f || state.straightenDegrees != 0f || state.flipHorizontal || state.flipVertical) {
                 ef.add(ScaleAndRotateTransformation.Builder()
-                    .setRotationDegrees(state.rotationDegrees)
-                    .setScale(if(state.flipHorizontal) -1f else 1f, if(state.flipVertical) -1f else 1f)
+                    .setRotationDegrees(state.rotationDegrees + state.straightenDegrees)
+                    .setScale(if (state.flipHorizontal) -1f else 1f, if (state.flipVertical) -1f else 1f)
                     .build())
             }
             exo.setVideoEffects(ef)
         }
     }
 
+    // Trim loop logic & Progress tracker
+    LaunchedEffect(state.trimStartMs, state.trimEndMs, exo.duration) {
+        while (isActive) {
+            val pos = exo.currentPosition
+            onPos(pos)
+
+            // Stop/Loop at Trim End
+            if (state.trimEndMs > 0 && pos >= state.trimEndMs - 50) {
+                exo.seekTo(state.trimStartMs)
+                if (!isPlay) onPos(state.trimStartMs)
+            }
+            // Enforce Trim Start
+            if (pos < state.trimStartMs - 50) {
+                exo.seekTo(state.trimStartMs)
+                if (!isPlay) onPos(state.trimStartMs)
+            }
+
+            delay(30)
+        }
+    }
+
     DisposableEffect(Unit) {
-        val l = object:Player.Listener{
-            override fun onIsPlayingChanged(p: Boolean){ isPlay=p; if(p) ctrlVis=false }
-            override fun onPlaybackStateChanged(s: Int){ if(s==Player.STATE_READY) { dur=exo.duration; onDurationReady(exo.duration) } }
-            override fun onPositionDiscontinuity(o: Player.PositionInfo, n: Player.PositionInfo, r: Int){ onPos(n.positionMs) }
+        val l = object : Player.Listener {
+            override fun onIsPlayingChanged(p: Boolean) {
+                isPlay = p
+                if (p) ctrlVis = false
+            }
+            override fun onPlaybackStateChanged(s: Int) {
+                if (s == Player.STATE_READY) {
+                    onDurationReady(exo.duration)
+                }
+            }
+            override fun onPositionDiscontinuity(o: Player.PositionInfo, n: Player.PositionInfo, r: Int) {
+                onPos(n.positionMs)
+            }
         }
         exo.addListener(l)
         onDispose {
@@ -546,34 +592,49 @@ fun EditorVideoPreview(item: MediaItem, state: EditState, isComp: Boolean, seekR
         }
     }
 
-    LaunchedEffect(isPlay) {
-        while(isPlay) {
-            onPos(exo.currentPosition)
-            delay(50)
-        }
-    }
+    var viewWidth by remember { mutableFloatStateOf(0f) }
+    var viewHeight by remember { mutableFloatStateOf(0f) }
 
-    Box(Modifier.fillMaxSize().pointerInput(Unit){ detectTapGestures(onTap={ctrlVis=!ctrlVis}) }, Alignment.Center) {
+    Box(Modifier.fillMaxSize()
+        .pointerInput(Unit) { detectTapGestures(onTap = { ctrlVis = !ctrlVis }) }
+        .onGloballyPositioned {
+            viewWidth = it.size.width.toFloat()
+            viewHeight = it.size.height.toFloat()
+        },
+        Alignment.Center
+    ) {
         AndroidView({
             PlayerView(ctx).apply {
-                player=exo
-                useController=false
+                player = exo
+                useController = false
                 setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             }
-        }, Modifier.fillMaxSize())
+        }, Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                val rect = state.cropRect ?: RectF(0f, 0f, 1f, 1f)
+                val cw = rect.width().coerceAtLeast(0.01f)
+                val ch = rect.height().coerceAtLeast(0.01f)
 
-        AnimatedVisibility(ctrlVis || !isPlay, enter=fadeIn(), exit=fadeOut()) {
+                scaleX = 1f / cw
+                scaleY = 1f / ch
+                translationX = (0.5f - rect.centerX()) * viewWidth * scaleX
+                translationY = (0.5f - rect.centerY()) * viewHeight * scaleY
+            }
+        )
+
+        AnimatedVisibility(ctrlVis || !isPlay, enter = fadeIn(), exit = fadeOut()) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(0.2f)), Alignment.Center) {
                 Surface(
-                    modifier = Modifier.size(64.dp).clip(CircleShape).clickable{
+                    modifier = Modifier.size(64.dp).clip(CircleShape).clickable {
                         onPos(exo.currentPosition)
-                        if(isPlay) exo.pause() else exo.play()
+                        if (isPlay) exo.pause() else exo.play()
                     }.align(Alignment.Center),
                     shape = CircleShape,
                     color = Color.Black.copy(0.5f),
                     border = BorderStroke(1.dp, Color.White.copy(0.2f))
                 ) {
-                    Icon(if(isPlay) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, tint=Color.White, modifier=Modifier.padding(16.dp))
+                    Icon(if (isPlay) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.padding(16.dp))
                 }
             }
         }
@@ -582,25 +643,25 @@ fun EditorVideoPreview(item: MediaItem, state: EditState, isComp: Boolean, seekR
 
 @Composable
 fun TabItem(lbl: String, ic: ImageVector, sel: Boolean, onClk: () -> Unit) {
-    val c = if(sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+    val c = if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
     Column(
-        Modifier.clickable(onClick=onClk).padding(8.dp),
-        horizontalAlignment=Alignment.CenterHorizontally
+        Modifier.clickable(onClick = onClk).padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(ic, lbl, tint=c, modifier=Modifier.size(28.dp))
+        Icon(ic, lbl, tint = c, modifier = Modifier.size(28.dp))
         Spacer(Modifier.height(4.dp))
-        Text(lbl, fontSize=11.sp, color=c, fontWeight=if(sel) FontWeight.Bold else FontWeight.Medium)
+        Text(lbl, fontSize = 11.sp, color = c, fontWeight = if (sel) FontWeight.Bold else FontWeight.Medium)
     }
 }
 
 @Composable
 fun SavingOverlay(prg: Float) {
     Box(Modifier.fillMaxSize().background(Color.Black.copy(0.8f)).pointerInput(Unit){}, Alignment.Center) {
-        Column(horizontalAlignment=Alignment.CenterHorizontally) {
-            CircularProgressIndicator({ prg }, Modifier.size(64.dp), color=MaterialTheme.colorScheme.primary, strokeWidth = 6.dp)
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator({ prg }, Modifier.size(64.dp), color = MaterialTheme.colorScheme.primary, strokeWidth = 6.dp)
             Spacer(Modifier.height(16.dp))
-            Text("Processing...", color=Color.White, fontWeight=FontWeight.Bold, fontSize=18.sp)
-            Text("${(prg*100).toInt()}%", color=Color.LightGray, fontSize=14.sp)
+            Text("Processing...", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text("${(prg * 100).toInt()}%", color = Color.LightGray, fontSize = 14.sp)
         }
     }
 }
@@ -768,7 +829,7 @@ fun AdjustToolPanel(s: EditState, isVideo: Boolean, up: ((EditState) -> EditStat
     )
 
     val tools = if (isVideo) {
-        listOf(AdjustTool("Volume", Icons.Rounded.VolumeUp, s.videoVolume / 100f, 0f..1f) { v -> up { it.copy(videoVolume = (v * 100).toFloat(), isMuted = v == 0f) } })
+        listOf(AdjustTool("Volume", if (s.isMuted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp, s.videoVolume / 100f, 0f..1f) { v -> up { it.copy(videoVolume = (v * 100).toFloat(), isMuted = v == 0f) } })
     } else {
         baseTools + listOf(
             AdjustTool("Highlights", Icons.Rounded.Highlight, s.highlights, -1f..1f) { v -> up { it.copy(highlights = v) } },
@@ -789,7 +850,16 @@ fun AdjustToolPanel(s: EditState, isVideo: Boolean, up: ((EditState) -> EditStat
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(a.name, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-            Text(if (dv > 0) "+$dv" else "$dv", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (a.name == "Volume") {
+                    IconButton(onClick = {
+                        up { it.copy(isMuted = !it.isMuted, videoVolume = if (it.isMuted) 100f else 0f) }
+                    }) {
+                        Icon(if (s.isMuted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp, "Mute", tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+                Text(if (dv > 0) "+$dv" else "$dv", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+            }
         }
 
         Slider(
@@ -909,7 +979,7 @@ fun CropToolPanel(vm: EditorViewModel, grid: Int, onGrid: (Int) -> Unit) {
 
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            IconButton({ vm.rotateLeft() }) { Icon(Icons.Rounded.RotateLeft, "Rot L", tint = MaterialTheme.colorScheme.onSurface) }
+            IconButton({ vm.rotateLeft() }) { Icon(Icons.AutoMirrored.Rounded.RotateLeft, "Rot L", tint = MaterialTheme.colorScheme.onSurface) }
             IconButton({ vm.toggleFlipHorizontal() }) { Icon(Icons.Rounded.Flip, "Flip H", tint = MaterialTheme.colorScheme.onSurface) }
             IconButton({ vm.toggleFlipVertical() }) { Icon(Icons.Rounded.Flip, "Flip V", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.rotate(90f)) }
             IconButton({ onGrid((grid + 1) % 4) }) { Icon(Icons.Rounded.GridOn, "Grid", tint = MaterialTheme.colorScheme.onSurface) }
@@ -1013,22 +1083,102 @@ fun StickerToolPanel(vm: EditorViewModel) {
     }
 }
 
+@Composable
+fun VideoThumbnailRow(uri: String, durationMs: Long, modifier: Modifier) {
+    var frames by remember(uri) { mutableStateOf<List<Bitmap>>(emptyList()) }
+    val ctx = LocalContext.current
+    LaunchedEffect(uri, durationMs) {
+        if (durationMs <= 0) return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(ctx, android.net.Uri.parse(uri))
+                val extracted = mutableListOf<Bitmap>()
+                val step = durationMs / 8
+                for (i in 0 until 8) {
+                    val timeUs = (i * step) * 1000
+                    retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.let {
+                        extracted.add(it)
+                    }
+                }
+                frames = extracted
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                retriever.release()
+            }
+        }
+    }
+    Row(modifier = modifier) {
+        if (frames.isEmpty()) {
+            repeat(8) { Box(Modifier.weight(1f).fillMaxHeight().border(0.5.dp, MaterialTheme.colorScheme.surface)) }
+        } else {
+            frames.forEach { bmp ->
+                Image(bmp.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.weight(1f).fillMaxHeight())
+            }
+        }
+    }
+}
+
+fun formatMs(ms: Long): String {
+    val totalSec = ms / 1000
+    val m = totalSec / 60
+    val s = totalSec % 60
+    return String.format(Locale.US, "%02d:%02d", m, s)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TrimToolPanel(vm: EditorViewModel, s: EditState, exoDuration: Long, onSeekReq: (Long) -> Unit) {
+fun TrimToolPanel(
+    vm: EditorViewModel,
+    s: EditState,
+    exoDuration: Long,
+    currentPos: Long,
+    itemUri: String,
+    onSeekReq: (Long) -> Unit
+) {
     var sliderRange by remember(s.trimStartMs, s.trimEndMs, exoDuration) {
         val start = if (exoDuration > 0) (s.trimStartMs.toFloat() / exoDuration).coerceIn(0f, 1f) else 0f
         val end = if (exoDuration > 0 && s.trimEndMs > 0) (s.trimEndMs.toFloat() / exoDuration).coerceIn(0f, 1f) else 1f
         mutableStateOf(start..end)
     }
 
+    val playheadPercent = if (exoDuration > 0) (currentPos.toFloat() / exoDuration).coerceIn(0f, 1f) else 0f
+
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp)) {
-        Box(Modifier.fillMaxWidth().height(48.dp)) {
-            Row(Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
-                repeat(8) {
-                    Box(Modifier.weight(1f).fillMaxHeight().border(0.5.dp, MaterialTheme.colorScheme.surface))
-                }
+        // Top Row: Time display & Reset Button
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "${formatMs(currentPos)} / ${formatMs(exoDuration)}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+
+            TextButton(
+                onClick = {
+                    vm.setTrimRange(0L, exoDuration)
+                    onSeekReq(0L)
+                },
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Text("Reset", color = MaterialTheme.colorScheme.primary)
             }
+        }
+
+        Box(Modifier.fillMaxWidth().height(48.dp)) {
+            // Background Thumbnails
+            VideoThumbnailRow(
+                uri = itemUri,
+                durationMs = exoDuration,
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+            )
+
+            // Trim Range Slider
             RangeSlider(
                 value = sliderRange,
                 onValueChange = { range ->
@@ -1054,6 +1204,30 @@ fun TrimToolPanel(vm: EditorViewModel, s: EditState, exoDuration: Long, onSeekRe
                     inactiveTrackColor = Color.Black.copy(alpha = 0.6f)
                 )
             )
+
+            // Playhead Indicator Overlay
+            Canvas(Modifier.fillMaxSize()) {
+                val x = playheadPercent * size.width
+                drawLine(
+                    color = Color.White,
+                    start = Offset(x, 0f),
+                    end = Offset(x, size.height),
+                    strokeWidth = 2.dp.toPx()
+                )
+                drawCircle(
+                    color = Color.White,
+                    radius = 4.dp.toPx(),
+                    center = Offset(x, 0f)
+                )
+            }
+        }
+
+        Row(
+            Modifier.fillMaxWidth().padding(top = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(formatMs(s.trimStartMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(formatMs(if (s.trimEndMs > 0) s.trimEndMs else exoDuration), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
