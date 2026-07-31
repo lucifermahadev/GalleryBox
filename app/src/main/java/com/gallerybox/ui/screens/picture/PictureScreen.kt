@@ -1166,8 +1166,9 @@ fun FullscreenMediaPager(
     val view = LocalView.current
     val activity = remember { context.findActivity() }
 
+    val safeInitialPage = initialIndex.coerceIn(0, maxOf(mediaList.lastIndex, 0))
     val pagerState = rememberPagerState(
-        initialPage = initialIndex,
+        initialPage = safeInitialPage,
         pageCount = { mediaList.size }
     )
 
@@ -1189,6 +1190,26 @@ fun FullscreenMediaPager(
         }
     }
 
+    LaunchedEffect(initialIndex, mediaList.size) {
+        if (pagerState.currentPage != initialIndex && initialIndex in mediaList.indices) {
+            pagerState.scrollToPage(initialIndex)
+        }
+    }
+
+    LaunchedEffect(pagerState.currentPage) {
+        showControls = true
+
+        val current = mediaList.getOrNull(pagerState.currentPage)
+
+        if (current != null && !current.isVideo) {
+            sharedPlayer.pause()
+            if (sharedPlayer.mediaItemCount > 0) {
+                sharedPlayer.seekTo(sharedPlayer.currentMediaItemIndex, 0)
+            }
+            sharedPlayer.playWhenReady = false
+        }
+    }
+
     DisposableEffect(activity) {
         val window = activity?.window
         if (window != null) {
@@ -1197,6 +1218,9 @@ fun FullscreenMediaPager(
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         onDispose {
+            sharedPlayer.pause()
+            sharedPlayer.playWhenReady = false
+
             activity?.window?.let {
                 WindowCompat.getInsetsController(it, view).show(WindowInsetsCompat.Type.systemBars())
             }
@@ -1447,8 +1471,6 @@ fun VideoPreviewPage(
             }
             sharedPlayer.volume = if (muted) 0f else 1f
             sharedPlayer.playWhenReady = false
-        } else {
-            sharedPlayer.pause()
         }
     }
 
@@ -1907,7 +1929,7 @@ fun ModernSortSheet(
                 modifier = Modifier.padding(22.dp)
             )
 
-            PhotoSort.values().forEach { option ->
+            PhotoSort.entries.forEach { option ->
                 val isSelected = activeSort == option
                 Row(
                     modifier = Modifier

@@ -363,7 +363,7 @@ fun TrashScreen(
                         Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Outlined.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(12.dp))
-                            Text("Items are permanently purged after 30 days.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                            Text("Items are permanently deleted after 30 days.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
                         }
                     }
 
@@ -485,7 +485,7 @@ fun TrashScreen(
                         ) {
                             Icon(Icons.Filled.DeleteForever, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("Purge (${selectedIds.size})", fontWeight = FontWeight.Bold)
+                            Text("Permanent Delete (${selectedIds.size})", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -678,7 +678,7 @@ fun TrashScreen(
                         modifier = Modifier.weight(1f).height(52.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                     ) {
-                        Text("Purge", color = MaterialTheme.colorScheme.onError)
+                        Text("Permanent Delete", color = MaterialTheme.colorScheme.onError)
                     }
                 }
             }
