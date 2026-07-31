@@ -259,13 +259,11 @@ fun VideoPlayerScreen(
     }
 
     val playlistUrls by viewModel.videoPlaylist.collectAsState()
-    val startIndex by viewModel.currentVideoIndex.collectAsState()
 
     VideoPlayerContent(
         player = player,
         initialVideoUrl = initialVideoUrl,
         playlistUrls = playlistUrls,
-        startIndex = startIndex,
         viewModel = viewModel,
         onBackPress = onBackPress,
         onLockApp = onLockApp
@@ -278,7 +276,6 @@ fun VideoPlayerContent(
     player: Player,
     initialVideoUrl: String,
     playlistUrls: List<String>,
-    startIndex: Int,
     viewModel: GalleryViewModel,
     onBackPress: () -> Unit,
     onLockApp: () -> Unit
@@ -452,38 +449,60 @@ fun VideoPlayerContent(
         player.playbackParameters = PlaybackParameters(speed, pitch)
     }
 
-    LaunchedEffect(playlistUrls, initialVideoUrl) {
-        if (playlistUrls.isNotEmpty()) {
-            try {
-                (player as? ExoPlayer)?.let { exo ->
-                    exo.setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(C.USAGE_MEDIA)
-                            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                            .build(),
-                        true
-                    )
-                    exo.setHandleAudioBecomingNoisy(true)
+    var hasInitializedPlaylist by remember { mutableStateOf(false) }
+
+    // CRITICAL FIX: Ensure we start playing the exact video clicked, unmute the player, and lock re-initialization
+    LaunchedEffect(initialVideoUrl, playlistUrls) {
+        if (hasInitializedPlaylist) return@LaunchedEffect
+
+        // Wait until playlistUrls has data (or just play it solo if it's completely missing)
+        if (playlistUrls.isNotEmpty() || playlistUrls.isEmpty()) {
+            withContext(Dispatchers.Default) {
+                val absoluteIndex = playlistUrls.indexOfFirst { it == initialVideoUrl || Uri.parse(it) == Uri.parse(initialVideoUrl) }
+
+                val items: List<MediaItem>
+                val relativeIndex: Int
+
+                if (absoluteIndex != -1) {
+                    // It exists in the gallery playlist -> chunk it so we don't freeze the app
+                    val fromIndex = maxOf(0, absoluteIndex - 20)
+                    val toIndex = minOf(playlistUrls.size, absoluteIndex + 40)
+                    items = playlistUrls.subList(fromIndex, toIndex).map { MediaItem.fromUri(Uri.parse(it)) }
+                    relativeIndex = absoluteIndex - fromIndex
+                    hasInitializedPlaylist = true // Success! Lock it so it never resets when you scroll
+                } else {
+                    // Failsafe: If somehow the video isn't in the global list, play it as a solo item
+                    items = listOf(MediaItem.fromUri(Uri.parse(initialVideoUrl)))
+                    relativeIndex = 0
                 }
-                updateSpeedAndPitch(currentSpeed, currentPitch)
 
                 val savedPos = prefs.getLong(initialVideoUrl, 0L)
 
-                var isSamePlaylist = player.mediaItemCount == playlistUrls.size
-                if (isSamePlaylist && playlistUrls.isNotEmpty() && player.mediaItemCount > 0) {
-                    val firstUri = player.getMediaItemAt(0).localConfiguration?.uri?.toString()
-                    if (firstUri != playlistUrls[0]) isSamePlaylist = false
-                }
+                withContext(Dispatchers.Main) {
+                    try {
+                        (player as? ExoPlayer)?.let { exo ->
+                            exo.setAudioAttributes(
+                                AudioAttributes.Builder()
+                                    .setUsage(C.USAGE_MEDIA)
+                                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                                    .build(),
+                                true
+                            )
+                            exo.setHandleAudioBecomingNoisy(true)
+                            exo.volume = 1f // FIX: The player might be muted from grid previews. Force 100% volume.
+                        }
 
-                if (!isSamePlaylist) {
-                    val items = playlistUrls.map { MediaItem.fromUri(Uri.parse(it)) }
-                    player.setMediaItems(items)
-                    player.prepare()
-                }
+                        updateSpeedAndPitch(currentSpeed, currentPitch)
 
-                player.seekTo(startIndex, savedPos)
-                player.playWhenReady = true
-            } catch (_: Exception) {}
+                        player.setMediaItems(items)
+                        player.prepare()
+                        player.seekTo(relativeIndex, savedPos) // Play exact video index!
+                        player.playWhenReady = true
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
         }
     }
 

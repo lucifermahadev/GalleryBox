@@ -9,6 +9,7 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.core.content.edit
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem as Media3Item
@@ -19,10 +20,13 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.gallerybox.data.MediaItem
+import com.gallerybox.viewmodel.dataStore
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
@@ -88,6 +92,14 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
             args.add(minGeneration.toString())
         }
 
+        // Read user settings for hidden folders from DataStore
+        val showHidden = try {
+            val userPrefs = context.dataStore.data.first()
+            userPrefs[booleanPreferencesKey("show_hidden_folders")] ?: false
+        } catch (e: Exception) {
+            false
+        }
+
         try {
             resolver.query(uri, proj.toTypedArray(), sel, if (args.isEmpty()) null else args.toTypedArray(), "${MediaStore.Files.FileColumns.DATE_ADDED} DESC")?.use { c ->
                 val idC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
@@ -105,7 +117,7 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                 val wC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.WIDTH) else -1
                 val hC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.HEIGHT) else -1
 
-                val hidden = getHiddenItems()
+                val hiddenItemsSet = getHiddenItems()
                 val cal = Calendar.getInstance()
                 var lastCode = -1L
 
@@ -129,13 +141,23 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                     if (!isImg && !isV && !isDocFile) continue
 
                     val id = c.getLong(idC)
+                    val path = c.getString(dataC) ?: ""
+                    val relP = if (relC != -1 && c.getString(relC) != null) c.getString(relC) else File(path).parent ?: ""
+
+                    // Handle Hidden Folders based on User Setting
+                    if (!showHidden) {
+                        val isFileHidden = File(path).name.startsWith(".") || relP.split("/").any { it.startsWith(".") }
+                        if (isFileHidden) continue
+                    }
+
+                    if (hiddenItemsSet.contains(id.toString())) continue
+
                     val cUri = when {
                         isImg -> ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
                         isV -> ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
                         else -> ContentUris.withAppendedId(uri, id) // Fallback for Documents via Files URI
                     }
 
-                    val relP = if (relC != -1 && c.getString(relC) != null) c.getString(relC) else File(c.getString(dataC) ?: "").parent ?: ""
                     val dSec = c.getLong(dateC)
                     cal.timeInMillis = dSec * 1000L
                     val code = (cal.get(Calendar.YEAR) * 100L) + cal.get(Calendar.MONTH)
@@ -145,14 +167,14 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                         MediaItem(
                             id = id,
                             uri = cUri,
-                            path = c.getString(dataC) ?: "",
+                            path = path,
                             relativePath = relP,
                             name = name,
                             mimeType = mimeType,
                             size = c.getLong(sizeC),
                             dateAdded = dSec,
                             isVideo = isV,
-                            isHidden = hidden.contains(id.toString()),
+                            isHidden = false,
                             isFavorite = false,
                             bucketId = c.getString(bIdC) ?: "unknown",
                             bucketName = c.getString(bNameC) ?: "Internal",
@@ -226,9 +248,28 @@ class VideoPlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        val rFactory = DefaultRenderersFactory(this)
-            .setEnableDecoderFallback(true)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+        var hwAccelEnabled = true
+        var bgPlayEnabled = false
+
+        // Fetch settings synchronously for initialization
+        try {
+            runBlocking(Dispatchers.IO) {
+                val userPrefs = applicationContext.dataStore.data.first()
+                hwAccelEnabled = userPrefs[booleanPreferencesKey("video_hw_accel")] ?: true
+                bgPlayEnabled = userPrefs[booleanPreferencesKey("video_bg_play")] ?: false
+            }
+        } catch (e: Exception) {
+            Log.e("VideoPlaybackService", "Failed to load settings", e)
+        }
+
+        val rFactory = DefaultRenderersFactory(this).apply {
+            setEnableDecoderFallback(true)
+            if (!hwAccelEnabled) {
+                setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
+            } else {
+                setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            }
+        }
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(2000, 5000, 500, 1000)
@@ -248,7 +289,9 @@ class VideoPlaybackService : MediaSessionService() {
                         .build(),
                     true
                 )
-                setHandleAudioBecomingNoisy(true)
+
+                // If background play is disabled, pause when audio becomes noisy or loses focus
+                setHandleAudioBecomingNoisy(!bgPlayEnabled)
             }
 
         val callback = object : MediaSession.Callback {

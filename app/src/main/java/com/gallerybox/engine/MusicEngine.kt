@@ -1,5 +1,5 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
-@file:Suppress("unused", "DEPRECATION")
+@file:Suppress("UnsafeOptInUsageError", "UnstableApiUsage", "OPT_IN_USAGE", "unused", "DEPRECATION", "ObsoleteSdkInt")
+@file:OptIn(UnstableApi::class)
 
 package com.gallerybox.engine
 
@@ -14,10 +14,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
+import com.gallerybox.ui.screens.setting.dataStore
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
+import com.gallerybox.ui.screens.setting.SettingsRepository
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.audiofx.BassBoost
@@ -45,11 +49,12 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerNotificationManager
 import coil.ImageLoader
 import coil.request.ImageRequest
 import com.gallerybox.MainActivity
-import com.gallerybox.ui.screens.setting.SettingsRepository
+import com.gallerybox.R
 import com.gallerybox.viewmodel.AudioTrack
 import com.gallerybox.viewmodel.ChannelMode
 import dagger.hilt.android.AndroidEntryPoint
@@ -78,8 +83,9 @@ private data class PlaybackSettings(
 )
 
 @Singleton
-class FmRadioEngine @Inject constructor(@ApplicationContext private val context: Context) {
-
+class FmRadioEngine @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val prefs = context.getSharedPreferences("gallerybox_fm_radio", Context.MODE_PRIVATE)
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -135,7 +141,7 @@ class FmRadioEngine @Inject constructor(@ApplicationContext private val context:
     }
 
     private val deviceCallback = object : AudioDeviceCallback() {
-        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
             updateHeadsetState()
             if (resumeOnPlug && wasPausedByUnplug && _isHeadsetConnected.value) {
                 start()
@@ -143,7 +149,7 @@ class FmRadioEngine @Inject constructor(@ApplicationContext private val context:
             }
         }
 
-        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
             updateHeadsetState()
             if (!_isHeadsetConnected.value) {
                 if (pauseOnUnplug && _isPlaying.value) {
@@ -161,7 +167,7 @@ class FmRadioEngine @Inject constructor(@ApplicationContext private val context:
 
     private fun registerCallbacks() {
         if (!isCallbackRegistered) {
-            audioManager.registerAudioDeviceCallback(deviceCallback, null)
+            audioManager.registerAudioDeviceCallback(deviceCallback, Handler(Looper.getMainLooper()))
             isCallbackRegistered = true
         }
     }
@@ -281,7 +287,13 @@ class FmRadioEngine @Inject constructor(@ApplicationContext private val context:
 
     private fun requestAudioFocus() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val focusAttributes = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+
             audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(focusAttributes)
                 .setOnAudioFocusChangeListener(focusChangeListener)
                 .build()
             audioManager.requestAudioFocus(audioFocusRequest!!)
@@ -559,10 +571,10 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
         if (isCallbackRegistered) {
             try {
                 audioManager.unregisterAudioDeviceCallback(deviceCallback)
-            } catch (e: Exception) {}
+            } catch (_: Exception) {}
             try {
                 context.unregisterReceiver(noisyAudioReceiver)
-            } catch (e: Exception) {}
+            } catch (_: Exception) {}
             isCallbackRegistered = false
         }
     }
@@ -576,24 +588,24 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
 
         try {
             equalizer = Equalizer(0, sessionId).apply { enabled = true }
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         try {
             bassBoost = BassBoost(0, sessionId).apply { enabled = true }
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         try {
             virtualizer = Virtualizer(0, sessionId).apply { enabled = true }
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         try {
             presetReverb = PresetReverb(0, sessionId).apply { enabled = true }
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             try {
                 loudnessEnhancer = LoudnessEnhancer(sessionId).apply { enabled = true }
-            } catch (e: Exception) {}
+            } catch (_: Exception) {}
         }
     }
 
@@ -717,18 +729,8 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
         stereoProcessor2.setCrossfeed(amount)
     }
 
-    @JvmName("updateGaplessPlayback")
-    fun setGaplessPlayback(enabled: Boolean) {
-        gaplessPlayback = enabled
-    }
-
     fun setCrossfadeDuration(durationMs: Int) {
         crossfadeDurationMs = durationMs
-    }
-
-    @JvmName("updatePauseOnUnplug")
-    fun setPauseOnUnplug(enabled: Boolean) {
-        pauseOnUnplug = enabled
     }
 
     fun resetPlaybackParameters() {
@@ -749,38 +751,38 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
     fun setPreampGain(millibels: Int) {
         try {
             loudnessEnhancer?.setTargetGain(millibels)
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
     }
 
     fun setEqEnabled(enabled: Boolean) {
         try {
             equalizer?.enabled = enabled
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
     }
 
     fun updateEq(index: Int, level: Float, isPlayer2: Boolean = false) {
         try {
             val convertedLevel = ((level - 0.5f) * 3000f).toInt().toShort()
             equalizer?.setBandLevel(index.toShort(), convertedLevel)
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
     }
 
     fun updateBass(strength: Float) {
         try {
             bassBoost?.setStrength((strength * 1000).toInt().toShort())
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
     }
 
     fun updateVirtualizer(strength: Float) {
         try {
             virtualizer?.setStrength((strength * 1000).toInt().toShort())
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
     }
 
     fun setReverb(preset: Short) {
         try {
             presetReverb?.preset = preset
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
     }
 
     fun playTrack(track: AudioTrack, secondary: Boolean = false) {
@@ -891,9 +893,6 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
         player2.stop()
         player2.clearMediaItems()
 
-        player.pause()
-        player2.pause()
-
         player.playWhenReady = false
         player2.playWhenReady = false
 
@@ -904,13 +903,13 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
         _isPlaying.value = false
         _isPlaying2.value = false
 
-        try { equalizer?.enabled = false } catch (e: Exception) {}
-        try { bassBoost?.enabled = false } catch (e: Exception) {}
-        try { virtualizer?.enabled = false } catch (e: Exception) {}
-        try { presetReverb?.enabled = false } catch (e: Exception) {}
+        try { equalizer?.enabled = false } catch (_: Exception) {}
+        try { bassBoost?.enabled = false } catch (_: Exception) {}
+        try { virtualizer?.enabled = false } catch (_: Exception) {}
+        try { presetReverb?.enabled = false } catch (_: Exception) {}
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            try { loudnessEnhancer?.enabled = false } catch (e: Exception) {}
+            try { loudnessEnhancer?.enabled = false } catch (_: Exception) {}
         }
     }
 
@@ -941,8 +940,7 @@ class MusicService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val imageLoader by lazy { ImageLoader(this) }
 
-    private var mediaSession: androidx.media3.session.MediaSession? = null
-    private var nativeMediaSession: android.media.session.MediaSession? = null
+    private var mediaSession: MediaSession? = null
     private var notificationManager: PlayerNotificationManager? = null
     private var currentNotification: Notification? = null
     private var autoStopJob: Job? = null
@@ -1008,19 +1006,17 @@ class MusicService : Service() {
     }
 
     private fun observeSettings() {
+        val KEY_CROSSFADE = intPreferencesKey("music_crossfade_duration")
+        val KEY_GAPLESS = booleanPreferencesKey("music_gapless_playback")
+        val KEY_PAUSE = booleanPreferencesKey("music_pause_unplug")
+        val KEY_RESUME = booleanPreferencesKey("music_resume_plug")
+
         serviceScope.launch {
-            combine(
-                settingsRepository.crossfadeDuration,
-                settingsRepository.gaplessPlayback,
-                settingsRepository.pauseOnUnplug,
-                settingsRepository.resumeOnPlug
-            ) { crossfade, gapless, pause, resume ->
-                PlaybackSettings(crossfade, gapless, pause, resume)
-            }.collect { settings ->
-                playerManager.crossfadeDurationMs = settings.crossfade * 1000
-                playerManager.gaplessPlayback = settings.gapless
-                playerManager.pauseOnUnplug = settings.pause
-                playerManager.resumeOnPlug = settings.resume
+            applicationContext.dataStore.data.collect { prefs ->
+                playerManager.crossfadeDurationMs = (prefs[KEY_CROSSFADE] ?: 2) * 1000
+                playerManager.gaplessPlayback = prefs[KEY_GAPLESS] ?: true
+                playerManager.pauseOnUnplug = prefs[KEY_PAUSE] ?: true
+                playerManager.resumeOnPlug = prefs[KEY_RESUME] ?: false
             }
         }
     }
@@ -1069,23 +1065,12 @@ class MusicService : Service() {
     }
 
     private fun setupMediaSession() {
-        mediaSession = androidx.media3.session.MediaSession.Builder(this, playerManager.player).build()
-
-        nativeMediaSession = android.media.session.MediaSession(this, "GalleryBoxMediaSession").apply {
-            isActive = true
-            setCallback(object : android.media.session.MediaSession.Callback() {
-                override fun onPlay() { togglePlayPause() }
-                override fun onPause() { togglePlayPause() }
-                override fun onSkipToNext() { playerManager.seekToNext() }
-                override fun onSkipToPrevious() { playerManager.seekToPrevious() }
-                override fun onStop() { stopServiceAndPlayback() }
-            })
-        }
+        mediaSession = MediaSession.Builder(this, playerManager.player).build()
     }
 
     private fun setupNotification() {
         notificationManager = PlayerNotificationManager.Builder(this, NOTIFICATION_ID, CHANNEL_ID)
-            .setChannelNameResourceId(com.gallerybox.R.string.app_name)
+            .setChannelNameResourceId(R.string.app_name)
             .setMediaDescriptionAdapter(DescriptionAdapter())
             .setNotificationListener(object : PlayerNotificationManager.NotificationListener {
                 override fun onNotificationPosted(notificationId: Int, notification: Notification, ongoing: Boolean) {
@@ -1106,7 +1091,6 @@ class MusicService : Service() {
             .build()
             .apply {
                 setPlayer(playerManager.player)
-                nativeMediaSession?.let { setMediaSessionToken(it.sessionToken) }
             }
     }
 
@@ -1147,8 +1131,6 @@ class MusicService : Service() {
     override fun onDestroy() {
         serviceScope.cancel()
         mediaSession?.release()
-        nativeMediaSession?.isActive = false
-        nativeMediaSession?.release()
         notificationManager?.setPlayer(null)
         super.onDestroy()
     }

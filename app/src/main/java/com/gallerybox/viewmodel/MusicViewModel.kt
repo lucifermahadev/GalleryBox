@@ -653,7 +653,7 @@ class MusicViewModel @Inject constructor(
     fun toggleGaplessPlayback(enabled: Boolean) {
         _isGaplessEnabled.value = enabled
         settingsPrefs.edit().putBoolean("gapless_playback", enabled).apply()
-        playerManager.setGaplessPlayback(enabled)
+        playerManager.gaplessPlayback = enabled
     }
 
     fun toggleCrossfade(enabled: Boolean) {
@@ -667,7 +667,7 @@ class MusicViewModel @Inject constructor(
     fun togglePauseOnUnplug(enabled: Boolean) {
         _isPauseOnUnplugEnabled.value = enabled
         settingsPrefs.edit().putBoolean("pause_on_unplug", enabled).apply()
-        playerManager.setPauseOnUnplug(enabled)
+        playerManager.pauseOnUnplug = enabled
     }
 
     fun resetAudioEffects() {
