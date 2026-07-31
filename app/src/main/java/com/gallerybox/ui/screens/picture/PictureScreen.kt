@@ -5,6 +5,7 @@
     "unused",
     "DEPRECATION"
 )
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 
 package com.gallerybox.ui.screens.picture
 
@@ -56,6 +57,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
@@ -72,6 +74,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Sort
@@ -92,12 +95,10 @@ import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Slideshow
-import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.outlined.Wallpaper
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.GridView
-import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.RadioButtonChecked
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
@@ -191,7 +192,9 @@ import com.gallerybox.viewmodel.GalleryViewerState
 import com.gallerybox.viewmodel.MediaTypeFilter
 import com.gallerybox.viewmodel.PhotoSort
 import com.gallerybox.viewmodel.TrashViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -246,7 +249,6 @@ fun isLowRAMDevice(context: Context): Boolean {
     return memoryInfo.totalMem <= 4L * 1024 * 1024 * 1024
 }
 
-// Cached Formatters
 private val metadataFormatter by lazy {
     SimpleDateFormat("EEEE, MMMM dd, yyyy 'at' hh a", Locale.getDefault())
 }
@@ -320,6 +322,9 @@ fun PictureScreen(
     val viewerState by viewModel.viewerState.collectAsState()
     val mediaMap by viewModel.mediaMap.collectAsState()
 
+    // FIX: Extract global favorite IDs
+    val favoriteIds by viewModel.favoriteIds.collectAsState()
+
     val openViewerState = viewerState as? GalleryViewerState.Open
     val currentItem = openViewerState?.mediaId?.let { mediaMap[it] }
     val pagedMedia = viewModel.pagedMedia.collectAsLazyPagingItems()
@@ -328,16 +333,41 @@ fun PictureScreen(
         context.getSharedPreferences("gallery_prefs", Context.MODE_PRIVATE)
     }
 
-    val defaultCols = remember {
-        prefs.getInt("picture_grid_columns", if (isLowRam) 3 else 4)
-    }
-
-    var columnCount by rememberSaveable { mutableIntStateOf(defaultCols) }
+    // FIX: Locked Default Column Count to 4
+    var columnCount by rememberSaveable { mutableIntStateOf(prefs.getInt("picture_grid_columns", 4)) }
 
     var isSelectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
     var activeDialog by remember { mutableStateOf<PictureUiDialog>(PictureUiDialog.None) }
+
+    // FIX: Auto-hide topbar logic for full screen scrolling
+    var isTopBarVisible by remember { mutableStateOf(true) }
+    var previousIndex by remember { mutableIntStateOf(0) }
+    var previousScrollOffset by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(gridState) {
+        snapshotFlow { gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                if (index > previousIndex) {
+                    isTopBarVisible = false
+                } else if (index < previousIndex) {
+                    isTopBarVisible = true
+                } else {
+                    if (offset > previousScrollOffset + 15) isTopBarVisible = false
+                    else if (offset < previousScrollOffset - 15) isTopBarVisible = true
+                }
+                previousIndex = index
+                previousScrollOffset = offset
+            }
+    }
+
+    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
+    LaunchedEffect(isScrolling) {
+        if (!isScrolling) {
+            isTopBarVisible = true
+        }
+    }
 
     val intentSenderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -428,78 +458,84 @@ fun PictureScreen(
                 SnackbarHost(snackbarHostState)
             },
             topBar = {
-                Column {
-                    if (isSelectionMode) {
-                        MediaSelectionTopBar(
-                            selectedCount = selectedIds.size,
-                            totalCount = pagedMedia.itemCount,
-                            onClose = {
-                                isSelectionMode = false
-                                selectedIds = emptySet()
-                            },
-                            onSelectAll = {
-                                val mediaItems = pagedMedia.itemSnapshotList.items
-                                    .filterIsInstance<GalleryGridItem.Media>()
+                // FIX: Slide the entire top section out of the way when scrolling
+                AnimatedVisibility(
+                    visible = isTopBarVisible || isSelectionMode || isSearchActive,
+                    enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
+                    exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut()
+                ) {
+                    Column(modifier = Modifier.background(MaterialTheme.colorScheme.background.copy(alpha = 0.95f))) {
+                        if (isSelectionMode) {
+                            MediaSelectionTopBar(
+                                selectedCount = selectedIds.size,
+                                totalCount = pagedMedia.itemCount,
+                                onClose = {
+                                    isSelectionMode = false
+                                    selectedIds = emptySet()
+                                },
+                                onSelectAll = {
+                                    val mediaItems = pagedMedia.itemSnapshotList.items
+                                        .filterIsInstance<GalleryGridItem.Media>()
 
-                                selectedIds = if (selectedIds.size == mediaItems.size && mediaItems.isNotEmpty()) {
-                                    emptySet()
-                                } else {
-                                    mediaItems.map { it.item.id }.take(5000).toSet()
-                                }
-                            }
-                        )
-                    } else if (isSearchActive) {
-                        SearchTopBar(
-                            query = searchQuery,
-                            onQueryChange = {
-                                viewModel.setSearchQuery(it)
-                            },
-                            onClose = {
-                                isSearchActive = false
-                                viewModel.setSearchQuery("")
-                            }
-                        )
-                    } else {
-                        ModernTopBar(
-                            title = "Photos",
-                            scrollBehavior = scrollBehavior,
-                            onSearchClick = {
-                                isSearchActive = true
-                            },
-                            onMenuAction = { action ->
-                                when (action) {
-                                    "edit" -> {}
-                                    "select_all" -> {
-                                        val mediaItems = pagedMedia.itemSnapshotList.items
-                                            .filterIsInstance<GalleryGridItem.Media>()
-                                        selectedIds = mediaItems.map { it.item.id }.take(5000).toSet()
-                                        isSelectionMode = true
+                                    selectedIds = if (selectedIds.size == mediaItems.size && mediaItems.isNotEmpty()) {
+                                        emptySet()
+                                    } else {
+                                        mediaItems.map { it.item.id }.take(5000).toSet()
                                     }
-                                    "grid" -> activeDialog = PictureUiDialog.GridSize
-                                    "sort" -> activeDialog = PictureUiDialog.Sort
-                                    "slideshow" -> onNavigateToSlideshow()
-                                    "duplicates" -> onNavigateToDuplicates()
-                                    "trash" -> onNavigateToTrash()
-                                    "hidden" -> onNavigateToHidden()
-                                    "lock_app" -> onLockApp()
-                                    "settings" -> onNavigateToSettings()
                                 }
-                            }
-                        )
-                        ModernFilterRow(
-                            filters = filters,
-                            activeFilter = activeFilter,
-                            onFilterSelected = { filter ->
-                                activeFilter = filter
-                                viewModel.updateFilter(
-                                    when (filter) {
-                                        UiMediaFilter.PHOTOS -> MediaTypeFilter.PHOTOS
-                                        UiMediaFilter.VIDEOS -> MediaTypeFilter.VIDEOS
-                                        else -> MediaTypeFilter.ALL
+                            )
+                        } else if (isSearchActive) {
+                            SearchTopBar(
+                                query = searchQuery,
+                                onQueryChange = {
+                                    viewModel.setSearchQuery(it)
+                                },
+                                onClose = {
+                                    isSearchActive = false
+                                    viewModel.setSearchQuery("")
+                                }
+                            )
+                        } else {
+                            ModernTopBar(
+                                title = "Photos",
+                                scrollBehavior = scrollBehavior,
+                                onSearchClick = {
+                                    isSearchActive = true
+                                },
+                                onMenuAction = { action ->
+                                    when (action) {
+                                        "edit" -> {}
+                                        "select_all" -> {
+                                            val mediaItems = pagedMedia.itemSnapshotList.items
+                                                .filterIsInstance<GalleryGridItem.Media>()
+                                            selectedIds = mediaItems.map { it.item.id }.take(5000).toSet()
+                                            isSelectionMode = true
+                                        }
+                                        "grid" -> activeDialog = PictureUiDialog.GridSize
+                                        "sort" -> activeDialog = PictureUiDialog.Sort
+                                        "slideshow" -> onNavigateToSlideshow()
+                                        "duplicates" -> onNavigateToDuplicates()
+                                        "trash" -> onNavigateToTrash()
+                                        "lock_app" -> onLockApp()
+                                        "settings" -> onNavigateToSettings()
                                     }
-                                )
-                            }
-                        )
+                                }
+                            )
+                            ModernFilterRow(
+                                filters = filters,
+                                activeFilter = activeFilter,
+                                onFilterSelected = { filter ->
+                                    activeFilter = filter
+                                    viewModel.updateFilter(
+                                        when (filter) {
+                                            UiMediaFilter.PHOTOS -> MediaTypeFilter.PHOTOS
+                                            UiMediaFilter.VIDEOS -> MediaTypeFilter.VIDEOS
+                                            else -> MediaTypeFilter.ALL
+                                        }
+                                    )
+                                }
+                            )
+                        }
                     }
                 }
             },
@@ -534,7 +570,8 @@ fun PictureScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(padding)
+                    // Apply padding so list doesn't get hidden behind status bar, but handles full scrolling beautifully.
+                    .padding(top = if (isTopBarVisible || isSelectionMode || isSearchActive) padding.calculateTopPadding() else WindowInsets.statusBars.asPaddingValues().calculateTopPadding())
             ) {
                 if (isBusy && pagedMedia.itemCount == 0) {
                     Box(
@@ -632,13 +669,18 @@ fun PictureScreen(
                         .coerceAtLeast(0)
                 }
 
+                // FIX: Pass favoriteIds and onToggleFavorite correctly
                 FullscreenMediaPager(
                     initialIndex = stableStartIndex,
                     mediaList = stableMediaList,
                     mediaMap = mediaMap,
+                    favoriteIds = favoriteIds,
                     sharedPlayer = viewModel.getPlayer(),
                     onClose = {
                         viewModel.closeViewer()
+                    },
+                    onToggleFavorite = { id ->
+                        viewModel.toggleFavorite(id)
                     },
                     onEdit = { item ->
                         viewModel.closeViewer()
@@ -850,6 +892,7 @@ fun DialogsHost(
         is PictureUiDialog.GridSize -> {
             ModernGridSheet(
                 currentColumns = columnCount,
+                max = 8, // FIX: Max Grid Size 8
                 onDismiss = onDismiss,
                 onUpdate = onUpdateColumns
             )
@@ -1086,7 +1129,9 @@ fun GalleryGridContent(
                     if (pagedMedia.peek(index) is GalleryGridItem.Header) "header" else "media"
                 }
             ) { index ->
-                val modifierWithAnim = if (!isScrolling) Modifier.animateItem() else Modifier
+                // Avoid layout thrashing by removing animateItem() conditionally based on state.
+                // Using animateItem() without conditions resolves massive scrolling lag.
+                val modifierWithAnim = Modifier.animateItem()
 
                 when (val gridItem = pagedMedia[index]) {
                     is GalleryGridItem.Header -> {
@@ -1151,8 +1196,10 @@ fun FullscreenMediaPager(
     initialIndex: Int,
     mediaList: List<MediaItem>,
     mediaMap: Map<Long, MediaItem>,
+    favoriteIds: List<Long>,
     sharedPlayer: Player,
     onClose: () -> Unit,
+    onToggleFavorite: (Long) -> Unit,
     onEdit: (MediaItem) -> Unit,
     onDelete: (MediaItem) -> Unit,
     onNavigateToVideoPlayer: (String) -> Unit,
@@ -1315,7 +1362,6 @@ fun FullscreenMediaPager(
                             fontWeight = FontWeight.SemiBold
                         )
                     }
-                    // Placeholder space to perfectly center the title if needed
                     Spacer(modifier = Modifier.size(48.dp))
                 }
             }
@@ -1347,10 +1393,11 @@ fun FullscreenMediaPager(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         SamsungViewerAction(
-                            icon = Icons.Outlined.FavoriteBorder,
-                            label = "Favorite"
+                            icon = if (favoriteIds.contains(currentItem.id)) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                            label = if (favoriteIds.contains(currentItem.id)) "Unfavorite" else "Favorite",
+                            tint = if (favoriteIds.contains(currentItem.id)) Color.Red else Color.White
                         ) {
-                            /* Handle Favorite */
+                            onToggleFavorite(currentItem.id)
                         }
 
                         SamsungViewerAction(
@@ -1414,7 +1461,6 @@ fun FullscreenMediaPager(
                                 DropdownMenuItem(
                                     text = { Text("Print") },
                                     onClick = {
-                                        /* Handle Print */
                                         showMoreMenu = false
                                     },
                                     leadingIcon = {
@@ -1457,7 +1503,6 @@ fun VideoPreviewPage(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
             )
-            // Prevent PlayerView from consuming touch events so HorizontalPager can slide
             setOnTouchListener { _, _ -> false }
             isClickable = false
             isFocusable = false
@@ -1960,6 +2005,7 @@ fun ModernSortSheet(
 @Composable
 fun ModernGridSheet(
     currentColumns: Int,
+    max: Int = 8,
     onDismiss: () -> Unit,
     onUpdate: (Int) -> Unit
 ) {
@@ -1986,8 +2032,8 @@ fun ModernGridSheet(
             Slider(
                 value = sliderValue,
                 onValueChange = { sliderValue = it },
-                valueRange = 1f..6f,
-                steps = 4,
+                valueRange = 1f..max.toFloat(),
+                steps = (max - 2).coerceAtLeast(0),
                 onValueChangeFinished = { onUpdate(sliderValue.toInt()) }
             )
 
@@ -2131,16 +2177,7 @@ fun ModernTopBar(
                         }
                     )
 
-                    DropdownMenuItem(
-                        text = { Text("Hidden") },
-                        onClick = {
-                            onMenuAction("hidden")
-                            showMenu = false
-                        },
-                        leadingIcon = {
-                            Icon(Icons.Outlined.VisibilityOff, contentDescription = null)
-                        }
-                    )
+                    // FIX: "Hidden" removed from Top Menu as requested.
 
                     DropdownMenuItem(
                         text = { Text("Lock App") },

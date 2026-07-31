@@ -24,7 +24,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -309,10 +308,12 @@ fun AlbumScreen(
     // State Collection
     val vmAlbums by viewModel.albumsState.collectAsState(initial = emptyList())
     val rawAlbumPreviews by viewModel.albumPreviewMap.collectAsState()
-    val allAlbums by viewModel.allAlbumsState.collectAsState(initial = emptyList())
     val sortOption by viewModel.albumSort.collectAsState()
     val viewerState by viewModel.viewerState.collectAsState()
     val rawMedia by viewModel.rawMedia.collectAsState()
+    val favoriteIds by viewModel.favoriteIds.collectAsState() // Direct Sync from PictureScreen
+    val allAlbums by viewModel.allAlbumsState.collectAsState(initial = emptyList())
+    val hiddenAlbums by viewModel.hiddenAlbums.collectAsState()
 
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
@@ -330,9 +331,18 @@ fun AlbumScreen(
         rawAlbumPreviews.mapValues { it.value.toImmutableList() }.toImmutableMap()
     }
 
-    val displayAlbums: ImmutableList<Album> = remember(vmAlbums, searchQuery, sortOption) {
+    // FIX: Live dynamic syncing of Favorites album count/cover directly from rawMedia + favoriteIds
+    val displayAlbums: ImmutableList<Album> = remember(vmAlbums, searchQuery, sortOption, favoriteIds, rawMedia) {
+        val favMedia = rawMedia.filter { favoriteIds.contains(it.id) }
+        val updatedFavAlbum = vmAlbums.find { it.id == ID_FAVORITES }?.copy(
+            mediaCount = favMedia.size,
+            sizeBytes = favMedia.sumOf { it.size },
+            coverUri = favMedia.firstOrNull()?.uri ?: Uri.EMPTY
+        ) ?: Album(ID_FAVORITES, "Favorites", favMedia.firstOrNull()?.uri ?: Uri.EMPTY, favMedia.size, favMedia.sumOf { it.size }, true)
+
         val virtualAlbums = vmAlbums
-            .filter { it.id.startsWith("virtual_") && albumMatchesQuery(it, searchQuery) }
+            .filter { it.id.startsWith("virtual_") && it.id != ID_FAVORITES && albumMatchesQuery(it, searchQuery) }
+            .plus(if (albumMatchesQuery(updatedFavAlbum, searchQuery)) listOf(updatedFavAlbum) else emptyList())
             .sortedBy {
                 when (it.id) {
                     ID_RECENT -> 0
@@ -374,16 +384,9 @@ fun AlbumScreen(
 
     val configuration = LocalConfiguration.current
     val screenWidthDp = configuration.screenWidthDp.toFloat()
-    val adaptiveCols = remember(screenWidthDp) {
-        when {
-            screenWidthDp >= 800f -> 8
-            screenWidthDp >= 600f -> 6
-            else -> 4
-        }
-    }
 
     val prefs = remember { context.getSharedPreferences("gallery_prefs", Context.MODE_PRIVATE) }
-    var columnCount by remember { mutableIntStateOf(prefs.getInt("gallery_grid_columns", adaptiveCols)) }
+    var columnCount by remember { mutableIntStateOf(prefs.getInt("gallery_grid_columns", 3)) } // Default to 3 for albums
 
     val gridState = rememberLazyGridState()
     val intentSenderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
@@ -538,13 +541,6 @@ fun AlbumScreen(
                             selectedIds = persistentListOf(album.id).toImmutableSet()
                         }
                     },
-                    onSelectAll = { isAllSelected ->
-                        selectedIds = if (isAllSelected) {
-                            persistentListOf<String>().toImmutableSet()
-                        } else {
-                            dynamicList.map { it.id }.toImmutableSet()
-                        }
-                    },
                     onDragStateChange = { isDragging = it }
                 )
             }
@@ -693,6 +689,7 @@ fun AlbumScreen(
                 onDismissRequest = { activeDialog = AlbumUiDialog.None },
                 containerColor = MaterialTheme.colorScheme.surface
             ) {
+                val allAlbums by viewModel.allAlbumsState.collectAsState(initial = emptyList())
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -817,7 +814,6 @@ fun AlbumScreen(
                 onUpdate = {
                     columnCount = it
                     prefs.edit().putInt("gallery_grid_columns", it).apply()
-                    activeDialog = AlbumUiDialog.None
                 }
             )
         }
@@ -826,9 +822,19 @@ fun AlbumScreen(
                 onDismissRequest = { activeDialog = AlbumUiDialog.None },
                 containerColor = MaterialTheme.colorScheme.surface
             ) {
-                val hiddenAlbums by viewModel.hiddenAlbums.collectAsState()
-
-                val initialAlbums = remember { allAlbums.filter { !it.id.startsWith("virtual_") } }
+                val allPossibleAlbums = remember(rawMedia) {
+                    rawMedia.groupBy { it.bucketId }.map { (id, items) ->
+                        val first = items.first()
+                        Album(
+                            id = id,
+                            name = first.bucketName,
+                            coverUri = first.uri,
+                            mediaCount = items.size,
+                            sizeBytes = items.sumOf { it.size },
+                            isPinned = false
+                        )
+                    }.filter { !it.id.startsWith("virtual_") }.sortedBy { it.name.lowercase() }
+                }
 
                 Column(
                     Modifier
@@ -845,7 +851,7 @@ fun AlbumScreen(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(bottom = 12.dp)
                     ) {
-                        items(initialAlbums, key = { it.id }) { album ->
+                        items(allPossibleAlbums, key = { it.id }) { album ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1536,7 +1542,6 @@ fun AlbumDetailScreen(
                 onUpdate = {
                     detailColumns = it
                     prefs.edit().putInt("gallery_grid_columns", it).apply()
-                    activeDialog = DetailUiDialog.None
                 }
             )
         }
@@ -1594,12 +1599,6 @@ fun AlbumDetailScreen(
                     onClose = { viewModel.closeViewer() },
                     onToggleFavorite = { id: Long ->
                         viewModel.toggleFavorite(id)
-                        if (albumId == ID_FAVORITES) {
-                            scope.launch {
-                                delay(300)
-                                viewModel.closeViewer()
-                            }
-                        }
                     },
                     onEdit = { item: MediaItem ->
                         viewModel.closeViewer()
@@ -1653,7 +1652,6 @@ fun StatelessAlbumGrid(
     onOrderSaved: (List<Album>) -> Unit,
     onAlbumClick: (Album) -> Unit,
     onAlbumLongClick: (Album) -> Unit,
-    onSelectAll: (Boolean) -> Unit,
     onDragStateChange: (Boolean) -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
@@ -1664,11 +1662,11 @@ fun StatelessAlbumGrid(
     val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
 
     val actualColumns = columnCount.coerceAtLeast(1)
-    val dynamicThumbSize = remember(actualColumns, screenWidthDp, isScrolling) {
-        if (isScrolling) 160 else maxOf(512, (screenWidthDp / actualColumns).toInt())
+    val dynamicThumbSize = remember(actualColumns, screenWidthDp) {
+        maxOf(250, (screenWidthDp / actualColumns).toInt() * 2)
     }
 
-    GridImagePrefetcher(gridState = gridState, items = dynamicList, previews = albumPreviews)
+    GridImagePrefetcher(gridState = gridState, items = dynamicList, previews = albumPreviews, thumbSize = dynamicThumbSize)
 
     LaunchedEffect(scrollVelocity) {
         if (scrollVelocity != 0f) {
@@ -1694,7 +1692,7 @@ fun StatelessAlbumGrid(
     ) {
         itemsIndexed(items = dynamicList, key = { _, album -> album.id }) { index, album ->
             val isBeingDragged = draggedIndex == index
-            val modifierWithAnim = if (isScrolling) Modifier else Modifier.animateItem()
+            val modifierWithAnim = Modifier.animateItem()
 
             val isVirtualNode = album.id.startsWith("virtual_")
             val canDrag = sortOption == AlbumSort.Custom && searchQuery.isBlank() &&
@@ -1772,9 +1770,6 @@ fun StatelessAlbumGrid(
                     .zIndex(if (isBeingDragged) 1f else 0f)
                     .graphicsLayer {
                         if (isBeingDragged) {
-                            scaleX = 1.08f
-                            scaleY = 1.08f
-                            alpha = 0.9f
                             translationX = dragOffset.x
                             translationY = dragOffset.y
                             shadowElevation = 24f
@@ -1801,7 +1796,8 @@ fun StatelessAlbumGrid(
 fun GridImagePrefetcher(
     gridState: LazyGridState,
     items: ImmutableList<Album>,
-    previews: ImmutableMap<String, ImmutableList<Uri>>
+    previews: ImmutableMap<String, ImmutableList<Uri>>,
+    thumbSize: Int
 ) {
     val context = LocalContext.current
     val imageLoader = context.imageLoader
@@ -1824,7 +1820,7 @@ fun GridImagePrefetcher(
                     if (coverUri != null) {
                         val request = ImageRequest.Builder(context)
                             .data(coverUri)
-                            .size(160)
+                            .size(thumbSize)
                             .memoryCacheKey("thumb_${album.id}")
                             .diskCachePolicy(CachePolicy.ENABLED)
                             .build()
@@ -1854,11 +1850,11 @@ fun StatelessMediaGrid(
     val haptic = LocalHapticFeedback.current
     val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
 
-    val dynamicThumbSize = remember(columnCount, screenWidthPx, isScrolling) {
-        if (isScrolling) 160 else maxOf(160, screenWidthPx / columnCount)
+    val dynamicThumbSize = remember(columnCount, screenWidthPx) {
+        maxOf(250, screenWidthPx / columnCount)
     }
 
-    MediaGridImagePrefetcher(gridState = gridState, mediaList = mediaList)
+    MediaGridImagePrefetcher(gridState = gridState, mediaList = mediaList, thumbSize = dynamicThumbSize)
 
     LazyVerticalGrid(
         state = gridState,
@@ -1874,7 +1870,7 @@ fun StatelessMediaGrid(
             contentType = { "media" }
         ) { index ->
             val currentItem = mediaList[index]
-            val modifierWithAnim = if (isScrolling) Modifier else Modifier.animateItem()
+            val modifierWithAnim = Modifier.animateItem()
 
             ModernMediaGridTile(
                 modifier = modifierWithAnim,
@@ -1882,7 +1878,6 @@ fun StatelessMediaGrid(
                 thumbSize = dynamicThumbSize,
                 isSelected = selectedIds.contains(currentItem.id),
                 isSelectionMode = isSelectionMode,
-                isScrolling = isScrolling,
                 onClick = {
                     if (isSelectionMode) {
                         onToggleSelection(currentItem)
@@ -1904,7 +1899,8 @@ fun StatelessMediaGrid(
 @Composable
 fun MediaGridImagePrefetcher(
     gridState: LazyGridState,
-    mediaList: ImmutableList<MediaItem>
+    mediaList: ImmutableList<MediaItem>,
+    thumbSize: Int
 ) {
     val context = LocalContext.current
     val imageLoader = context.imageLoader
@@ -1924,7 +1920,7 @@ fun MediaGridImagePrefetcher(
                     val item = mediaList[i]
                     val request = ImageRequest.Builder(context)
                         .data(item.uri)
-                        .size(160)
+                        .size(thumbSize)
                         .memoryCacheKey("thumb_${item.id}")
                         .diskCachePolicy(CachePolicy.ENABLED)
                         .build()
@@ -1952,8 +1948,6 @@ private fun OptimizedAlbumTile(
     onLongClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val scale = if (isPressed) 0.96f else if (isSelected) 0.93f else 1f
 
     val clickModifier = if (canDrag) {
         Modifier
@@ -1976,10 +1970,6 @@ private fun OptimizedAlbumTile(
     Column(
         Modifier
             .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
             .then(clickModifier)
     ) {
         Surface(
@@ -2088,24 +2078,16 @@ fun ModernMediaGridTile(
     thumbSize: Int,
     isSelected: Boolean,
     isSelectionMode: Boolean,
-    isScrolling: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onToggleFavorite: () -> Unit
 ) {
-    val cornerRadius by animateDpAsState(targetValue = if (isSelected) 16.dp else 12.dp, label = "cornerRadius")
-    val scale by animateFloatAsState(targetValue = if (isSelected) 0.94f else 1f, animationSpec = spring(stiffness = 500f), label = "tileScale")
+    val cornerRadius = 8.dp
     val context = LocalContext.current
 
     Box(
         modifier = modifier
             .aspectRatio(1f)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                clip = true
-                shape = RoundedCornerShape(cornerRadius)
-            }
             .clip(RoundedCornerShape(cornerRadius))
             .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -2190,7 +2172,7 @@ fun SelectionOverlay(isSelected: Boolean, isSelectionMode: Boolean, cornerRadius
             Box(
                 Modifier
                     .fillMaxSize()
-                    .background(if (isSelected) Color.White.copy(alpha = 0.25f) else Color.Black.copy(alpha = 0.1f))
+                    .background(if (isSelected) Color.White.copy(alpha = 0.25f) else Color.Transparent)
             )
             Box(Modifier.padding(8.dp).align(Alignment.TopStart)) {
                 if (isSelected) {
@@ -2415,7 +2397,6 @@ fun ModernAlbumTopBar(
                     PremiumAlbumMenuItem("Scan Library", Icons.Outlined.ImageSearch) { onMenuAction("scan"); showMenu = false }
                     HorizontalDivider()
                     PremiumAlbumMenuItem("Trash", Icons.Outlined.Delete) { onMenuAction("trash"); showMenu = false }
-                    PremiumAlbumMenuItem("Hide Albums", Icons.Outlined.VisibilityOff) { onMenuAction("hidden"); showMenu = false }
                     PremiumAlbumMenuItem("Lock App", Icons.Outlined.Lock) { onMenuAction("lock_app"); showMenu = false }
                     HorizontalDivider()
                     PremiumAlbumMenuItem("Settings", Icons.Outlined.Settings) { onMenuAction("settings"); showMenu = false }
@@ -2757,96 +2738,54 @@ fun ModernMediaSortSheet(activeSort: PhotoSort, onDismiss: () -> Unit, onSortSel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernGridSheet(currentColumns: Int, max: Int = 8, onDismiss: () -> Unit, onUpdate: (Int) -> Unit) {
-    var sliderValue by remember { mutableFloatStateOf(currentColumns.toFloat()) }
-
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface,
         dragHandle = {
             Box(
                 Modifier
-                    .padding(top = 10.dp)
-                    .width(54.dp)
-                    .height(5.dp)
+                    .padding(top = 10.dp, bottom = 10.dp)
+                    .width(40.dp)
+                    .height(4.dp)
                     .clip(RoundedCornerShape(50))
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f))
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f))
             )
         }
     ) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 22.dp)
-                .padding(bottom = 34.dp)
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp, top = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(58.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.GridView,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(30.dp)
-                    )
-                }
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text(
-                        text = "Grid Layout",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "${sliderValue.toInt()} Columns",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            Spacer(Modifier.height(28.dp))
-            Surface(
-                Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(30.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh
-            ) {
-                Column(Modifier.padding(22.dp)) {
-                    repeat(2) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            repeat(sliderValue.toInt()) {
-                                Box(
-                                    Modifier
-                                        .weight(1f)
-                                        .aspectRatio(1f)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
-                                )
-                            }
-                        }
-                        Spacer(Modifier.height(8.dp))
-                    }
-                }
-            }
-            Spacer(Modifier.height(28.dp))
+            Text(
+                text = "Grid Layout",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+
+            Spacer(Modifier.height(24.dp))
+
             Slider(
-                value = sliderValue,
-                onValueChange = { sliderValue = it },
+                value = currentColumns.toFloat(),
+                onValueChange = { onUpdate(it.roundToInt()) },
                 valueRange = 1f..max.toFloat(),
                 steps = (max - 2).coerceAtLeast(0),
-                onValueChangeFinished = { onUpdate(sliderValue.toInt()) },
                 colors = SliderDefaults.colors(
                     thumbColor = MaterialTheme.colorScheme.primary,
                     activeTrackColor = MaterialTheme.colorScheme.primary,
-                    inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                    inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
                 )
+            )
+
+            Spacer(Modifier.height(16.dp))
+
+            Text(
+                text = "$currentColumns Columns",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
             )
         }
     }
