@@ -73,7 +73,10 @@ sealed interface Route {
     @Serializable data object Radio : Route
     @Serializable data object Equalizer : Route
     @Serializable data object DuoMusic : Route
-    @Serializable data object Settings : Route
+
+    // FIX: Renamed to SettingsRoute to prevent clash with android.provider.Settings
+    @Serializable data object SettingsRoute : Route
+
     @Serializable data object ScanLibrary : Route
     @Serializable data object Trash : Route
     @Serializable data object Hidden : Route
@@ -287,7 +290,7 @@ private fun NavGraphBuilder.mainTabs(
             onNavigateToWallpaper = { uri, id -> nav.navigate(Route.Wallpaper(uri.toSafeRouteArgs(), id)) },
             onNavigateToAlbum = { raw -> nav.navigate(Route.AlbumView(raw.toSafeRouteArgs())) },
             onNavigateToScan = { nav.navigate(Route.ScanLibrary) },
-            onNavigateToSettings = { nav.navigate(Route.Settings) },
+            onNavigateToSettings = { nav.navigate(Route.SettingsRoute) }, // FIX applied
             onNavigateToVideoPlayer = navToVid,
             onNavigateToEditor = { uri, id -> nav.navigate(Route.MediaEditor(uri.toSafeRouteArgs(), id)) },
             onNavigateToMoveCopy = { m, ids, src -> nav.navigate(Route.MoveCopy(m, ids, src?.toSafeRouteArgs())) }
@@ -305,7 +308,7 @@ private fun NavGraphBuilder.mainTabs(
                 onNavigateToTrash = { nav.navigate(Route.Trash) },
                 onNavigateToHidden = { nav.navigate(Route.Hidden) },
                 onLockApp = onLock,
-                onNavigateToSettings = { nav.navigate(Route.Settings) },
+                onNavigateToSettings = { nav.navigate(Route.SettingsRoute) }, // FIX applied
                 onNavigateToDuplicates = { nav.navigate(Route.Duplicates) },
                 onNavigateToScan = { nav.navigate(Route.ScanLibrary) }
             )
@@ -392,7 +395,9 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     composable<Route.Radio> { RadioScreen(viewModel = hiltViewModel<RadioViewModel>(), onBack = { nav.popBackStack() }) }
     composable<Route.Equalizer> { EqualizerScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
     composable<Route.DuoMusic> { DuoMusicScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
-    composable<Route.Settings> { SettingScreen(onBack = { nav.popBackStack() }) }
+
+    // FIX applied here
+    composable<Route.SettingsRoute> { SettingScreen(onBack = { nav.popBackStack() }) }
 
     composable<Route.Wallpaper> { backStack ->
         val args = backStack.toRoute<Route.Wallpaper>()
