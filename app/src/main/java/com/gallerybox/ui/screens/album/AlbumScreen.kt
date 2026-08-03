@@ -1,8 +1,10 @@
 @file:Suppress("UnsafeOptInUsageError", "UnstableApiUsage", "OPT_IN_USAGE", "unused", "DEPRECATION")
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.gallerybox.ui.screens.album
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -42,6 +44,7 @@ import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,9 +55,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -74,9 +75,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -96,6 +99,7 @@ import com.gallerybox.viewmodel.GalleryViewModel
 import com.gallerybox.viewmodel.GalleryViewerState
 import com.gallerybox.viewmodel.MergeMode
 import com.gallerybox.viewmodel.PhotoSort
+import com.gallerybox.viewmodel.SecurityViewModel
 import com.gallerybox.viewmodel.TrashViewModel
 import kotlinx.collections.immutable.*
 import kotlinx.coroutines.Dispatchers
@@ -105,6 +109,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
+import java.util.ArrayList
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
@@ -121,6 +126,7 @@ const val ID_INSTAGRAM = "virtual_instagram"
 const val ID_HIDDEN = "virtual_hidden"
 
 enum class AlbumMediaFilter { ALL, PHOTOS, VIDEOS }
+enum class StorageFilter { ALL, PHONE, SD_CARD }
 
 @Stable
 data class AlbumActions(
@@ -128,8 +134,7 @@ data class AlbumActions(
     val onNavigateToFavorites: () -> Unit,
     val onNavigateToTrash: () -> Unit,
     val onNavigateToHidden: () -> Unit,
-    val onLockApp: () -> Unit,
-    val onNavigateToSettings: () -> Unit,
+    val onLockApp: () -> Unit = {},
     val onNavigateToDuplicates: () -> Unit,
     val onNavigateToScan: () -> Unit
 )
@@ -143,7 +148,7 @@ data class DetailActions(
     val onNavigateToMoveCopy: (String, String, String?) -> Unit,
     val onNavigateToTrash: () -> Unit,
     val onNavigateToHidden: () -> Unit,
-    val onLockApp: () -> Unit,
+    val onLockApp: () -> Unit = {},
     val onNavigateToWallpaper: (String, Long) -> Unit,
     val onAddMediaToAlbum: ((String) -> Unit)? = null,
     val onDeleteAlbum: ((String) -> Unit)? = null
@@ -172,6 +177,24 @@ sealed class DetailUiDialog {
     data class QuickAction(val item: MediaItem) : DetailUiDialog()
 }
 
+fun Context.findFragmentActivity(): FragmentActivity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is FragmentActivity) return context
+        context = context.baseContext
+    }
+    return null
+}
+
+fun Context.findActivity(): Activity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is Activity) return context
+        context = context.baseContext
+    }
+    return null
+}
+
 fun clearImageCache(context: Context) {
     context.imageLoader.memoryCache?.clear()
     context.imageLoader.diskCache?.clear()
@@ -194,18 +217,15 @@ fun getFolderName(path: String): String {
     return try { File(path).parentFile?.name ?: "Unknown Folder" } catch (e: Exception) { "Unknown Folder" }
 }
 
+private fun isLowRAMDevice(context: Context): Boolean {
+    val m = ActivityManager.MemoryInfo()
+    (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(m)
+    return m.totalMem <= 4L * 1024 * 1024 * 1024
+}
+
 fun formatDuration(durationMs: Long): String {
     val t = durationMs / 1000; val m = (t / 60) % 60; val h = t / 3600; val s = t % 60
     return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s) else String.format(Locale.US, "%d:%02d", m, s)
-}
-
-fun Context.findActivity(): Activity? {
-    var ctx = this
-    while (ctx is ContextWrapper) {
-        if (ctx is Activity) return ctx
-        ctx = ctx.baseContext
-    }
-    return null
 }
 
 fun albumMatchesQuery(album: Album, query: String): Boolean {
@@ -234,6 +254,50 @@ fun shareMediaItems(context: Context, items: List<MediaItem>) {
     try { context.startActivity(Intent.createChooser(intent, "Share via")) } catch (e: Exception) { Toast.makeText(context, "No app found", Toast.LENGTH_SHORT).show() }
 }
 
+fun toggleAppLock(
+    context: Context,
+    securityViewModel: SecurityViewModel,
+    currentState: Boolean,
+    onStateChanged: (Boolean) -> Unit
+) {
+    val activity = context.findFragmentActivity()
+    if (activity == null) {
+        Toast.makeText(context, "Cannot authenticate (Context Invalid)", Toast.LENGTH_SHORT).show()
+        return
+    }
+    if (!securityViewModel.canUseSystemAuthentication()) {
+        Toast.makeText(context, "System authentication unavailable. Set up a screen lock first.", Toast.LENGTH_LONG).show()
+        return
+    }
+
+    androidx.biometric.BiometricPrompt(
+        activity,
+        ContextCompat.getMainExecutor(context),
+        object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {
+                super.onAuthenticationSucceeded(result)
+                val newState = !currentState
+                securityViewModel.setAppLockEnabled(newState)
+                onStateChanged(newState)
+                Toast.makeText(context, if (newState) "App Lock Enabled" else "App Lock Disabled", Toast.LENGTH_SHORT).show()
+            }
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                super.onAuthenticationError(errorCode, errString)
+                Toast.makeText(context, "Authentication error: $errString", Toast.LENGTH_SHORT).show()
+            }
+        }
+    ).authenticate(
+        androidx.biometric.BiometricPrompt.PromptInfo.Builder()
+            .setTitle("GalleryBox Security")
+            .setSubtitle("Confirm identity to change lock settings")
+            .setAllowedAuthenticators(
+                androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            )
+            .build()
+    )
+}
+
 @Composable
 fun rememberGridImageRequest(uri: Uri?, size: Int, isVideo: Boolean): ImageRequest {
     val context = LocalContext.current
@@ -259,20 +323,26 @@ fun rememberGridImageRequest(uri: Uri?, size: Int, isVideo: Boolean): ImageReque
 fun AlbumScreen(
     viewModel: GalleryViewModel = hiltViewModel(),
     trashViewModel: TrashViewModel = hiltViewModel(),
+    securityViewModel: SecurityViewModel = hiltViewModel(),
     onViewerStateChanged: (Boolean) -> Unit = {},
     actions: AlbumActions
 ) {
-    val context = LocalContext.current; val scope = rememberCoroutineScope(); val snackbarHostState = remember { SnackbarHostState() }
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
+    val context = LocalContext.current
+    val isLowRam = remember { isLowRAMDevice(context) }
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
+    val enginePrefs = remember { context.getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE) }
+
     val vmAlbums by viewModel.albumsState.collectAsState(initial = emptyList())
     val rawAlbumPreviews by viewModel.albumPreviewMap.collectAsState()
     val sortOption by viewModel.albumSort.collectAsState()
     val viewerState by viewModel.viewerState.collectAsState()
-    val rawMedia by viewModel.rawMedia.collectAsState()
+    val allMedia by viewModel.media.collectAsState()
     val favoriteIds by viewModel.favoriteIds.collectAsState()
-    val allAlbums by viewModel.allAlbumsState.collectAsState(initial = emptyList())
     val hiddenAlbums by viewModel.hiddenAlbums.collectAsState()
 
+    var isAppLockEnabled by remember { mutableStateOf(securityViewModel.isAppLockEnabled()) }
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
     var isDragging by remember { mutableStateOf(false) }
@@ -280,13 +350,14 @@ fun AlbumScreen(
     var selectedIds by remember { mutableStateOf<ImmutableSet<String>>(persistentListOf<String>().toImmutableSet()) }
     var activeDialog by remember { mutableStateOf<AlbumUiDialog>(AlbumUiDialog.None) }
     var showSelectionMenu by remember { mutableStateOf(false) }
+    var ignoreUpdatesUntil by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(viewerState, isSelectionMode) { onViewerStateChanged(viewerState is GalleryViewerState.Open || isSelectionMode) }
 
     val albumPreviews = remember(rawAlbumPreviews) { rawAlbumPreviews.mapValues { it.value.toImmutableList() }.toImmutableMap() }
 
-    val displayAlbums: ImmutableList<Album> = remember(vmAlbums, searchQuery, sortOption, favoriteIds, rawMedia) {
-        val favMedia = rawMedia.filter { favoriteIds.contains(it.id) }
+    val displayAlbums = remember(vmAlbums, searchQuery, sortOption, favoriteIds, allMedia) {
+        val favMedia = allMedia.filter { favoriteIds.contains(it.id) }
         val virtualAlbumsMutable = vmAlbums.filter { it.id.startsWith("virtual_") && it.id != ID_FAVORITES && albumMatchesQuery(it, searchQuery) }.toMutableList()
         if (favMedia.isNotEmpty()) {
             val updatedFavAlbum = vmAlbums.find { it.id == ID_FAVORITES }?.copy(mediaCount = favMedia.size, sizeBytes = favMedia.sumOf { it.size }, coverUri = favMedia.firstOrNull()?.uri ?: Uri.EMPTY) ?: Album(ID_FAVORITES, "Favorites", favMedia.firstOrNull()?.uri ?: Uri.EMPTY, favMedia.size, favMedia.sumOf { it.size }, true)
@@ -301,12 +372,26 @@ fun AlbumScreen(
         (sortedVirtualAlbums + sortedUserAlbums).toImmutableList()
     }
 
-    var dynamicList: ImmutableList<Album> by remember { mutableStateOf(displayAlbums) }
-    LaunchedEffect(displayAlbums) { if (!isDragging) dynamicList = displayAlbums }
+    val sdCardAlbums = remember(allMedia) {
+        allMedia.filter { it.path.startsWith("/storage/") && !it.path.startsWith("/storage/emulated/") && !it.path.startsWith("/storage/self/") }
+            .map { it.bucketId }
+            .toSet()
+    }
+
+    val dynamicList = remember { mutableStateListOf<Album>() }
+
+    LaunchedEffect(displayAlbums) {
+        if (!isDragging && System.currentTimeMillis() > ignoreUpdatesUntil) {
+            if (dynamicList.map { it.id } != displayAlbums.map { it.id }) {
+                dynamicList.clear()
+                dynamicList.addAll(displayAlbums)
+            }
+        }
+    }
 
     val screenWidthDp = LocalConfiguration.current.screenWidthDp.toFloat()
     val prefs = remember { context.getSharedPreferences("gallery_prefs", Context.MODE_PRIVATE) }
-    var columnCount by remember { mutableIntStateOf(prefs.getInt("gallery_grid_columns", 3)) }
+    var columnCount by remember { mutableIntStateOf(prefs.getInt("gallery_album_grid_columns", 4)) }
     val gridState = rememberLazyGridState()
 
     val intentSenderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
@@ -354,6 +439,7 @@ fun AlbumScreen(
                 } else {
                     ModernAlbumTopBar(
                         scrollBehavior = scrollBehavior,
+                        isAppLockEnabled = isAppLockEnabled,
                         onSearchClick = { isSearchActive = true },
                         onMenuAction = { action ->
                             when (action) {
@@ -362,32 +448,53 @@ fun AlbumScreen(
                                 "create" -> activeDialog = AlbumUiDialog.CreateAlbum
                                 "trash" -> actions.onNavigateToTrash()
                                 "hidden" -> activeDialog = AlbumUiDialog.HiddenAlbums
-                                "lock_app" -> actions.onLockApp()
-                                "settings" -> actions.onNavigateToSettings()
                                 "duplicates" -> actions.onNavigateToDuplicates()
                                 "scan" -> actions.onNavigateToScan()
-                                "clearcache" -> clearImageCache(context)
+                                "toggle_lock" -> {
+                                    toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it }
+                                }
                             }
                         }
                     )
                 }
             }
         ) { padding ->
-            if (dynamicList.isEmpty()) {
-                EmptyAlbumsOverlay(onCreateClick = { activeDialog = AlbumUiDialog.CreateAlbum })
-            } else {
-                StatelessAlbumGrid(
-                    gridState = gridState, padding = padding, columnCount = columnCount, dynamicList = dynamicList,
-                    albumPreviews = albumPreviews, isSelectionMode = isSelectionMode, selectedIds = selectedIds,
-                    sortOption = sortOption, searchQuery = searchQuery, screenWidthDp = screenWidthDp,
-                    onListUpdate = { dynamicList = it }, onOrderSaved = { viewModel.saveCustomAlbumOrder(it) },
-                    onAlbumClick = { album ->
-                        if (isSelectionMode) selectedIds = if (selectedIds.contains(album.id)) (selectedIds - album.id).toImmutableSet() else (selectedIds + album.id).toImmutableSet()
-                        else actions.onAlbumClick(album)
-                    },
-                    onAlbumLongClick = { album -> if (!isSelectionMode) { isSelectionMode = true; selectedIds = persistentListOf(album.id).toImmutableSet() } },
-                    onDragStateChange = { isDragging = it }
-                )
+            Column(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
+                if (dynamicList.isEmpty()) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        EmptyAlbumsOverlay(onCreateClick = { activeDialog = AlbumUiDialog.CreateAlbum })
+                    }
+                } else {
+                    Box(modifier = Modifier.weight(1f)) {
+                        StatelessAlbumGrid(
+                            gridState = gridState,
+                            padding = PaddingValues(bottom = padding.calculateBottomPadding()),
+                            columnCount = columnCount,
+                            dynamicList = dynamicList,
+                            albumPreviews = albumPreviews,
+                            isSelectionMode = isSelectionMode,
+                            selectedIds = selectedIds,
+                            sortOption = sortOption,
+                            searchQuery = searchQuery,
+                            screenWidthDp = screenWidthDp,
+                            isLowRam = isLowRam,
+                            sdCardAlbums = sdCardAlbums,
+                            onOrderSaved = { albums: List<Album> -> viewModel.saveCustomAlbumOrder(albums) },
+                            onAlbumClick = { album ->
+                                if (isSelectionMode) selectedIds = if (selectedIds.contains(album.id)) (selectedIds - album.id).toImmutableSet() else (selectedIds + album.id).toImmutableSet()
+                                else actions.onAlbumClick(album)
+                            },
+                            onAlbumLongClick = { album -> if (!isSelectionMode) { isSelectionMode = true; selectedIds = persistentListOf(album.id).toImmutableSet() } },
+                            onDragStateChange = { dragging ->
+                                isDragging = dragging
+                                if (!dragging) {
+                                    ignoreUpdatesUntil = System.currentTimeMillis() + 1500L
+                                    viewModel.saveCustomAlbumOrder(dynamicList.toList())
+                                }
+                            }
+                        )
+                    }
+                }
             }
         }
 
@@ -398,7 +505,7 @@ fun AlbumScreen(
             ) {
                 Row(modifier = Modifier.navigationBarsPadding().padding(horizontal = 8.dp, vertical = 8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                     BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") { activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, true) }
-                    BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") { shareMediaItems(context, rawMedia.filter { selectedIds.contains(it.bucketId) }); isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }
+                    BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") { shareMediaItems(context, allMedia.filter { selectedIds.contains(it.bucketId) }); isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }
                     BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Delete", isDestructive = true) { activeDialog = AlbumUiDialog.Delete(dynamicList.filter { selectedIds.contains(it.id) }) }
                     Box {
                         BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showSelectionMenu = true }
@@ -408,7 +515,16 @@ fun AlbumScreen(
                             DropdownMenuItem(text = { Text(if (allPinned) "Unpin" else "Pin") }, onClick = { showSelectionMenu = false; dynamicList.filter { selectedIds.contains(it.id) }.forEach { viewModel.toggleAlbumPin(it) }; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
                             if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Info") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Info(it) } })
                             DropdownMenuItem(text = { Text("Copy") }, onClick = { showSelectionMenu = false; activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, false) })
-                            DropdownMenuItem(text = { Text("Hide") }, onClick = { showSelectionMenu = false; selectedIds.forEach { id -> viewModel.toggleHiddenAlbum(id) }; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet(); Toast.makeText(context, "Albums hidden", Toast.LENGTH_SHORT).show() })
+                            DropdownMenuItem(text = { Text("Hide Album") }, onClick = {
+                                showSelectionMenu = false
+                                val currentHidden = enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
+                                val newHidden = currentHidden + selectedIds
+                                enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
+                                selectedIds.forEach { id -> viewModel.toggleHiddenAlbum(id) }
+                                isSelectionMode = false
+                                selectedIds = persistentListOf<String>().toImmutableSet()
+                                Toast.makeText(context, "Albums hidden", Toast.LENGTH_SHORT).show()
+                            }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
                         }
                     }
                 }
@@ -420,7 +536,7 @@ fun AlbumScreen(
         is AlbumUiDialog.Info -> {
             ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = MaterialTheme.colorScheme.surface) {
                 Column(Modifier.padding(24.dp).padding(bottom = 24.dp)) {
-                    val albumItems = rawMedia.filter { it.bucketId == dialog.album.id }
+                    val albumItems = allMedia.filter { it.bucketId == dialog.album.id }
                     val oldestItem = albumItems.minByOrNull { it.dateAdded }
                     val dateStr = oldestItem?.let { SimpleDateFormat("MMMM dd, yyyy 'at' hh:mm a", Locale.getDefault()).format(Date(it.dateAdded * 1000)) } ?: "Unknown"
                     val albumPath = oldestItem?.path?.let { File(it).parent } ?: "Unknown"
@@ -442,7 +558,7 @@ fun AlbumScreen(
                     LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f, fill = false), contentPadding = PaddingValues(bottom = 12.dp)) {
                         item { ListItem(headlineContent = { Text("Create New Album", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Rounded.CreateNewFolder, null, tint = MaterialTheme.colorScheme.primary) }, modifier = Modifier.clickable { activeDialog = AlbumUiDialog.CreateAndMoveCopy(dialog.albums, dialog.isMove) }) }
                         items(allAlbumsState.filter { !it.id.startsWith("virtual_") && dialog.albums.none { sel -> sel.id == it.id } }.sortedBy { it.name.lowercase() }) { targetAlbum ->
-                            ListItem(headlineContent = { Text(targetAlbum.name, fontWeight = FontWeight.Medium) }, leadingContent = { Icon(Icons.Outlined.Folder, null) }, modifier = Modifier.clickable { viewModel.mergeAlbums(sourceAlbumIds = dialog.albums.map { it.id }, targetAlbumId = targetAlbum.id, mergeMode = if (dialog.isMove) MergeMode.MOVE_AND_DELETE else MergeMode.COPY); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
+                            ListItem(headlineContent = { Text(targetAlbum.name, fontWeight = FontWeight.Medium) }, leadingContent = { Icon(Icons.Outlined.Folder, null) }, modifier = Modifier.clickable { viewModel.mergeAlbums(sourceAlbumIds = dialog.albums.map { id -> id.id }, targetAlbumId = targetAlbum.id, mergeMode = if (dialog.isMove) MergeMode.MOVE_AND_DELETE else MergeMode.COPY); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
                         }
                     }
                 }
@@ -450,27 +566,35 @@ fun AlbumScreen(
         }
         is AlbumUiDialog.CreateAndMoveCopy -> {
             val initialName = if (dialog.albums.size == 1) "${dialog.albums.first().name} Copy" else "New Album"
-            ModernInputSheet(title = if (dialog.isMove) "New Album & Move" else "New Album & Copy", initial = initialName, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName ->
-                val mediaIds = rawMedia.filter { item -> dialog.albums.any { it.id == item.bucketId } }.map { it.id }
+            ModernInputSheet(title = if (dialog.isMove) "New Album & Move" else "New Album & Copy", initial = initialName, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String ->
+                val mediaIds = allMedia.filter { item -> dialog.albums.any { album -> album.id == item.bucketId } }.map { it.id }
                 if (dialog.isMove) viewModel.createAndMove(mediaIds, newName) else viewModel.createAndCopy(mediaIds, newName)
-                activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet(); scope.launch { delay(800); viewModel.forceSync() }
+                activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
             })
         }
-        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { viewModel.renameAlbum(dialog.album, it); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
-        is AlbumUiDialog.Delete -> ModernSmartDeleteSheet(count = dialog.albums.size, onDismiss = { activeDialog = AlbumUiDialog.None }, onDeleteAll = { trashViewModel.confirmPendingAlbumTrash(dialog.albums, rawMedia); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet(); scope.launch { delay(500); viewModel.forceSync() } })
-        is AlbumUiDialog.CreateAlbum -> ModernCreateAlbumSheet(onDismiss = { activeDialog = AlbumUiDialog.None }, onCreate = { name, sd -> viewModel.createAlbum(name, sd); activeDialog = AlbumUiDialog.None; scope.launch { delay(500); viewModel.forceSync() } })
-        is AlbumUiDialog.Sort -> ModernAlbumSortSheet(activeSort = sortOption, onDismiss = { activeDialog = AlbumUiDialog.None }, onSortSelected = { viewModel.updateAlbumSort(it); activeDialog = AlbumUiDialog.None })
-        is AlbumUiDialog.GridSize -> ModernGridSheet(currentColumns = columnCount, max = 8, onDismiss = { activeDialog = AlbumUiDialog.None }, onUpdate = { columnCount = it; prefs.edit().putInt("gallery_grid_columns", it).apply() })
+        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String -> viewModel.renameAlbum(dialog.album, newName); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
+        is AlbumUiDialog.Delete -> ModernSmartDeleteSheet(count = dialog.albums.size, onDismiss = { activeDialog = AlbumUiDialog.None }, onDeleteAll = { trashViewModel.confirmPendingAlbumTrash(dialog.albums, allMedia.toList()); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
+        is AlbumUiDialog.CreateAlbum -> ModernCreateAlbumSheet(onDismiss = { activeDialog = AlbumUiDialog.None }, onCreate = { name: String, sd: Boolean -> viewModel.createAlbum(name, sd); activeDialog = AlbumUiDialog.None })
+        is AlbumUiDialog.Sort -> ModernAlbumSortSheet(activeSort = sortOption, onDismiss = { activeDialog = AlbumUiDialog.None }, onSortSelected = { sort: AlbumSort -> viewModel.updateAlbumSort(sort); activeDialog = AlbumUiDialog.None })
+        is AlbumUiDialog.GridSize -> ModernGridSheet(currentColumns = columnCount, max = 8, onDismiss = { activeDialog = AlbumUiDialog.None }, onUpdate = { cols: Int -> columnCount = cols; prefs.edit().putInt("gallery_album_grid_columns", cols).apply() })
         is AlbumUiDialog.HiddenAlbums -> {
             ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = MaterialTheme.colorScheme.surface) {
-                val allPossibleAlbums = remember(rawMedia) { rawMedia.groupBy { it.bucketId }.map { (id, items) -> val first = items.first(); Album(id = id, name = first.bucketName, coverUri = first.uri, mediaCount = items.size, sizeBytes = items.sumOf { it.size }, isPinned = false) }.filter { !it.id.startsWith("virtual_") }.sortedBy { it.name.lowercase() } }
+                val allPossibleAlbums = remember(allMedia) { allMedia.groupBy { it.bucketId }.map { (id, items) -> val first = items.first(); Album(id = id, name = first.bucketName, coverUri = first.uri, mediaCount = items.size, sizeBytes = items.sumOf { it.size }, isPinned = false) }.filter { !it.id.startsWith("virtual_") }.sortedBy { it.name.lowercase() } }
                 Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
                     Text(text = "Hide or Unhide", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
                     LazyColumn(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 12.dp)) {
                         items(allPossibleAlbums, key = { it.id }) { album ->
-                            Row(modifier = Modifier.fillMaxWidth().clickable { viewModel.toggleHiddenAlbum(album.id) }.padding(horizontal = 24.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Row(modifier = Modifier.fillMaxWidth().clickable {
+                                viewModel.toggleHiddenAlbum(album.id)
+                                val newHidden = if (hiddenAlbums.contains(album.id)) hiddenAlbums - album.id else hiddenAlbums + album.id
+                                enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
+                            }.padding(horizontal = 24.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                                 Column(modifier = Modifier.weight(1f)) { Text(text = album.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium); Text(text = "${album.mediaCount} items", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                                Switch(checked = hiddenAlbums.contains(album.id), onCheckedChange = { viewModel.toggleHiddenAlbum(album.id) })
+                                Switch(checked = hiddenAlbums.contains(album.id), onCheckedChange = {
+                                    viewModel.toggleHiddenAlbum(album.id)
+                                    val newHidden = if (hiddenAlbums.contains(album.id)) hiddenAlbums - album.id else hiddenAlbums + album.id
+                                    enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
+                                })
                             }
                         }
                     }
@@ -487,16 +611,49 @@ fun AlbumDetailScreen(
     albumId: String,
     viewModel: GalleryViewModel = hiltViewModel(),
     trashViewModel: TrashViewModel = hiltViewModel(),
+    securityViewModel: SecurityViewModel = hiltViewModel(),
     onViewerStateChanged: (Boolean) -> Unit = {},
     actions: DetailActions
 ) {
-    val context = LocalContext.current; val haptic = LocalHapticFeedback.current; val scope = rememberCoroutineScope(); val snackbarHostState = remember { SnackbarHostState() }; val gridState = rememberLazyGridState()
-    val mediaMap by viewModel.mediaMap.collectAsState(); val favoriteIds by viewModel.favoriteIds.collectAsState(); val vmAlbums by viewModel.albumsState.collectAsState(initial = emptyList()); val viewerState by viewModel.viewerState.collectAsState(); val rawMedia by viewModel.rawMedia.collectAsState()
-    val albumMedia: List<MediaItem> = remember(rawMedia, albumId, favoriteIds) { rawMedia.filter { item -> when (albumId) { ID_FAVORITES -> favoriteIds.contains(item.id); ID_VIDEOS -> item.isVideo; ID_SCREENSHOTS -> item.path.contains("Screenshot", true) || item.path.contains("Screenshots", true); ID_DOWNLOADS -> item.path.contains("Download", true); ID_WHATSAPP -> item.path.contains("WhatsApp", true); ID_INSTAGRAM -> item.path.contains("Instagram", true); ID_RECENT -> true; else -> item.bucketId == albumId } } }
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    val gridState = rememberLazyGridState()
+    val isLowRam = remember { isLowRAMDevice(context) }
+    val enginePrefs = remember { context.getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE) }
+
+    val mediaMap by viewModel.mediaMap.collectAsState()
+    val favoriteIds by viewModel.favoriteIds.collectAsState()
+    val vmAlbums by viewModel.albumsState.collectAsState(initial = emptyList())
+    val viewerState by viewModel.viewerState.collectAsState()
+    val allMedia by viewModel.media.collectAsState()
+
+    val albumMedia = remember(allMedia, albumId, favoriteIds) {
+        allMedia.filter { item ->
+            when (albumId) {
+                ID_FAVORITES -> favoriteIds.contains(item.id)
+                ID_VIDEOS -> item.isVideo
+                ID_SCREENSHOTS -> item.path.contains("Screenshot", true) || item.path.contains("Screenshots", true)
+                ID_DOWNLOADS -> item.path.contains("Download", true)
+                ID_WHATSAPP -> item.path.contains("WhatsApp", true)
+                ID_INSTAGRAM -> item.path.contains("Instagram", true)
+                ID_RECENT -> true
+                else -> item.bucketId == albumId
+            }
+        }
+    }
 
     var activeDialog by remember { mutableStateOf<DetailUiDialog>(DetailUiDialog.None) }
     var metadataItemToShow by remember { mutableStateOf<MediaItem?>(null) }
+    var isAppLockEnabled by remember { mutableStateOf(securityViewModel.isAppLockEnabled()) }
+
     var localSearchQuery by rememberSaveable { mutableStateOf("") }
+    var debouncedSearchQuery by remember { mutableStateOf("") }
+    LaunchedEffect(localSearchQuery) {
+        delay(250)
+        debouncedSearchQuery = localSearchQuery
+    }
+
     var currentPhotoSort by rememberSaveable { mutableStateOf(PhotoSort.DateDesc) }
     var isSelectionMode by remember { mutableStateOf(false) }
 
@@ -510,7 +667,7 @@ fun AlbumDetailScreen(
         trashViewModel.events.collect { event ->
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
-                is GalleryEvent.OperationSuccess -> { Toast.makeText(context, "Moved to Trash", Toast.LENGTH_SHORT).show(); viewModel.forceSync() }
+                is GalleryEvent.OperationSuccess -> { Toast.makeText(context, "Moved to Trash", Toast.LENGTH_SHORT).show() }
                 is GalleryEvent.ShowToast -> Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
                 else -> {}
             }
@@ -533,6 +690,10 @@ fun AlbumDetailScreen(
         }
     }
 
+    val albumTitle = remember(albumId, album?.name) {
+        album?.name ?: "Album"
+    }
+
     val isVirtual = albumId.startsWith("virtual_")
     var selectedIds by remember { mutableStateOf<ImmutableSet<Long>>(persistentListOf<Long>().toImmutableSet()) }
     var selectedSize by remember { mutableLongStateOf(0L) }
@@ -544,10 +705,18 @@ fun AlbumDetailScreen(
     val configuration = LocalConfiguration.current; val density = LocalDensity.current
     val screenWidthPx = with(density) { configuration.screenWidthDp.dp.roundToPx() }
     val screenWidthDp = configuration.screenWidthDp.toFloat()
-    val adaptiveCols = remember(screenWidthDp) { if (screenWidthDp >= 800f) 8 else if (screenWidthDp >= 600f) 6 else 4 }
+
+    val adaptiveCols = remember(screenWidthDp, isLowRam) {
+        if (isLowRam) {
+            if (screenWidthDp >= 800f) 6 else if (screenWidthDp >= 600f) 4 else 3
+        } else {
+            if (screenWidthDp >= 800f) 8 else if (screenWidthDp >= 600f) 6 else 4
+        }
+    }
+
     val prefs = remember { context.getSharedPreferences("gallery_prefs", Context.MODE_PRIVATE) }
-    var detailColumns by remember { mutableIntStateOf(prefs.getInt("gallery_grid_columns", adaptiveCols)) }
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
+    var detailColumns by remember { mutableIntStateOf(prefs.getInt("gallery_media_grid_columns", adaptiveCols)) }
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
 
     BackHandler(enabled = localSearchQuery.isNotEmpty()) { localSearchQuery = "" }
     BackHandler(enabled = isSelectionMode) { isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L }
@@ -555,9 +724,9 @@ fun AlbumDetailScreen(
     BackHandler(enabled = metadataItemToShow != null) { metadataItemToShow = null }
     BackHandler(enabled = viewerState is GalleryViewerState.Open) { viewModel.closeViewer() }
 
-    val filteredMedia: ImmutableList<MediaItem> = remember(albumMedia, mediaFilter, localSearchQuery, currentPhotoSort) {
+    val filteredMedia = remember(albumMedia, mediaFilter, debouncedSearchQuery, currentPhotoSort) {
         val base = albumMedia.filter { item -> when (mediaFilter) { AlbumMediaFilter.ALL -> true; AlbumMediaFilter.PHOTOS -> !item.isVideo; AlbumMediaFilter.VIDEOS -> item.isVideo } }
-        val searched = if (localSearchQuery.isBlank()) base else { val q = localSearchQuery.trim().lowercase(); base.filter { it.name.lowercase().contains(q) || getSmartName(it).lowercase().contains(q) } }
+        val searched = if (debouncedSearchQuery.isBlank()) base else { val q = debouncedSearchQuery.trim().lowercase(); base.filter { it.name.lowercase().contains(q) || getSmartName(it).lowercase().contains(q) } }
         val comparator = when (currentPhotoSort) { PhotoSort.DateDesc -> Comparator<MediaItem> { a, b -> b.dateAdded.compareTo(a.dateAdded) }; PhotoSort.DateAsc -> Comparator<MediaItem> { a, b -> a.dateAdded.compareTo(b.dateAdded) }; PhotoSort.NameAsc -> Comparator<MediaItem> { a, b -> a.name.compareTo(b.name, ignoreCase = true) }; PhotoSort.NameDesc -> Comparator<MediaItem> { a, b -> b.name.compareTo(a.name, ignoreCase = true) }; PhotoSort.SizeDesc -> Comparator<MediaItem> { a, b -> b.size.compareTo(a.size) } }
         searched.sortedWith(comparator).toImmutableList()
     }
@@ -582,8 +751,8 @@ fun AlbumDetailScreen(
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                     )
                 } else {
-                    TopAppBar(
-                        title = { Text(text = album?.name ?: "Album", style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold) },
+                    CenterAlignedTopAppBar(
+                        title = { Text(text = albumTitle, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold) },
                         navigationIcon = { IconButton(onClick = actions.onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                         actions = {
                             Box {
@@ -594,11 +763,19 @@ fun AlbumDetailScreen(
                                     DropdownMenuItem(text = { Text("Sort Media") }, onClick = { activeDialog = DetailUiDialog.Sort; showMenu = false }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) })
                                     DropdownMenuItem(text = { Text("Grid Size") }, onClick = { activeDialog = DetailUiDialog.GridSize; showMenu = false }, leadingIcon = { Icon(Icons.Default.Grid4x4, null) })
                                     if (!isVirtual && album != null) {
+                                        DropdownMenuItem(text = { Text("Hide Album") }, onClick = {
+                                            viewModel.toggleHiddenAlbum(album.id)
+                                            val currentHidden = enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
+                                            enginePrefs.edit().putStringSet("hidden_albums", currentHidden + album.id).apply()
+                                            Toast.makeText(context, "Album Hidden", Toast.LENGTH_SHORT).show()
+                                            showMenu = false
+                                            actions.onBack()
+                                        }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
                                         DropdownMenuItem(text = { Text(if (album.isPinned) "Unpin Album" else "Pin Album") }, onClick = { viewModel.toggleAlbumPin(album); showMenu = false }, leadingIcon = { Icon(if (album.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, null) })
                                         DropdownMenuItem(text = { Text("Rename") }, onClick = { showRenameSheet = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Edit, null) })
                                         DropdownMenuItem(text = { Text("Delete Album", color = MaterialTheme.colorScheme.error) }, onClick = { activeDialog = DetailUiDialog.DeleteAlbum; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) })
                                     }
-                                    DropdownMenuItem(text = { Text("Lock App") }, onClick = { actions.onLockApp(); showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Lock, null) })
+                                    DropdownMenuItem(text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") }, onClick = { showMenu = false; toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it } }, leadingIcon = { Icon(if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, null) })
                                 }
                             }
                         },
@@ -608,7 +785,7 @@ fun AlbumDetailScreen(
                 }
             }
         ) { padding ->
-            if (filteredMedia.isEmpty() && localSearchQuery.isBlank()) {
+            if (filteredMedia.isEmpty() && localSearchQuery.isBlank() && mediaFilter == AlbumMediaFilter.ALL) {
                 Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(imageVector = Icons.Outlined.ImageNotSupported, contentDescription = null, modifier = Modifier.size(72.dp), tint = Color.LightGray)
@@ -619,41 +796,54 @@ fun AlbumDetailScreen(
                 }
             } else {
                 Column(Modifier.padding(padding)) {
-                    BasicTextField(
-                        value = localSearchQuery, onValueChange = { localSearchQuery = it },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).height(46.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                        singleLine = true, textStyle = LocalTextStyle.current.copy(fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface),
-                        decorationBox = { innerTextField ->
-                            Row(modifier = Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(imageVector = Icons.Rounded.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f), modifier = Modifier.size(20.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Box(Modifier.weight(1f)) { if (localSearchQuery.isEmpty()) Text(text = "Search photos inside album...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f), fontSize = 15.sp); innerTextField() }
-                                if (localSearchQuery.isNotEmpty()) IconButton(onClick = { localSearchQuery = "" }, modifier = Modifier.size(28.dp)) { Icon(imageVector = Icons.Rounded.Close, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp)) }
+                    StatelessMediaGrid(
+                        gridState = gridState, mediaList = filteredMedia, columnCount = detailColumns, screenWidthPx = screenWidthPx, isSelectionMode = isSelectionMode, selectedIds = selectedIds, isLowRam = isLowRam,
+                        onToggleSelection = { item ->
+                            if (selectedIds.contains(item.id)) {
+                                selectedIds = (selectedIds - item.id).toImmutableSet()
+                                selectedSize = maxOf(0L, selectedSize - item.size)
+                            } else {
+                                if (selectedIds.size < 5000) {
+                                    selectedIds = (selectedIds + item.id).toImmutableSet()
+                                    selectedSize += item.size
+                                }
                             }
-                        }
-                    )
-                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.ALL, label = "All") { mediaFilter = AlbumMediaFilter.ALL }
-                            SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.PHOTOS, label = "Photos") { mediaFilter = AlbumMediaFilter.PHOTOS }
-                            SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.VIDEOS, label = "Videos") { mediaFilter = AlbumMediaFilter.VIDEOS }
-                        }
-                        Surface(onClick = { activeDialog = DetailUiDialog.Sort }, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                            Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(text = when (currentPhotoSort) { PhotoSort.DateDesc -> "Newest"; PhotoSort.DateAsc -> "Oldest"; PhotoSort.NameAsc -> "A-Z"; PhotoSort.NameDesc -> "Z-A"; PhotoSort.SizeDesc -> "Size" }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-                            }
-                        }
-                    }
-                    if (filteredMedia.isEmpty()) Box(modifier = Modifier.fillMaxSize().weight(1f), contentAlignment = Alignment.Center) { Text(text = "No matching items found", color = Color.Gray, fontSize = 15.sp) }
-                    else StatelessMediaGrid(
-                        gridState = gridState, mediaList = filteredMedia, columnCount = detailColumns, screenWidthPx = screenWidthPx, isSelectionMode = isSelectionMode, selectedIds = selectedIds,
-                        onToggleSelection = { item -> if (selectedIds.contains(item.id)) { selectedIds = (selectedIds - item.id).toImmutableSet(); selectedSize = maxOf(0L, selectedSize - item.size) } else { selectedIds = ((selectedIds + item.id).takeIf { it.size < 5000 } ?: selectedIds) as ImmutableSet<Long>; selectedSize += item.size } },
+                        },
                         onSelectAll = { isAllSelected -> if (isAllSelected) { selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L } else { selectedIds = filteredMedia.map { it.id }.toImmutableSet(); selectedSize = filteredMedia.sumOf { it.size } } },
                         onMediaClick = { item -> viewModel.openViewer(item.id) },
                         onMediaLongClick = { if (!isSelectionMode) { isSelectionMode = true; haptic.performHapticFeedback(HapticFeedbackType.LongPress) } },
-                        onToggleFavorite = { viewModel.toggleFavorite(it) }
+                        onToggleFavorite = { viewModel.toggleFavorite(it) },
+                        header = {
+                            Column(modifier = Modifier.padding(horizontal = 13.dp)) {
+                                BasicTextField(
+                                    value = localSearchQuery, onValueChange = { localSearchQuery = it },
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).height(46.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                                    singleLine = true, textStyle = LocalTextStyle.current.copy(fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface),
+                                    decorationBox = { innerTextField ->
+                                        Row(modifier = Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(imageVector = Icons.Rounded.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f), modifier = Modifier.size(20.dp))
+                                            Spacer(Modifier.width(8.dp))
+                                            Box(Modifier.weight(1f)) { if (localSearchQuery.isEmpty()) Text(text = "Search photos inside album...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f), fontSize = 15.sp); innerTextField() }
+                                            if (localSearchQuery.isNotEmpty()) IconButton(onClick = { localSearchQuery = "" }, modifier = Modifier.size(28.dp)) { Icon(imageVector = Icons.Rounded.Close, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp)) }
+                                        }
+                                    }
+                                )
+                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.ALL, label = "All") { mediaFilter = AlbumMediaFilter.ALL }
+                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.PHOTOS, label = "Photos") { mediaFilter = AlbumMediaFilter.PHOTOS }
+                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.VIDEOS, label = "Videos") { mediaFilter = AlbumMediaFilter.VIDEOS }
+                                    }
+                                    Surface(onClick = { activeDialog = DetailUiDialog.Sort }, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                                        Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(text = when (currentPhotoSort) { PhotoSort.DateDesc -> "Newest"; PhotoSort.DateAsc -> "Oldest"; PhotoSort.NameAsc -> "A-Z"; PhotoSort.NameDesc -> "Z-A"; PhotoSort.SizeDesc -> "Size" }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     )
                 }
             }
@@ -682,12 +872,12 @@ fun AlbumDetailScreen(
     when (val dialog = activeDialog) {
         is DetailUiDialog.DeleteAlbum -> AlertDialog(onDismissRequest = { activeDialog = DetailUiDialog.None }, icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Delete Album?") }, text = { Text("This will delete the manual album placeholder. Any physical media stored within this folder on your device will remain intact.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { actions.onDeleteAlbum?.invoke(albumId); activeDialog = DetailUiDialog.None; actions.onBack() }) { Text("Delete") } }, dismissButton = { TextButton(onClick = { activeDialog = DetailUiDialog.None }) { Text("Cancel") } })
         is DetailUiDialog.Delete -> AlertDialog(onDismissRequest = { activeDialog = DetailUiDialog.None }, icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Move to Trash?") }, text = { Text("Items will be moved to Trash. They can be recovered within 30 days.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { val itemsToTrash = albumMedia.filter { dialog.mediaIds.contains(it.id) }; trashViewModel.confirmPendingGalleryTrash(itemsToTrash); activeDialog = DetailUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L; viewModel.closeViewer() }) { Text("Move to Trash") } }, dismissButton = { TextButton(onClick = { activeDialog = DetailUiDialog.None }) { Text("Cancel") } })
-        is DetailUiDialog.GridSize -> ModernGridSheet(currentColumns = detailColumns, max = 8, onDismiss = { activeDialog = DetailUiDialog.None }, onUpdate = { detailColumns = it; prefs.edit().putInt("gallery_grid_columns", it).apply() })
-        is DetailUiDialog.Sort -> ModernMediaSortSheet(activeSort = currentPhotoSort, onDismiss = { activeDialog = DetailUiDialog.None }, onSortSelected = { currentPhotoSort = it; activeDialog = DetailUiDialog.None })
+        is DetailUiDialog.GridSize -> ModernGridSheet(currentColumns = detailColumns, max = 8, onDismiss = { activeDialog = DetailUiDialog.None }, onUpdate = { cols: Int -> detailColumns = cols; prefs.edit().putInt("gallery_media_grid_columns", cols).apply() })
+        is DetailUiDialog.Sort -> ModernMediaSortSheet(activeSort = currentPhotoSort, onDismiss = { activeDialog = DetailUiDialog.None }, onSortSelected = { sort: PhotoSort -> currentPhotoSort = sort; activeDialog = DetailUiDialog.None })
         else -> {}
     }
 
-    if (showRenameSheet && album != null) ModernInputSheet(title = "Rename Album", initial = album.name, onDismiss = { showRenameSheet = false }, onConfirm = { viewModel.renameAlbum(album, it); showRenameSheet = false })
+    if (showRenameSheet && album != null) ModernInputSheet(title = "Rename Album", initial = album.name, onDismiss = { showRenameSheet = false }, onConfirm = { newName: String -> viewModel.renameAlbum(album, newName); showRenameSheet = false })
 
     metadataItemToShow?.let { MediaMetadataSheet(item = it, onDismiss = { metadataItemToShow = null }) }
 
@@ -699,14 +889,20 @@ fun AlbumDetailScreen(
         val stableStartIndex = stableMediaList.indexOfFirst { it.id == viewerItemId }.coerceAtLeast(0)
         key(viewerItemId, stableMediaList.size) {
             FullscreenMediaPager(
-                initialIndex = stableStartIndex, mediaList = stableMediaList, mediaMap = mediaMap, favoriteIds = favoriteIds, sharedPlayer = viewModel.getPlayer(),
-                onPageChanged = {}, onClose = { viewModel.closeViewer() }, onToggleFavorite = { id: Long -> viewModel.toggleFavorite(id) },
+                initialIndex = stableStartIndex,
+                mediaList = stableMediaList,
+                mediaMap = mediaMap,
+                favoriteIds = favoriteIds,
+                sharedPlayer = viewModel.getPlayer(),
+                onPageChanged = {},
+                onClose = { viewModel.closeViewer() },
+                onToggleFavorite = { id: Long -> viewModel.toggleFavorite(id) },
                 onEdit = { item: MediaItem -> viewModel.closeViewer(); if (item.isVideo) actions.onNavigateToVideoEditor(item.uri.toString(), item.id) else actions.onNavigateToPhotoEditor(item.uri.toString(), item.id) },
-                onPlayVideo = { uri, playlist -> actions.onNavigateToVideoPlayer(uri, playlist) },
+                onPlayVideo = { uri: String, playlist: List<String> -> actions.onNavigateToVideoPlayer(uri, playlist) },
                 onDelete = { item: MediaItem -> activeDialog = DetailUiDialog.Delete(listOf(item.id)) },
-                onMove = { item -> viewModel.closeViewer(); actions.onNavigateToMoveCopy("MOVE", item.id.toString(), albumId) },
-                onCopy = { item -> viewModel.closeViewer(); actions.onNavigateToMoveCopy("COPY", item.id.toString(), albumId) },
-                onWallpaper = { item -> viewModel.closeViewer(); actions.onNavigateToWallpaper(item.uri.toString(), item.id) }
+                onMove = { item: MediaItem -> viewModel.closeViewer(); actions.onNavigateToMoveCopy("MOVE", item.id.toString(), albumId) },
+                onCopy = { item: MediaItem -> viewModel.closeViewer(); actions.onNavigateToMoveCopy("COPY", item.id.toString(), albumId) },
+                onWallpaper = { item: MediaItem -> viewModel.closeViewer(); actions.onNavigateToWallpaper(item.uri.toString(), item.id) }
             )
         }
     }
@@ -715,13 +911,17 @@ fun AlbumDetailScreen(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun StatelessAlbumGrid(
-    gridState: LazyGridState, padding: PaddingValues, columnCount: Int, dynamicList: ImmutableList<Album>, albumPreviews: ImmutableMap<String, ImmutableList<Uri>>,
-    isSelectionMode: Boolean, selectedIds: ImmutableSet<String>, sortOption: AlbumSort, searchQuery: String, screenWidthDp: Float,
-    onListUpdate: (ImmutableList<Album>) -> Unit, onOrderSaved: (List<Album>) -> Unit, onAlbumClick: (Album) -> Unit, onAlbumLongClick: (Album) -> Unit, onDragStateChange: (Boolean) -> Unit
+    gridState: LazyGridState, padding: PaddingValues, columnCount: Int, dynamicList: SnapshotStateList<Album>, albumPreviews: ImmutableMap<String, ImmutableList<Uri>>,
+    isSelectionMode: Boolean, selectedIds: ImmutableSet<String>, sortOption: AlbumSort, searchQuery: String, screenWidthDp: Float, isLowRam: Boolean, sdCardAlbums: Set<String>,
+    onOrderSaved: (List<Album>) -> Unit, onAlbumClick: (Album) -> Unit, onAlbumLongClick: (Album) -> Unit, onDragStateChange: (Boolean) -> Unit
 ) {
     val haptic = LocalHapticFeedback.current; var draggedIndex by remember { mutableIntStateOf(-1) }; var dragOffset by remember { mutableStateOf(Offset.Zero) }; var scrollVelocity by remember { mutableFloatStateOf(0f) }
-    val actualColumns = columnCount.coerceAtLeast(1); val dynamicThumbSize = remember(actualColumns, screenWidthDp) { maxOf(250, (screenWidthDp / actualColumns).toInt() * 2) }
-    GridImagePrefetcher(gridState = gridState, items = dynamicList, previews = albumPreviews, thumbSize = dynamicThumbSize)
+    val actualColumns = columnCount.coerceAtLeast(1)
+
+    val dynamicThumbSize = remember(actualColumns, screenWidthDp) {
+        val raw = ((screenWidthDp / actualColumns) * 2).toInt().coerceIn(180, 480)
+        (raw / 40) * 40
+    }
 
     LaunchedEffect(scrollVelocity) {
         if (scrollVelocity != 0f) { while (isActive) { val consumed = gridState.scrollBy(scrollVelocity); if (consumed != 0f) dragOffset += Offset(0f, consumed); delay(16) } }
@@ -731,9 +931,10 @@ fun StatelessAlbumGrid(
         columns = GridCells.Fixed(columnCount), state = gridState, modifier = Modifier.fillMaxSize().padding(padding),
         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 90.dp), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        itemsIndexed(items = dynamicList, key = { _, album -> album.id }) { index, album ->
-            val isBeingDragged = draggedIndex == index; val isVirtualNode = album.id.startsWith("virtual_"); val canDrag = sortOption == AlbumSort.Custom && searchQuery.isBlank() && (!isSelectionMode || (selectedIds.size == 1 && selectedIds.contains(album.id)))
-            val dragModifier = if (canDrag && !isVirtualNode) {
+        itemsIndexed(items = dynamicList, key = { _, album -> album.id }, contentType = { _, _ -> "album" }) { index, album ->
+            val isBeingDragged = draggedIndex == index
+            val canDrag = sortOption == AlbumSort.Custom && searchQuery.isBlank() && isSelectionMode && selectedIds.size == 1 && selectedIds.contains(album.id) && !album.id.startsWith("virtual_")
+            val dragModifier = if (canDrag) {
                 Modifier.pointerInput(album.id) {
                     detectDragGesturesAfterLongPress(
                         onDragStart = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); draggedIndex = index; dragOffset = Offset.Zero; onDragStateChange(true) },
@@ -748,37 +949,35 @@ fun StatelessAlbumGrid(
                                 if (targetItemInfo != null) {
                                     val targetIndex = targetItemInfo.index
                                     dragOffset -= Offset((targetItemInfo.offset.x - draggedItemInfo.offset.x).toFloat(), (targetItemInfo.offset.y - draggedItemInfo.offset.y).toFloat())
-                                    val newList = dynamicList.toMutableList(); val item = newList.removeAt(draggedIndex); newList.add(targetIndex, item); onListUpdate(newList.toImmutableList()); draggedIndex = targetIndex; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    val item = dynamicList.removeAt(draggedIndex)
+                                    dynamicList.add(targetIndex, item)
+                                    draggedIndex = targetIndex
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 }
                             }
                         },
-                        onDragEnd = { if (draggedIndex != -1) onOrderSaved(dynamicList); draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false) },
+                        onDragEnd = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false) },
                         onDragCancel = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false) }
                     )
                 }
             } else Modifier
 
-            Box(modifier = Modifier.zIndex(if (isBeingDragged) 1f else 0f).graphicsLayer { if (isBeingDragged) { translationX = dragOffset.x; translationY = dragOffset.y; shadowElevation = 24f } }) {
-                OptimizedAlbumTile(album = album, previews = albumPreviews[album.id] ?: persistentListOf(), isSelected = selectedIds.contains(album.id), isSelectionMode = isSelectionMode, canDrag = canDrag && !isVirtualNode, dragModifier = dragModifier, thumbSize = dynamicThumbSize, onClick = { onAlbumClick(album) }, onLongClick = { onAlbumLongClick(album) })
-            }
-        }
-    }
-}
-
-@Composable
-fun GridImagePrefetcher(gridState: LazyGridState, items: ImmutableList<Album>, previews: ImmutableMap<String, ImmutableList<Uri>>, thumbSize: Int) {
-    val context = LocalContext.current; val imageLoader = context.imageLoader
-    LaunchedEffect(gridState, items, previews) {
-        snapshotFlow { gridState.layoutInfo }.collect { layoutInfo ->
-            val visibleItems = layoutInfo.visibleItemsInfo
-            if (visibleItems.isEmpty() || items.isEmpty()) return@collect
-            val firstVisible = visibleItems.first().index; val lastVisible = visibleItems.last().index
-            val prefetchStart = (firstVisible - 20).coerceAtLeast(0); val prefetchEnd = (lastVisible + 20).coerceAtMost(items.lastIndex)
-            for (i in prefetchStart..prefetchEnd) {
-                if (i !in firstVisible..lastVisible) {
-                    val album = items[i]; val coverUri = if (album.coverUri != Uri.EMPTY) album.coverUri else previews[album.id]?.firstOrNull()
-                    if (coverUri != null) { val request = ImageRequest.Builder(context).data(coverUri).size(thumbSize).memoryCacheKey("thumb_${album.id}").diskCachePolicy(CachePolicy.ENABLED).build(); imageLoader.enqueue(request) }
-                }
+            Box(modifier = Modifier
+                .zIndex(if (isBeingDragged) 1f else 0f)
+                .graphicsLayer { if (isBeingDragged) { translationX = dragOffset.x; translationY = dragOffset.y; shadowElevation = 24f } }
+            ) {
+                OptimizedAlbumTile(
+                    album = album,
+                    previews = albumPreviews[album.id] ?: persistentListOf(),
+                    isSelected = selectedIds.contains(album.id),
+                    isSelectionMode = isSelectionMode,
+                    canDrag = canDrag,
+                    isSdCard = sdCardAlbums.contains(album.id),
+                    dragModifier = dragModifier,
+                    thumbSize = dynamicThumbSize,
+                    onClick = { onAlbumClick(album) },
+                    onLongClick = { onAlbumLongClick(album) }
+                )
             }
         }
     }
@@ -787,40 +986,38 @@ fun GridImagePrefetcher(gridState: LazyGridState, items: ImmutableList<Album>, p
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun StatelessMediaGrid(
-    gridState: LazyGridState, mediaList: ImmutableList<MediaItem>, columnCount: Int, screenWidthPx: Int, isSelectionMode: Boolean, selectedIds: ImmutableSet<Long>,
-    onToggleSelection: (MediaItem) -> Unit, onSelectAll: (Boolean) -> Unit, onMediaClick: (MediaItem) -> Unit, onMediaLongClick: () -> Unit, onToggleFavorite: (Long) -> Unit
+    gridState: LazyGridState, mediaList: ImmutableList<MediaItem>, columnCount: Int, screenWidthPx: Int, isSelectionMode: Boolean, selectedIds: ImmutableSet<Long>, isLowRam: Boolean,
+    onToggleSelection: (MediaItem) -> Unit, onSelectAll: (Boolean) -> Unit, onMediaClick: (MediaItem) -> Unit, onMediaLongClick: () -> Unit, onToggleFavorite: (Long) -> Unit,
+    header: @Composable () -> Unit
 ) {
-    val haptic = LocalHapticFeedback.current; val dynamicThumbSize = remember(columnCount, screenWidthPx) { maxOf(250, screenWidthPx / columnCount) }
-    MediaGridImagePrefetcher(gridState = gridState, mediaList = mediaList, thumbSize = dynamicThumbSize)
+    val haptic = LocalHapticFeedback.current
+
+    val dynamicThumbSize = remember(columnCount, screenWidthPx) {
+        val raw = (screenWidthPx / columnCount.coerceAtLeast(1)).coerceIn(180, 480)
+        (raw / 40) * 40
+    }
 
     LazyVerticalGrid(
         columns = GridCells.Fixed(columnCount), state = gridState, modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 3.dp, end = 3.dp, top = 8.dp, bottom = 90.dp), verticalArrangement = Arrangement.spacedBy(3.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)
     ) {
-        items(count = mediaList.size, key = { i -> mediaList[i].id }, contentType = { "media" }) { index ->
-            val currentItem = mediaList[index]
-            ModernMediaGridTile(
-                modifier = Modifier, item = currentItem, thumbSize = dynamicThumbSize, isSelected = selectedIds.contains(currentItem.id), isSelectionMode = isSelectionMode,
-                onClick = { if (isSelectionMode) { onToggleSelection(currentItem); haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) } else onMediaClick(currentItem) },
-                onLongClick = { onMediaLongClick(); onToggleSelection(currentItem) }, onToggleFavorite = { onToggleFavorite(currentItem.id) }
-            )
+        item(span = { GridItemSpan(maxLineSpan) }, contentType = "header") {
+            header()
         }
-    }
-}
-
-@Composable
-fun MediaGridImagePrefetcher(gridState: LazyGridState, mediaList: ImmutableList<MediaItem>, thumbSize: Int) {
-    val context = LocalContext.current; val imageLoader = context.imageLoader
-    LaunchedEffect(gridState, mediaList) {
-        snapshotFlow { gridState.layoutInfo }.collect { layoutInfo ->
-            val visibleItems = layoutInfo.visibleItemsInfo
-            if (visibleItems.isEmpty() || mediaList.isEmpty()) return@collect
-            val firstVisible = visibleItems.first().index; val lastVisible = visibleItems.last().index
-            val prefetchStart = (firstVisible - 20).coerceAtLeast(0); val prefetchEnd = (lastVisible + 20).coerceAtMost(mediaList.lastIndex)
-            for (i in prefetchStart..prefetchEnd) {
-                if (i !in firstVisible..lastVisible && i < mediaList.size) {
-                    val item = mediaList[i]; val request = ImageRequest.Builder(context).data(item.uri).size(thumbSize).memoryCacheKey("thumb_${item.id}").diskCachePolicy(CachePolicy.ENABLED).build(); imageLoader.enqueue(request)
+        if (mediaList.isEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Box(modifier = Modifier.fillMaxWidth().height(250.dp), contentAlignment = Alignment.Center) {
+                    Text(text = "No matching items found", color = Color.Gray, fontSize = 15.sp)
                 }
+            }
+        } else {
+            items(count = mediaList.size, key = { i -> mediaList[i].id }, contentType = { if (mediaList[it].isVideo) "video" else "photo" }) { index ->
+                val currentItem = mediaList[index]
+                ModernMediaGridTile(
+                    modifier = Modifier, item = currentItem, thumbSize = dynamicThumbSize, isSelected = selectedIds.contains(currentItem.id), isSelectionMode = isSelectionMode, isLowRam = isLowRam,
+                    onClick = { if (isSelectionMode) { onToggleSelection(currentItem); haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) } else onMediaClick(currentItem) },
+                    onLongClick = { onMediaLongClick(); onToggleSelection(currentItem) }, onToggleFavorite = { onToggleFavorite(currentItem.id) }
+                )
             }
         }
     }
@@ -829,13 +1026,15 @@ fun MediaGridImagePrefetcher(gridState: LazyGridState, mediaList: ImmutableList<
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun OptimizedAlbumTile(
-    album: Album, previews: ImmutableList<Uri>, isSelected: Boolean, isSelectionMode: Boolean, canDrag: Boolean,
+    album: Album, previews: ImmutableList<Uri>, isSelected: Boolean, isSelectionMode: Boolean, canDrag: Boolean, isSdCard: Boolean,
     thumbSize: Int, dragModifier: Modifier = Modifier, onClick: () -> Unit, onLongClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val clickModifier = if (canDrag) Modifier.then(dragModifier).clickable(interactionSource = interactionSource, indication = null, onClick = onClick) else Modifier.combinedClickable(interactionSource = interactionSource, indication = null, onClick = onClick, onLongClick = onLongClick)
+    val tileShape = RoundedCornerShape(16.dp)
+
     Column(modifier = Modifier.fillMaxWidth().then(clickModifier)) {
-        Surface(modifier = Modifier.aspectRatio(1f).shadow(elevation = 1.dp, shape = RoundedCornerShape(10.dp)), shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+        Surface(modifier = Modifier.aspectRatio(1f).shadow(elevation = 1.dp, shape = tileShape), shape = tileShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
             val actualCoverUri = remember(album.coverUri, previews) { if (album.coverUri != Uri.EMPTY) album.coverUri else previews.firstOrNull() }
             Box(modifier = Modifier.fillMaxSize()) {
                 if (actualCoverUri == null) {
@@ -846,7 +1045,8 @@ private fun OptimizedAlbumTile(
                         }
                     }
                 } else {
-                    AsyncImage(model = rememberGridImageRequest(actualCoverUri, thumbSize, false), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    val request = rememberGridImageRequest(uri = actualCoverUri, size = thumbSize, isVideo = false)
+                    AsyncImage(model = request, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.05f)))
                 }
                 if (isSelectionMode) {
@@ -858,21 +1058,30 @@ private fun OptimizedAlbumTile(
                 }
             }
         }
-        Spacer(Modifier.height(8.dp)); Text(text = album.name, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.padding(horizontal = 2.dp)); Text(text = "${album.mediaCount} items", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 2.dp))
+        Spacer(Modifier.height(8.dp))
+        Row(modifier = Modifier.padding(horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(text = album.name, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f, fill = false))
+            if (isSdCard) {
+                Spacer(Modifier.width(4.dp))
+                Icon(imageVector = Icons.Rounded.SdStorage, contentDescription = "SD Card", modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Text(text = "${album.mediaCount} items", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 2.dp))
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ModernMediaGridTile(
-    modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean,
+    modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, isLowRam: Boolean,
     onClick: () -> Unit, onLongClick: () -> Unit, onToggleFavorite: () -> Unit
 ) {
-    val cornerRadius = 8.dp; val context = LocalContext.current
+    val cornerRadius = 10.dp
     Box(modifier = modifier.aspectRatio(1f).clip(RoundedCornerShape(cornerRadius)).combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick, onLongClick = onLongClick)) {
-        val baseRequest = remember(context) { ImageRequest.Builder(context).allowRgb565(true).bitmapConfig(Bitmap.Config.RGB_565).networkCachePolicy(CachePolicy.ENABLED).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).precision(Precision.INEXACT) }
-        val request = remember(item.id, item.uri, thumbSize) { baseRequest.data(item.uri).size(thumbSize).memoryCacheKey("thumb_${item.id}").diskCacheKey("thumb_${item.id}").allowHardware(!item.isVideo).crossfade(false).error(android.R.drawable.ic_menu_report_image).fallback(android.R.drawable.ic_menu_report_image).apply { if (item.isVideo) decoderFactory(coil.decode.VideoFrameDecoder.Factory()) }.build() }
+
+        val request = rememberGridImageRequest(uri = item.uri, size = thumbSize, isVideo = item.isVideo)
         AsyncImage(model = request, placeholder = null, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low, modifier = Modifier.fillMaxSize())
+
         if (item.isVideo) {
             Box(modifier = Modifier.fillMaxSize().drawWithCache { val brush = Brush.verticalGradient(0.5f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.75f)); onDrawBehind { drawRect(brush) } })
             Surface(modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp), shape = RoundedCornerShape(12.dp), color = Color.Black.copy(alpha = 0.6f)) { Text(text = formatDuration(item.duration), fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)) }
@@ -943,10 +1152,15 @@ fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModernAlbumTopBar(scrollBehavior: TopAppBarScrollBehavior, onSearchClick: () -> Unit, onMenuAction: (String) -> Unit) {
+fun ModernAlbumTopBar(
+    scrollBehavior: TopAppBarScrollBehavior,
+    isAppLockEnabled: Boolean,
+    onSearchClick: () -> Unit,
+    onMenuAction: (String) -> Unit
+) {
     var showMenu by remember { mutableStateOf(false) }
-    TopAppBar(
-        title = { Text(text = "Albums", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
+    CenterAlignedTopAppBar(
+        title = { Text(text = "Albums", maxLines = 1, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
         actions = {
             IconButton(onClick = onSearchClick) { Icon(imageVector = Icons.Outlined.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.onSurface) }
             Box {
@@ -960,9 +1174,8 @@ fun ModernAlbumTopBar(scrollBehavior: TopAppBarScrollBehavior, onSearchClick: ()
                     PremiumAlbumMenuItem("Scan Library", Icons.Outlined.ImageSearch) { onMenuAction("scan"); showMenu = false }
                     HorizontalDivider()
                     PremiumAlbumMenuItem("Trash", Icons.Outlined.Delete) { onMenuAction("trash"); showMenu = false }
-                    PremiumAlbumMenuItem("Lock App", Icons.Outlined.Lock) { onMenuAction("lock_app"); showMenu = false }
-                    HorizontalDivider()
-                    PremiumAlbumMenuItem("Settings", Icons.Outlined.Settings) { onMenuAction("settings"); showMenu = false }
+                    PremiumAlbumMenuItem("Hidden Albums", Icons.Outlined.VisibilityOff) { onMenuAction("hidden"); showMenu = false }
+                    PremiumAlbumMenuItem(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock", if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock) { onMenuAction("toggle_lock"); showMenu = false }
                 }
             }
         },
@@ -1148,7 +1361,20 @@ fun FullscreenMediaPager(
         if (ctrl && curr != null) Column(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f)))).navigationBarsPadding().padding(bottom = 18.dp)) { Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) { PremiumViewerAction(icon = Icons.Outlined.Edit, label = "Edit") { onEdit(curr) }; PremiumViewerAction(icon = if (favoriteIds.contains(curr.id)) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, label = if (favoriteIds.contains(curr.id)) "Unfavorite" else "Favorite", tint = if (favoriteIds.contains(curr.id)) Color.Red else Color.White) { onToggleFavorite(curr.id) }; PremiumViewerAction(icon = Icons.Outlined.Share, label = "Share") { ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = if (curr.isVideo) "video/*" else "image/*"; putExtra(Intent.EXTRA_STREAM, curr.uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, "Share Media")) }; PremiumViewerAction(icon = Icons.Outlined.Delete, label = "Delete", tint = Color.Red) { onDelete(curr) }; PremiumViewerAction(icon = Icons.Default.MoreVert, label = "More") { more = true } } }
     }
     if (meta && curr != null) MediaMetadataSheet(item = curr) { meta = false }
-    if (more && curr != null) @OptIn(ExperimentalMaterial3Api::class) ModalBottomSheet(onDismissRequest = { more = false }, containerColor = MaterialTheme.colorScheme.surface) { Column(modifier = Modifier.padding(bottom = 32.dp)) { ListItem(headlineContent = { Text("Details", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.Info, contentDescription = null) }, modifier = Modifier.clickable { more = false; meta = true }); ListItem(headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = null) }, modifier = Modifier.clickable { more = false; onMove(curr) }); ListItem(headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.FileCopy, contentDescription = null) }, modifier = Modifier.clickable { more = false; onCopy(curr) }); if (curr.isVideo) ListItem(headlineContent = { Text("Open In", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null) }, modifier = Modifier.clickable { more = false; ctx.startActivity(Intent(Intent.ACTION_VIEW).apply { setDataAndType(curr.uri, "video/*"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }) }) else ListItem(headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.Wallpaper, contentDescription = null) }, modifier = Modifier.clickable { more = false; onWallpaper(curr) }) } }
+    if (more && curr != null) {
+        @OptIn(ExperimentalMaterial3Api::class)
+        ModalBottomSheet(onDismissRequest = { more = false }, containerColor = MaterialTheme.colorScheme.surface) {
+            Column(modifier = Modifier.padding(bottom = 32.dp)) {
+                ListItem(headlineContent = { Text("Details", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.Info, contentDescription = null) }, modifier = Modifier.clickable { more = false; meta = true })
+                ListItem(headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = null) }, modifier = Modifier.clickable { more = false; onMove(curr) })
+                ListItem(headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.FileCopy, contentDescription = null) }, modifier = Modifier.clickable { more = false; onCopy(curr) })
+                if (curr.isVideo) {
+                    ListItem(headlineContent = { Text("Open In", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null) }, modifier = Modifier.clickable { more = false; ctx.startActivity(Intent(Intent.ACTION_VIEW).apply { setDataAndType(curr.uri, "video/*"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }) })
+                }
+                ListItem(headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.Wallpaper, contentDescription = null) }, modifier = Modifier.clickable { more = false; onWallpaper(curr) })
+            }
+        }
+    }
 }
 
 @OptIn(UnstableApi::class)

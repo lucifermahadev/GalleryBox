@@ -3,15 +3,12 @@
 
 package com.gallerybox.navigation
 
-import android.app.Activity
 import android.content.Context
-import android.content.ContextWrapper
 import android.content.Intent
 import android.provider.MediaStore
 import android.util.Base64
 import android.widget.Toast
 import androidx.annotation.RequiresApi
-import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -31,6 +28,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -49,7 +49,6 @@ import com.gallerybox.ui.screens.editor.EditorScreen
 import com.gallerybox.ui.screens.file.*
 import com.gallerybox.ui.screens.music.*
 import com.gallerybox.ui.screens.picture.PictureScreen
-import com.gallerybox.ui.screens.setting.SettingScreen
 import com.gallerybox.ui.screens.stories.StoriesScreen
 import com.gallerybox.ui.screens.trash.TrashScreen
 import com.gallerybox.ui.screens.vault.VaultSecureScreen
@@ -67,15 +66,11 @@ sealed interface Route {
     // Camera Shortcut
     @Serializable data object Camera : Route
 
-
     // General Utilities
     @Serializable data object Vault : Route
     @Serializable data object Radio : Route
     @Serializable data object Equalizer : Route
     @Serializable data object DuoMusic : Route
-
-    // FIX: Renamed to SettingsRoute to prevent clash with android.provider.Settings
-    @Serializable data object SettingsRoute : Route
 
     @Serializable data object ScanLibrary : Route
     @Serializable data object Trash : Route
@@ -89,15 +84,6 @@ sealed interface Route {
     @Serializable data class MediaEditor(val uri: String, val mediaId: Long? = null) : Route
     @Serializable data class MoveCopy(val mode: String, val ids: String, val sourceAlbumId: String? = null) : Route
     @Serializable data class Wallpaper(val uri: String, val mediaId: Long? = null) : Route
-}
-
-fun Context.findActivity(): Activity? {
-    var c = this
-    while (c is ContextWrapper) {
-        if (c is Activity) return c
-        c = c.baseContext
-    }
-    return null
 }
 
 fun String.toSafeRouteArgs() = Base64.encodeToString(this.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
@@ -116,42 +102,55 @@ data class BottomTab(
     val label: String
 )
 
-enum class AppLockState { Initializing, Locked, Unlocked }
-
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
 @Composable
 fun GalleryNavHost(securityVM: SecurityViewModel = hiltViewModel()) {
-    var appState by remember { mutableStateOf(AppLockState.Initializing) }
+    val isUnlocked by securityVM.isUnlocked.collectAsState()
+    var isAppLockEnabled by remember { mutableStateOf(false) }
+    var isInitializing by remember { mutableStateOf(true) }
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     LaunchedEffect(Unit) {
-        val appLockEnabled = withContext(Dispatchers.IO) { securityVM.isAppLockEnabled() }
-        appState = if (appLockEnabled) {
+        isAppLockEnabled = withContext(Dispatchers.IO) { securityVM.isAppLockEnabled() }
+        if (isAppLockEnabled) {
             securityVM.lock()
-            AppLockState.Locked
-        } else {
-            AppLockState.Unlocked
+        }
+        isInitializing = false
+    }
+
+    // Re-check lock setting when returning to app
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isAppLockEnabled = securityVM.isAppLockEnabled()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
-    AnimatedContent(targetState = appState, label = "AppLockTransition") { state ->
-        when (state) {
-            AppLockState.Initializing -> Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+    if (isInitializing) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+        }
+    } else if (isAppLockEnabled && !isUnlocked) {
+        VaultSecureScreen(
+            isGlobalAppGuard = true,
+            onBack = {},
+            onUnlockGlobalSuccess = {
+                securityVM.unlockReal()
             }
-            AppLockState.Locked -> VaultSecureScreen(
-                isGlobalAppGuard = true,
-                onBack = {},
-                onUnlockGlobalSuccess = { appState = AppLockState.Unlocked }
-            )
-            AppLockState.Unlocked -> GalleryAppContent {
-                securityVM.lock()
-                appState = AppLockState.Locked
-            }
+        )
+    } else {
+        GalleryAppContent {
+            securityVM.lock()
         }
     }
 }
@@ -185,7 +184,7 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
         listOf(
             BottomTab(Route.Pictures, Route.Pictures::class, Icons.Filled.Photo, Icons.Outlined.Photo, "Photos"),
             BottomTab(Route.Albums, Route.Albums::class, Icons.Filled.PhotoAlbum, Icons.Outlined.PhotoAlbum, "Albums"),
-            BottomTab(Route.Stories, Route.Stories::class, Icons.Filled.AutoStories, Icons.Outlined.AutoStories, "Stories"),
+            BottomTab(Route.Stories, Route.Stories::class, Icons.Filled.AutoStories, Icons.Outlined.AutoStories, "Memories"),
             BottomTab(Route.Music, Route.Music::class, Icons.Filled.MusicNote, Icons.Outlined.MusicNote, "Music")
         )
     }
@@ -237,7 +236,6 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
                 nav = navController,
                 ctx = context,
                 navToVid = navigateToVideo,
-                onLock = onLockApp,
                 onViewerStateChanged = { isFullScreenMediaOpen = it },
                 galleryViewModel = sharedGalleryViewModel,
                 trashViewModel = sharedTrashViewModel,
@@ -246,7 +244,6 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
             albumGraphs(
                 nav = navController,
                 navToVid = navigateToVideo,
-                onLock = onLockApp,
                 onViewerStateChanged = { isFullScreenMediaOpen = it },
                 galleryViewModel = sharedGalleryViewModel,
                 trashViewModel = sharedTrashViewModel
@@ -254,8 +251,8 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
             editorGraphs(navController)
             toolsAndUtilityGraphs(
                 nav = navController,
-                navToVid = navigateToVideo,
                 ctx = context,
+                navToVid = navigateToVideo,
                 onLock = onLockApp,
                 galleryViewModel = sharedGalleryViewModel,
                 trashViewModel = sharedTrashViewModel,
@@ -270,7 +267,6 @@ private fun NavGraphBuilder.mainTabs(
     nav: NavHostController,
     ctx: Context,
     navToVid: (String, List<String>) -> Unit,
-    onLock: () -> Unit,
     onViewerStateChanged: (Boolean) -> Unit,
     galleryViewModel: GalleryViewModel,
     trashViewModel: TrashViewModel,
@@ -284,13 +280,11 @@ private fun NavGraphBuilder.mainTabs(
             onNavigateToCamera = { safeLaunchCamera(ctx) },
             onNavigateToTrash = { nav.navigate(Route.Trash) },
             onNavigateToHidden = { nav.navigate(Route.Hidden) },
-            onLockApp = onLock,
             onNavigateToDuplicates = { nav.navigate(Route.Duplicates) },
             onNavigateToSlideshow = { nav.navigate(Route.Slideshow()) },
             onNavigateToWallpaper = { uri, id -> nav.navigate(Route.Wallpaper(uri.toSafeRouteArgs(), id)) },
             onNavigateToAlbum = { raw -> nav.navigate(Route.AlbumView(raw.toSafeRouteArgs())) },
             onNavigateToScan = { nav.navigate(Route.ScanLibrary) },
-            onNavigateToSettings = { nav.navigate(Route.SettingsRoute) }, // FIX applied
             onNavigateToVideoPlayer = navToVid,
             onNavigateToEditor = { uri, id -> nav.navigate(Route.MediaEditor(uri.toSafeRouteArgs(), id)) },
             onNavigateToMoveCopy = { m, ids, src -> nav.navigate(Route.MoveCopy(m, ids, src?.toSafeRouteArgs())) }
@@ -307,8 +301,6 @@ private fun NavGraphBuilder.mainTabs(
                 onNavigateToFavorites = { nav.navigate(Route.AlbumView("virtual_favorites".toSafeRouteArgs())) },
                 onNavigateToTrash = { nav.navigate(Route.Trash) },
                 onNavigateToHidden = { nav.navigate(Route.Hidden) },
-                onLockApp = onLock,
-                onNavigateToSettings = { nav.navigate(Route.SettingsRoute) }, // FIX applied
                 onNavigateToDuplicates = { nav.navigate(Route.Duplicates) },
                 onNavigateToScan = { nav.navigate(Route.ScanLibrary) }
             )
@@ -339,7 +331,6 @@ private fun NavGraphBuilder.mainTabs(
 private fun NavGraphBuilder.albumGraphs(
     nav: NavHostController,
     navToVid: (String, List<String>) -> Unit,
-    onLock: () -> Unit,
     onViewerStateChanged: (Boolean) -> Unit,
     galleryViewModel: GalleryViewModel,
     trashViewModel: TrashViewModel
@@ -358,7 +349,6 @@ private fun NavGraphBuilder.albumGraphs(
                 onNavigateToMoveCopy = { m, ids, src -> nav.navigate(Route.MoveCopy(m, ids, src?.toSafeRouteArgs())) },
                 onNavigateToTrash = { nav.navigate(Route.Trash) },
                 onNavigateToHidden = { nav.navigate(Route.Hidden) },
-                onLockApp = onLock,
                 onNavigateToWallpaper = { uri, id -> nav.navigate(Route.Wallpaper(uri.toSafeRouteArgs(), id)) }
             )
         )
@@ -385,8 +375,8 @@ private fun NavGraphBuilder.editorGraphs(nav: NavHostController) {
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
 private fun NavGraphBuilder.toolsAndUtilityGraphs(
     nav: NavHostController,
-    navToVid: (String, List<String>) -> Unit,
     ctx: Context,
+    navToVid: (String, List<String>) -> Unit,
     onLock: () -> Unit,
     galleryViewModel: GalleryViewModel,
     trashViewModel: TrashViewModel,
@@ -395,9 +385,6 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     composable<Route.Radio> { RadioScreen(viewModel = hiltViewModel<RadioViewModel>(), onBack = { nav.popBackStack() }) }
     composable<Route.Equalizer> { EqualizerScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
     composable<Route.DuoMusic> { DuoMusicScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
-
-    // FIX applied here
-    composable<Route.SettingsRoute> { SettingScreen(onBack = { nav.popBackStack() }) }
 
     composable<Route.Wallpaper> { backStack ->
         val args = backStack.toRoute<Route.Wallpaper>()
@@ -545,6 +532,7 @@ fun BottomNavigationBar(
         }
     }
 }
+
 fun safeLaunchCamera(context: Context) {
     try {
         context.startActivity(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))

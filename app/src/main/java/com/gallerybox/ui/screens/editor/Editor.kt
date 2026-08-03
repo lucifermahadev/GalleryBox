@@ -155,15 +155,24 @@ fun EditorScreen(
 
     if (showExportDialog) {
         ExportSettingsDialog(
+            isVideo = mediaItem.isVideo,
+            srcWidth = mediaItem.width,
+            srcHeight = mediaItem.height,
             onDismiss = { showExportDialog = false }
         ) { res, fps ->
+            val pixels = res.first * res.second
+            val bitrate = when {
+                pixels <= 1280 * 720 -> 6_000_000
+                pixels <= 1920 * 1080 -> 12_000_000
+                else -> 40_000_000
+            }
             editorViewModel.saveMedia(
                 mediaItem,
                 res.first,
                 res.second,
                 fps,
-                (res.first * res.second * fps * 0.1f).toInt(),
-                false
+                bitrate,
+                false // Save as copy
             )
             showExportDialog = false
         }
@@ -289,17 +298,23 @@ fun EditorScreen(
             var ox by remember { mutableFloatStateOf(0f) }
             var oy by remember { mutableFloatStateOf(0f) }
 
-            val imgWidth = previewBitmap?.width?.toFloat() ?: mediaItem.width.toFloat()
-            val imgHeight = previewBitmap?.height?.toFloat() ?: mediaItem.height.toFloat()
-            val imgAspect = if (imgHeight > 0f) imgWidth / imgHeight else 1f
+            val imgWidth = previewBitmap?.width?.toFloat() ?: mediaItem.width.toFloat().takeIf { it > 0f } ?: 1f
+            val imgHeight = previewBitmap?.height?.toFloat() ?: mediaItem.height.toFloat().takeIf { it > 0f } ?: 1f
+            val imgAspect = imgWidth / imgHeight
             val isCropping = activeTab == EditorTab.CROP && editorMode == EditorMode.TOOL
+
+            val netRotation = ((editState.rotationDegrees % 180) + 180) % 180
+            val isSideways = abs(netRotation - 90f) < 1f || abs(netRotation - 270f) < 1f
+            val displayAspect = if (isSideways && !mediaItem.isVideo) 1f / imgAspect else imgAspect
+
+            val isOverlaySelected = selectedLayerId != null
 
             // 1. The unified transform container for BOTH Image and Overlays
             Box(
                 Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) {
-                        if (!isCropping && !isComparing) {
+                        if (!isCropping && !isComparing && !isOverlaySelected) {
                             detectTransformGestures { _, pan, zoom, _ ->
                                 sc = (sc * zoom).coerceIn(1f, 5f)
                                 val maxOff = (sc - 1f) * 1500f
@@ -309,7 +324,7 @@ fun EditorScreen(
                         }
                     }
                     .pointerInput(Unit) {
-                        if (!isCropping && !isComparing) {
+                        if (!isCropping && !isComparing && !isOverlaySelected) {
                             detectTapGestures(
                                 onDoubleTap = { sc = 1f; ox = 0f; oy = 0f },
                                 onTap = { selectedLayerId = null }
@@ -318,40 +333,40 @@ fun EditorScreen(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                if (mediaItem.isVideo) {
-                    EditorVideoPreview(
-                        item = mediaItem,
-                        state = editState,
-                        isComp = isComparing,
-                        isCropping = isCropping,
-                        seekRequest = seekRequest,
-                        onDurationReady = { videoDuration = it },
-                        onPos = { currentPlayerPos = it }
-                    )
-
-                    if (isCropping && !isComparing) {
-                        InteractiveCropOverlay(
-                            cCrop = editState.cropRect,
-                            cAsp = editState.aspectRatio,
-                            grid = gridType
-                        ) {
-                            editorViewModel.updateCropRect(it)
+                // 2. The perfectly aspect-ratio matched canvas
+                Box(
+                    Modifier
+                        .aspectRatio(displayAspect)
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = sc * (if (!isComparing && editState.flipHorizontal) -1f else 1f),
+                            scaleY = sc * (if (!isComparing && editState.flipVertical) -1f else 1f),
+                            rotationZ = if (!isComparing && !mediaItem.isVideo) editState.rotationDegrees + editState.straightenDegrees else 0f,
+                            translationX = ox,
+                            translationY = oy,
+                            clip = true
+                        )
+                ) {
+                    if (mediaItem.isVideo) {
+                        EditorVideoPreview(
+                            item = mediaItem,
+                            state = editState,
+                            isComp = isComparing,
+                            isCropping = isCropping,
+                            seekRequest = seekRequest,
+                            onDurationReady = { videoDuration = it },
+                            onPos = { currentPlayerPos = it }
+                        )
+                        if (isCropping && !isComparing) {
+                            InteractiveCropOverlay(
+                                cCrop = editState.cropRect,
+                                cAsp = editState.aspectRatio,
+                                grid = gridType
+                            ) {
+                                editorViewModel.updateCropRect(it)
+                            }
                         }
-                    }
-                } else {
-                    // 2. The perfectly aspect-ratio matched canvas
-                    Box(
-                        Modifier
-                            .aspectRatio(imgAspect)
-                            .fillMaxSize()
-                            .graphicsLayer(
-                                scaleX = sc * (if (!isComparing && editState.flipHorizontal) -1f else 1f),
-                                scaleY = sc * (if (!isComparing && editState.flipVertical) -1f else 1f),
-                                rotationZ = if (!isComparing) editState.rotationDegrees + editState.straightenDegrees else 0f,
-                                translationX = ox,
-                                translationY = oy
-                            )
-                    ) {
+                    } else {
                         // The active preview
                         if (previewBitmap != null) {
                             Image(previewBitmap!!.asImageBitmap(), "Preview", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
@@ -530,7 +545,7 @@ fun EditorVideoPreview(
         }
     }
 
-    LaunchedEffect(isComp, state, isCropping) {
+    LaunchedEffect(isComp, state) {
         exo.volume = if (state.isMuted) 0f else state.videoVolume / 100f
 
         if (isComp) {
@@ -612,14 +627,15 @@ fun EditorVideoPreview(
         }, Modifier
             .fillMaxSize()
             .graphicsLayer {
-                val rect = state.cropRect ?: RectF(0f, 0f, 1f, 1f)
-                val cw = rect.width().coerceAtLeast(0.01f)
-                val ch = rect.height().coerceAtLeast(0.01f)
-
-                scaleX = 1f / cw
-                scaleY = 1f / ch
-                translationX = (0.5f - rect.centerX()) * viewWidth * scaleX
-                translationY = (0.5f - rect.centerY()) * viewHeight * scaleY
+                if (!isCropping && !isComp) {
+                    val rect = state.cropRect ?: RectF(0f, 0f, 1f, 1f)
+                    val cw = rect.width().coerceAtLeast(0.01f)
+                    val ch = rect.height().coerceAtLeast(0.01f)
+                    scaleX = 1f / cw
+                    scaleY = 1f / ch
+                    translationX = (0.5f - rect.centerX()) * viewWidth * scaleX
+                    translationY = (0.5f - rect.centerY()) * viewHeight * scaleY
+                }
             }
         )
 
@@ -656,7 +672,7 @@ fun TabItem(lbl: String, ic: ImageVector, sel: Boolean, onClk: () -> Unit) {
 
 @Composable
 fun SavingOverlay(prg: Float) {
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(0.8f)).pointerInput(Unit){}, Alignment.Center) {
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(0.8f)).clickable(enabled = false, onClick = {}), Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator({ prg }, Modifier.size(64.dp), color = MaterialTheme.colorScheme.primary, strokeWidth = 6.dp)
             Spacer(Modifier.height(16.dp))
@@ -821,6 +837,8 @@ fun InteractiveCropOverlay(cCrop: RectF?, cAsp: Float?, grid: Int, onCrop: (Rect
 @Composable
 fun AdjustToolPanel(s: EditState, isVideo: Boolean, up: ((EditState) -> EditState) -> Unit) {
     val hap = LocalHapticFeedback.current
+    var unmutedVol by rememberSaveable { mutableFloatStateOf(100f) }
+
     val baseTools = if (isVideo) emptyList() else listOf(
         AdjustTool("Brightness", Icons.Rounded.BrightnessMedium, s.brightness, -1f..1f) { v -> up { it.copy(brightness = v) } },
         AdjustTool("Contrast", Icons.Rounded.Contrast, s.contrast, 0f..2f) { v -> up { it.copy(contrast = v) } },
@@ -853,7 +871,12 @@ fun AdjustToolPanel(s: EditState, isVideo: Boolean, up: ((EditState) -> EditStat
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (a.name == "Volume") {
                     IconButton(onClick = {
-                        up { it.copy(isMuted = !it.isMuted, videoVolume = if (it.isMuted) 100f else 0f) }
+                        if (s.isMuted) {
+                            up { it.copy(isMuted = false, videoVolume = unmutedVol) }
+                        } else {
+                            unmutedVol = s.videoVolume
+                            up { it.copy(isMuted = true, videoVolume = 0f) }
+                        }
                     }) {
                         Icon(if (s.isMuted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp, "Mute", tint = MaterialTheme.colorScheme.primary)
                     }
@@ -978,8 +1001,10 @@ fun CropToolPanel(vm: EditorViewModel, grid: Int, onGrid: (Int) -> Unit) {
     val rs: List<Pair<String, Float?>> = listOf("Free" to null, "1:1" to 1f, "4:3" to 4f/3f, "3:4" to 3f/4f, "16:9" to 16f/9f, "9:16" to 9f/16f)
 
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        // Toolbar with Rotate Left, Rotate Right, Flip H/V, Grid, Reset
         Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             IconButton({ vm.rotateLeft() }) { Icon(Icons.AutoMirrored.Rounded.RotateLeft, "Rot L", tint = MaterialTheme.colorScheme.onSurface) }
+            IconButton({ vm.rotateRight() }) { Icon(Icons.AutoMirrored.Rounded.RotateRight, "Rot R", tint = MaterialTheme.colorScheme.onSurface) }
             IconButton({ vm.toggleFlipHorizontal() }) { Icon(Icons.Rounded.Flip, "Flip H", tint = MaterialTheme.colorScheme.onSurface) }
             IconButton({ vm.toggleFlipVertical() }) { Icon(Icons.Rounded.Flip, "Flip V", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.rotate(90f)) }
             IconButton({ onGrid((grid + 1) % 4) }) { Icon(Icons.Rounded.GridOn, "Grid", tint = MaterialTheme.colorScheme.onSurface) }
@@ -988,13 +1013,14 @@ fun CropToolPanel(vm: EditorViewModel, grid: Int, onGrid: (Int) -> Unit) {
 
         Spacer(Modifier.height(12.dp))
 
+        // Straighten Slider (-45 to 45)
         Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Rounded.ScreenRotation, "Straighten", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(16.dp))
             Slider(
-                s.straightenDegrees,
-                { vm.updateEditState { e -> e.copy(straightenDegrees = it) } },
-                Modifier.weight(1f),
+                value = s.straightenDegrees,
+                onValueChange = { angle -> vm.updateEditState { e -> e.copy(straightenDegrees = angle) } },
+                modifier = Modifier.weight(1f),
                 valueRange = -45f..45f,
                 colors = SliderDefaults.colors(
                     thumbColor = MaterialTheme.colorScheme.primary,
@@ -1003,6 +1029,26 @@ fun CropToolPanel(vm: EditorViewModel, grid: Int, onGrid: (Int) -> Unit) {
                 )
             )
             Text("${s.straightenDegrees.toInt()}°", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, modifier = Modifier.width(40.dp).padding(start = 8.dp))
+        }
+
+        Spacer(Modifier.height(4.dp))
+
+        // Rotation Slider (0 to 360)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.RotateRight, "Rotate", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(16.dp))
+            Slider(
+                value = s.rotationDegrees,
+                onValueChange = { angle -> vm.updateEditState { e -> e.copy(rotationDegrees = angle) } },
+                modifier = Modifier.weight(1f),
+                valueRange = 0f..360f,
+                colors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                    inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            )
+            Text("${s.rotationDegrees.toInt()}°", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, modifier = Modifier.width(40.dp).padding(start = 8.dp))
         }
 
         Spacer(Modifier.height(12.dp))
@@ -1164,6 +1210,7 @@ fun TrimToolPanel(
                     vm.setTrimRange(0L, exoDuration)
                     onSeekReq(0L)
                 },
+                enabled = exoDuration > 1L,
                 contentPadding = PaddingValues(0.dp)
             ) {
                 Text("Reset", color = MaterialTheme.colorScheme.primary)
@@ -1233,11 +1280,35 @@ fun TrimToolPanel(
 }
 
 @Composable
-fun ExportSettingsDialog(onDismiss: () -> Unit, onExport: (Pair<Int, Int>, Int) -> Unit) {
-    var r by remember { mutableStateOf(Pair(1920, 1080)) }
+fun ExportSettingsDialog(
+    isVideo: Boolean,
+    srcWidth: Int,
+    srcHeight: Int,
+    onDismiss: () -> Unit,
+    onExport: (Pair<Int, Int>, Int) -> Unit
+) {
+    if (!isVideo) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Save Photo", fontWeight = FontWeight.Bold) },
+            text = { Text("Are you sure you want to save changes to this photo?") },
+            confirmButton = { Button({ onExport(Pair(srcWidth, srcHeight), 0) }) { Text("Save") } },
+            dismissButton = { TextButton(onDismiss) { Text("Cancel") } }
+        )
+        return
+    }
+
+    var r by remember { mutableStateOf(Pair(min(srcWidth, 1920), min(srcHeight, 1080))) }
     var f by remember { mutableIntStateOf(30) }
 
-    val rs = listOf(Pair(1280, 720) to "720p", Pair(1920, 1080) to "1080p", Pair(3840, 2160) to "4K")
+    val allRs = listOf(Pair(1280, 720) to "720p", Pair(1920, 1080) to "1080p", Pair(3840, 2160) to "4K")
+    val maxPixels = srcWidth * srcHeight
+    val rs = allRs.filter { (res, _) -> res.first * res.second <= maxPixels * 1.2f }.takeIf { it.isNotEmpty() } ?: listOf(allRs.first())
+
+    if (!rs.any { it.first == r }) {
+        r = rs.last().first
+    }
+
     val fs = listOf(24, 30, 60)
 
     AlertDialog(
@@ -1276,6 +1347,8 @@ fun StickerOverlay(
 ) {
     val ctx = LocalContext.current
     val il = remember { ImageLoader.Builder(ctx).components { add(SvgDecoder.Factory()) }.build() }
+    val d = LocalDensity.current
+
     state.stickers.filter { it.isVisible }.forEach { st ->
         val isSel = st.id == selId
         val b = 150f * st.scale
@@ -1285,17 +1358,15 @@ fun StickerOverlay(
         Box(
             Modifier
                 .offset { IntOffset((posX - b / 2).toInt(), (posY - b / 2).toInt()) }
-                .size(with(LocalDensity.current) { b.toDp() })
+                .size(with(d) { b.toDp() })
                 .graphicsLayer { rotationZ = st.rotation }
                 .pointerInput(st.id) {
-                    detectTransformGestures { _, pan, zoom, rotation ->
-                        onSel(st.id)
+                    detectDragGestures(onDragStart = { onSel(st.id) }) { change, dragAmount ->
+                        change.consume()
                         up(st.id) {
                             it.copy(
-                                x = (it.x + (pan.x / parentWidth)).coerceIn(0f, 1f),
-                                y = (it.y + (pan.y / parentHeight)).coerceIn(0f, 1f),
-                                scale = (it.scale * zoom).coerceIn(0.2f, 5f),
-                                rotation = (it.rotation + rotation) % 360f
+                                x = (it.x + (dragAmount.x / parentWidth)).coerceIn(0f, 1f),
+                                y = (it.y + (dragAmount.y / parentHeight)).coerceIn(0f, 1f)
                             )
                         }
                     }
@@ -1310,6 +1381,35 @@ fun StickerOverlay(
             )
             if (isSel) {
                 Box(Modifier.matchParentSize().border(2.dp, Color.White))
+
+                val handleSize = 28.dp
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .offset(x = handleSize / 2, y = handleSize / 2)
+                        .size(handleSize)
+                        .background(Color.White, CircleShape)
+                        .pointerInput(st.id) {
+                            detectDragGestures { change, _ ->
+                                change.consume()
+                                val handleSizePx = with(d) { handleSize.toPx() }
+                                val cx = -b / 2 + handleSizePx / 2
+                                val cy = -b / 2 + handleSizePx / 2
+                                val v1 = Offset(change.previousPosition.x - cx, change.previousPosition.y - cy)
+                                val v2 = Offset(change.position.x - cx, change.position.y - cy)
+                                val zoomDelta = (v2.getDistance() / v1.getDistance()).takeIf { !it.isNaN() && it > 0f } ?: 1f
+                                val rotDelta = Math.toDegrees((atan2(v2.y, v2.x) - atan2(v1.y, v1.x)).toDouble()).toFloat()
+                                up(st.id) {
+                                    it.copy(
+                                        scale = (it.scale * zoomDelta).coerceIn(0.2f, 5f),
+                                        rotation = (it.rotation + rotDelta) % 360f
+                                    )
+                                }
+                            }
+                        }
+                ) {
+                    Icon(Icons.Rounded.ZoomOutMap, null, tint = Color.Black, modifier = Modifier.padding(4.dp))
+                }
             }
         }
     }
@@ -1324,6 +1424,8 @@ fun TextOverlay(
     onSel: (String) -> Unit,
     up: (String, (TextLayer) -> TextLayer) -> Unit
 ) {
+    val d = LocalDensity.current
+
     state.textLayers.filter { it.isVisible }.forEach { t ->
         val isSel = t.id == selId
         val posX = t.x * parentWidth
@@ -1340,14 +1442,12 @@ fun TextOverlay(
                 }
                 .graphicsLayer { rotationZ = t.rotation }
                 .pointerInput(t.id) {
-                    detectTransformGestures { _, pan, zoom, rotation ->
-                        onSel(t.id)
+                    detectDragGestures(onDragStart = { onSel(t.id) }) { change, dragAmount ->
+                        change.consume()
                         up(t.id) {
                             it.copy(
-                                x = (it.x + (pan.x / parentWidth)).coerceIn(0f, 1f),
-                                y = (it.y + (pan.y / parentHeight)).coerceIn(0f, 1f),
-                                size = (it.size * zoom).coerceIn(10f, 200f),
-                                rotation = (it.rotation + rotation) % 360f
+                                x = (it.x + (dragAmount.x / parentWidth)).coerceIn(0f, 1f),
+                                y = (it.y + (dragAmount.y / parentHeight)).coerceIn(0f, 1f)
                             )
                         }
                     }
@@ -1355,8 +1455,37 @@ fun TextOverlay(
                 .pointerInput(t.id) { detectTapGestures { onSel(t.id) } }
         ) {
             Text(text = t.text, color = Color(t.color).copy(t.opacity), fontSize = t.size.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
-            if (isSel) {
+            if (isSel && measuredWidth > 0) {
                 Box(Modifier.matchParentSize().border(2.dp, Color.White))
+
+                val handleSize = 28.dp
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .offset(x = handleSize / 2, y = handleSize / 2)
+                        .size(handleSize)
+                        .background(Color.White, CircleShape)
+                        .pointerInput(t.id) {
+                            detectDragGestures { change, _ ->
+                                change.consume()
+                                val handleSizePx = with(d) { handleSize.toPx() }
+                                val cx = -measuredWidth / 2f + handleSizePx / 2
+                                val cy = -measuredHeight / 2f + handleSizePx / 2
+                                val v1 = Offset(change.previousPosition.x - cx, change.previousPosition.y - cy)
+                                val v2 = Offset(change.position.x - cx, change.position.y - cy)
+                                val zoomDelta = (v2.getDistance() / v1.getDistance()).takeIf { !it.isNaN() && it > 0f } ?: 1f
+                                val rotDelta = Math.toDegrees((atan2(v2.y, v2.x) - atan2(v1.y, v1.x)).toDouble()).toFloat()
+                                up(t.id) {
+                                    it.copy(
+                                        size = (it.size * zoomDelta).coerceIn(10f, 200f),
+                                        rotation = (it.rotation + rotDelta) % 360f
+                                    )
+                                }
+                            }
+                        }
+                ) {
+                    Icon(Icons.Rounded.ZoomOutMap, null, tint = Color.Black, modifier = Modifier.padding(4.dp))
+                }
             }
         }
     }

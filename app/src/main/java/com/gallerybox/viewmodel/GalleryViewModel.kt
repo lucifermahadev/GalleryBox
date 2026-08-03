@@ -53,7 +53,6 @@ import javax.inject.Inject
 import kotlin.math.exp
 import kotlin.math.log2
 
-// --- Constants & Enums ---
 const val ID_CAMERA = "virtual_camera"
 const val ID_RECENT = "virtual_recent"
 const val ID_FAVORITES = "virtual_favorites"
@@ -75,7 +74,6 @@ fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeig
     return inSampleSize
 }
 
-// --- States & Events ---
 sealed class GalleryEvent {
     data class ShowToast(val message: String) : GalleryEvent()
     data class RequestPermission(val intentSender: IntentSender) : GalleryEvent()
@@ -104,7 +102,7 @@ sealed interface GalleryViewerState {
 
 sealed class FileOperationState {
     data object Idle : FileOperationState()
-    data class Processing(val progressPercentage: Float, val itemsProcessed: Int, val totalItems: Int) : FileOperationState()
+    data class Processing(val phase: String, val progressPercentage: Float, val itemsProcessed: Int, val totalItems: Int) : FileOperationState()
     data object WaitingForPermission : FileOperationState()
     data class Editing(val progress: Float) : FileOperationState()
 }
@@ -127,13 +125,13 @@ data class VideoPlaybackState(
     val playWhenReady: Boolean = true
 )
 
-// --- ViewModel ---
 @HiltViewModel
 class GalleryViewModel @Inject constructor(
     application: Application,
     val dao: GalleryDao,
     val editingEngine: EditingEngine,
-    val engine: GalleryEngine
+    val engine: GalleryEngine,
+    val mediaOpEngine: MediaOperationEngine
 ) : AndroidViewModel(application), ComponentCallbacks2 {
 
     companion object {
@@ -149,9 +147,21 @@ class GalleryViewModel @Inject constructor(
     private val _isBusy = MutableStateFlow(false)
     val isBusy = _isBusy.asStateFlow()
 
+    private val fileOpMutex = Mutex()
     private val _fileOperationState = MutableStateFlow<FileOperationState>(FileOperationState.Idle)
     val fileOperationState = _fileOperationState.asStateFlow()
     private var fileOperationJob: Job? = null
+
+    private var pendingRollbackUris: List<Uri> = emptyList()
+    private var pendingDeleteUris: List<Uri> = emptyList()
+    private var pendingMoveIds: Set<Long> = emptySet()
+    private var pendingMoveOperation = false
+    private var pendingAutoDeleteHandledByOs = false
+    private var pendingIsWriteRequest = false
+    private var pendingOperationIds: List<Long> = emptyList()
+    private var pendingOperationTargetAlbum: TargetAlbum? = null
+    private var pendingOperationIsMove: Boolean = false
+    private var pendingOperationOnComplete: ((MediaOpResult) -> Unit)? = null
 
     private val _thermalState = MutableStateFlow(PowerManager.THERMAL_STATUS_NONE)
     private var lastMediaStoreGeneration = 0L
@@ -162,8 +172,17 @@ class GalleryViewModel @Inject constructor(
 
     private val activePagingSources = CopyOnWriteArrayList<MediaPagingSource>()
 
-    // --- Single Reusable Player ---
     private var sharedPlayer: ExoPlayer? = null
+
+    private fun tryBeginFileOperation(): Boolean {
+        return fileOpMutex.tryLock()
+    }
+
+    private fun endFileOperation() {
+        if (fileOpMutex.isLocked) {
+            fileOpMutex.unlock()
+        }
+    }
 
     fun getPlayer(): ExoPlayer {
         if (sharedPlayer == null) {
@@ -203,7 +222,6 @@ class GalleryViewModel @Inject constructor(
             Log.e(TAG, "Frame step failed", e)
         }
     }
-    // ------------------------------
 
     val usageStatsMap = dao.getAllUsageStats().map { list -> list.associateBy { it.mediaId } }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
@@ -241,7 +259,6 @@ class GalleryViewModel @Inject constructor(
 
     val media: StateFlow<List<MediaItem>> = _mediaIndexes.map { it.all }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // --- Video Playlist States ---
     private val _videoPlaylist = MutableStateFlow<List<String>>(emptyList())
     val videoPlaylist = _videoPlaylist.asStateFlow()
 
@@ -270,12 +287,11 @@ class GalleryViewModel @Inject constructor(
             )
         }
     }
-    // -----------------------------
 
     private fun getThermalFactor(): Double { return when (_thermalState.value) { PowerManager.THERMAL_STATUS_NONE -> 1.0; PowerManager.THERMAL_STATUS_LIGHT -> 0.9; PowerManager.THERMAL_STATUS_MODERATE -> 0.75; PowerManager.THERMAL_STATUS_SEVERE -> 0.5; PowerManager.THERMAL_STATUS_CRITICAL -> 0.25; PowerManager.THERMAL_STATUS_EMERGENCY, PowerManager.THERMAL_STATUS_SHUTDOWN -> 0.1; else -> 1.0 } }
     private fun getMemoryFactor(): Double { val actManager = getApplication<Application>().getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager; val memInfo = ActivityManager.MemoryInfo(); actManager.getMemoryInfo(memInfo); return memInfo.availMem.toDouble() / memInfo.totalMem.toDouble() }
 
-    private fun recalculateDynamicScaling() { val actManager = getApplication<Application>().getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager; val memInfo = ActivityManager.MemoryInfo(); actManager.getMemoryInfo(memInfo); val ramMB = (memInfo.totalMem / (1024 * 1024)).toDouble(); val thermal = getThermalFactor(); val memory = memInfo.availMem.toDouble() / memInfo.totalMem.toDouble(); currentCacheSizeMB = minOf((ramMB * thermal * memory).toInt(), 512); currentPageSize = maxOf(32, ((ramMB / 64) * thermal).toInt()); if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) { searchCache.resize((currentCacheSizeMB * 2).coerceIn(50, 500)); sortedCache.resize(currentCacheSizeMB.coerceIn(20, 250)) } }
+    private fun recalculateDynamicScaling() { val actManager = getApplication<Application>().getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager; val memInfo = ActivityManager.MemoryInfo(); actManager.getMemoryInfo(memInfo); val ramMB = (memInfo.totalMem / (1024 * 1024)).toDouble(); val thermal = getThermalFactor(); val memory = memInfo.availMem.toDouble() / memInfo.totalMem.toDouble(); currentCacheSizeMB = minOf((ramMB * thermal * memory).toInt(), 512); currentPageSize = 64; if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) { searchCache.resize((currentCacheSizeMB * 2).coerceIn(50, 500)); sortedCache.resize(currentCacheSizeMB.coerceIn(20, 250)) } }
 
     val processedMedia: StateFlow<List<MediaItem>> = combine(_mediaIndexes, _searchQuery.debounce(300), _activeFilter, _activeSort, usageStatsMap) { indexes, query, filter, sort, usageStats ->
         val q = query.trim().lowercase()
@@ -328,7 +344,7 @@ class GalleryViewModel @Inject constructor(
         val pageSize = currentPageSize
         val prefetch = maxOf(20, (pageSize * 0.25 * getThermalFactor()).toInt())
         activePagingSources.removeAll { it.invalid }
-        Pager(PagingConfig(pageSize = pageSize, prefetchDistance = prefetch, enablePlaceholders = true, initialLoadSize = pageSize, maxSize = pageSize * 4)) {
+        Pager(PagingConfig(pageSize = pageSize, prefetchDistance = prefetch, enablePlaceholders = false, initialLoadSize = pageSize, maxSize = pageSize * 4)) {
             MediaPagingSource(getApplication<Application>().contentResolver, state.f, state.q).also { activePagingSources.add(it) }
         }.flow.map { pd ->
             val secSet = state.s.toHashSet()
@@ -376,8 +392,12 @@ class GalleryViewModel @Inject constructor(
 
         viewModelScope.launch(Dispatchers.Default) {
             combine(trashBin, favoriteIds, secureIds, albumMeta, _hiddenAlbums, _albumSort, manualAlbums) { _ ->
-                safeLoadLibrary()
-            }.collect()
+            }.collectLatest {
+                if (_rawMedia.value.isNotEmpty()) {
+                    rebuildIndexesAndAlbums(_rawMedia.value)
+                    invalidatePagingSources()
+                }
+            }
         }
 
         viewModelScope.launch(Dispatchers.Default) {
@@ -518,15 +538,8 @@ class GalleryViewModel @Inject constructor(
 
     private fun cacheAlbumPreviews(validMedia: List<MediaItem>) {
         albumPreviewCacheMap.clear()
-        validMedia.sortedByDescending { item ->
-            val ageDays = maxOf(0L, (System.currentTimeMillis() / 1000L - item.dateAdded)) / 86400.0
-            val recencyScore = exp(-ageDays / 30.0)
-            val favScore = if (favoriteIds.value.contains(item.id)) 1.0 else 0.0
-            val sizeScore = minOf(item.size.toDouble() / (5 * 1024 * 1024), 1.0)
-            val resolutionPixels = (item.width * item.height).toDouble()
-            val qualityScore = if (resolutionPixels > 0) minOf(resolutionPixels / 1_000_000.0, 50.0) else minOf(item.size.toDouble() / (12 * 1024 * 1024), 1.0)
-            (0.6 * recencyScore) + (0.2 * favScore) + (0.1 * sizeScore) + (0.1 * qualityScore)
-        }.forEach { item ->
+
+        for (item in validMedia) {
             val bList = albumPreviewCacheMap.getOrPut(item.bucketId) { mutableListOf() }
             if (bList.size < 4) bList.add(item.uri)
 
@@ -538,7 +551,7 @@ class GalleryViewModel @Inject constructor(
             if (albumPreviewCacheMap.getOrPut(ID_RECENT) { mutableListOf() }.size < 4) {
                 albumPreviewCacheMap[ID_RECENT]!!.add(item.uri)
             }
-            if (favoriteIds.value.contains(item.id)) {
+            if (favoriteIds.value.contains(item.id) || item.isFavorite) {
                 val l = albumPreviewCacheMap.getOrPut(ID_FAVORITES) { mutableListOf() }
                 if (l.size < 4) l.add(item.uri)
             }
@@ -564,7 +577,6 @@ class GalleryViewModel @Inject constructor(
 
     fun toggleHiddenAlbum(albumId: String) {
         _hiddenAlbums.update { if (it.contains(albumId)) it - albumId else it + albumId }
-        viewModelScope.launch { forceSync() }
     }
 
     fun clearDuplicates() { _duplicates.value = emptyList() }
@@ -613,9 +625,16 @@ class GalleryViewModel @Inject constructor(
     }
 
     fun saveMedia(originalMediaId: Long, saveMode: SaveMode = SaveMode.SAVE_AS_NEW, editState: EditState, exportAsSticker: Boolean = false) {
-        val item = getMediaItemById(originalMediaId) ?: return _events.trySend(GalleryEvent.ShowToast("Error: Cannot find original media")).let { Unit }
-        fileOperationJob?.cancel()
+        if (!tryBeginFileOperation()) return
+        val item = getMediaItemById(originalMediaId)
+        if (item == null) {
+            _events.trySend(GalleryEvent.ShowToast("Error: Cannot find original media"))
+            endFileOperation()
+            return
+        }
+
         fileOperationJob = viewModelScope.launch(Dispatchers.IO) {
+            _isBusy.value = true
             _fileOperationState.value = FileOperationState.Editing(0f)
             try {
                 delay(100)
@@ -631,6 +650,8 @@ class GalleryViewModel @Inject constructor(
                 _events.trySend(GalleryEvent.ShowToast("Error saving edits"))
             } finally {
                 _fileOperationState.value = FileOperationState.Idle
+                _isBusy.value = false
+                endFileOperation()
             }
         }
     }
@@ -766,17 +787,13 @@ class GalleryViewModel @Inject constructor(
     }
 
     fun toggleFavorite(id: Long) = viewModelScope.launch(Dispatchers.IO) {
-        if (favoriteIds.value.contains(id)) {
+        val isFav = favoriteIds.value.contains(id)
+        if (isFav) {
             dao.removeFavorite(id)
         } else {
             dao.addFavorite(FavoriteEntity(mediaId = id))
         }
-        sortedCache.evictAll()
-        searchCache.evictAll()
-        albumPreviewCacheMap.clear()
-        _albumPreviewCache.value = emptyMap()
-        invalidatePagingSources()
-        forceSync()
+        updateMediaLocally(id) { it.copy(isFavorite = !isFav) }
     }
 
     fun setSearchQuery(query: String) { _searchQuery.value = query }
@@ -785,7 +802,6 @@ class GalleryViewModel @Inject constructor(
     fun updateAlbumSort(sort: AlbumSort) {
         if (_albumSort.value == sort) return
         _albumSort.value = sort
-        viewModelScope.launch { forceSync() }
     }
 
     fun saveCustomAlbumOrder(orderedAlbums: List<Album>) = viewModelScope.launch(Dispatchers.IO) {
@@ -796,7 +812,6 @@ class GalleryViewModel @Inject constructor(
         if (_albumSort.value != AlbumSort.Custom) {
             _albumSort.value = AlbumSort.Custom
         }
-        forceSync()
     }
 
     fun reorderAlbums(fromAlbumId: String, toAlbumId: String) = viewModelScope.launch(Dispatchers.IO) {
@@ -811,7 +826,6 @@ class GalleryViewModel @Inject constructor(
             dao.insertAlbumMeta((dao.getAlbumMetaSync(a.id) ?: AlbumEntity(id = a.id)).copy(albumOrder = i))
         }
         _albumSort.value = AlbumSort.Custom
-        forceSync()
     }
 
     fun moveAlbumUp(id: String) {
@@ -845,188 +859,82 @@ class GalleryViewModel @Inject constructor(
 
     fun closeViewer() { _viewerState.value = GalleryViewerState.Closed }
 
-    fun cancelCurrentOperation() {
-        editingEngine.cancelExport()
-        if (fileOperationJob?.isActive == true) {
-            fileOperationJob?.cancel()
-            _fileOperationState.value = FileOperationState.Idle
-            viewModelScope.launch { _events.send(GalleryEvent.ShowToast("Operation cancelled safely")) }
-        }
+    private fun clearPendingOperationStates() {
+        pendingRollbackUris = emptyList()
+        pendingDeleteUris = emptyList()
+        pendingMoveIds = emptySet()
+        pendingMoveOperation = false
+        pendingAutoDeleteHandledByOs = false
+        pendingIsWriteRequest = false
+        pendingOperationIds = emptyList()
+        pendingOperationTargetAlbum = null
+        pendingOperationIsMove = false
+        pendingOperationOnComplete = null
     }
 
-    @Volatile private var pendingDeleteUris: List<Uri> = emptyList()
-
-    private fun performRealFileOperation(ids: List<Long>, targetRelativePath: String, isMove: Boolean) {
-        fileOperationJob?.cancel()
-
-        fileOperationJob = viewModelScope.launch(Dispatchers.IO) {
-
-            val actManager = getApplication<Application>().getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val memInfo = ActivityManager.MemoryInfo()
-            actManager.getMemoryInfo(memInfo)
-
-            val totalBytesRequired = ids.sumOf { _mediaMap.value[it]?.size ?: 0L }
-            val storageDir = Environment.getExternalStorageDirectory()
-            if (storageDir.usableSpace < totalBytesRequired + (50 * 1024 * 1024)) {
-                _events.send(GalleryEvent.ShowToast("Insufficient storage space"))
-                return@launch
-            }
-
-            val total = ids.size
-            var successCount = 0
-            val resolver = getApplication<Application>().contentResolver
-            val urisToDelete = mutableListOf<Uri>()
-            val idsToDelete = mutableListOf<Long>()
-
-            _fileOperationState.value = FileOperationState.Processing(0f, 0, total)
-
-            val cleanRelativePath = if (targetRelativePath.endsWith("/")) targetRelativePath else "$targetRelativePath/"
-            val absoluteTargetDir = File(Environment.getExternalStorageDirectory(), cleanRelativePath)
-
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                if (!absoluteTargetDir.exists()) absoluteTargetDir.mkdirs()
-            }
-
-            for ((index, id) in ids.withIndex()) {
-                if (!isActive) break
-                val item = _mediaMap.value[id] ?: continue
-
-                try {
-                    var newDisplayName = item.name
-                    var destUri: Uri? = null
-                    var counter = 1
-                    var insertSucceeded = false
-
-                    while (!insertSucceeded && counter < 100) {
-                        val contentValues = ContentValues().apply {
-                            put(MediaStore.MediaColumns.DISPLAY_NAME, newDisplayName)
-                            put(MediaStore.MediaColumns.MIME_TYPE, item.mimeType)
-
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                put(MediaStore.MediaColumns.RELATIVE_PATH, cleanRelativePath)
-                                put(MediaStore.MediaColumns.IS_PENDING, 1)
-                            } else {
-                                put(MediaStore.Images.Media.DATA, File(absoluteTargetDir, newDisplayName).absolutePath)
-                            }
-                        }
-
-                        val targetUri = when {
-                            item.isVideo -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                            else -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                        }
-
-                        try {
-                            destUri = resolver.insert(targetUri, contentValues)
-                            if (destUri != null) insertSucceeded = true
-                        } catch (e: Exception) {
-                            // MediaStore throws when names clash
-                        }
-
-                        if (!insertSucceeded) {
-                            val nameWithoutExt = item.name.substringBeforeLast(".")
-                            val ext = item.name.substringAfterLast(".", "")
-                            newDisplayName = "${nameWithoutExt}_$counter${if (ext.isNotEmpty()) ".$ext" else ""}"
-                            counter++
-                        }
-                    }
-
-                    if (destUri != null && insertSucceeded) {
-                        var copySuccessful = false
-                        try {
-                            resolver.openInputStream(item.uri)?.use { input ->
-                                resolver.openOutputStream(destUri)?.use { output ->
-                                    input.copyTo(output, 1024 * 1024)
-                                    copySuccessful = true
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed copying stream", e)
-                        }
-
-                        if (copySuccessful) {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                val cvUpdate = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-                                try {
-                                    resolver.update(destUri, cvUpdate, null, null)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Failed to clear pending state", e)
-                                    resolver.delete(destUri, null, null)
-                                    copySuccessful = false
-                                }
-                            } else {
-                                MediaScannerConnection.scanFile(getApplication(), arrayOf(File(absoluteTargetDir, newDisplayName).absolutePath), arrayOf(item.mimeType), null)
-                            }
-                        } else {
-                            try { resolver.delete(destUri, null, null) } catch (e: Exception) {}
-                        }
-
-                        if (copySuccessful) {
-                            if (isMove) {
-                                urisToDelete.add(item.uri)
-                                idsToDelete.add(item.id)
-                            }
-                            successCount++
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "File operation failed for ${item.name}", e)
+    fun cancelCurrentOperation() {
+        editingEngine.cancelExport()
+        if (fileOpMutex.isLocked) {
+            fileOperationJob?.cancel()
+            viewModelScope.launch(Dispatchers.IO) {
+                if (pendingRollbackUris.isNotEmpty()) {
+                    mediaOpEngine.rollback(pendingRollbackUris)
                 }
-
-                _fileOperationState.value = FileOperationState.Processing((index + 1).toFloat() / total, index + 1, total)
-            }
-
-            if (isActive) {
-                if (isMove && urisToDelete.isNotEmpty()) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        _fileOperationState.value = FileOperationState.WaitingForPermission
-                        val intentSender = MediaStore.createDeleteRequest(resolver, urisToDelete).intentSender
-                        synchronized(this@GalleryViewModel) {
-                            pendingDeleteUris = urisToDelete
-                            pendingOperationType = PendingOp.DELETE
-                            pendingOperationIds = idsToDelete
-                        }
-                        _events.send(GalleryEvent.RequestPermission(intentSender))
-                    } else {
-                        var deletedCount = 0
-                        urisToDelete.forEach { uri ->
-                            try {
-                                if (resolver.delete(uri, null, null) > 0) deletedCount++
-                            } catch(e:Exception){}
-                        }
-                        _fileOperationState.value = FileOperationState.Idle
-                        _events.send(GalleryEvent.ShowToast("Moved $deletedCount items successfully"))
-                        forceSync()
-                    }
-                } else {
-                    _fileOperationState.value = FileOperationState.Idle
-                    _events.send(GalleryEvent.ShowToast(if(isMove) "Move completed" else "Copied $successCount items successfully"))
-                    forceSync()
-                }
+                _fileOperationState.value = FileOperationState.Idle
+                clearPendingOperationStates()
+                _isBusy.value = false
+                endFileOperation()
+                forceSync()
+                _events.send(GalleryEvent.ShowToast("Operation cancelled safely"))
             }
         }
     }
 
     fun mergeAlbums(sourceAlbumIds: List<String>, targetAlbumId: String, mergeMode: MergeMode = MergeMode.MOVE_AND_DELETE) {
+        if (!tryBeginFileOperation()) {
+            _events.trySend(GalleryEvent.ShowToast("An operation is already in progress"))
+            return
+        }
+
         viewModelScope.launch(Dispatchers.Default) {
             val mediaToProcess = _rawMedia.value.filter { sourceAlbumIds.contains(it.bucketId) }.map { it.id }
             if (mediaToProcess.isEmpty()) {
                 _events.send(GalleryEvent.ShowToast("No media found to merge"))
+                endFileOperation()
                 return@launch
             }
 
-            when (mergeMode) {
-                MergeMode.COPY -> copyData(ids = mediaToProcess, targetAlbumId = targetAlbumId)
-                MergeMode.MOVE, MergeMode.MOVE_AND_DELETE -> moveData(ids = mediaToProcess, targetAlbumId = targetAlbumId)
+            val album = allAlbumsState.value.firstOrNull { it.id == targetAlbumId } ?: run { endFileOperation(); return@launch }
+            dao.updateAlbumUsed(targetAlbumId, true)
+
+            val sample = _rawMedia.value.firstOrNull { it.bucketId == targetAlbumId }
+            var relPath = sample?.relativePath
+
+            if (relPath.isNullOrBlank()) {
+                if (targetAlbumId.startsWith("manual_")) {
+                    relPath = "Pictures/${album.name}/"
+                } else {
+                    endFileOperation()
+                    _events.trySend(GalleryEvent.ShowToast("Error: Cannot resolve path for existing album."))
+                    return@launch
+                }
             }
 
-            if (mergeMode == MergeMode.MOVE_AND_DELETE) {
-                fileOperationState.first { it is FileOperationState.Processing }
-                fileOperationState.first { it is FileOperationState.Idle || it is FileOperationState.WaitingForPermission }
+            val volumeName = resolveAlbumVolumeName(targetAlbumId)
 
-                if (_fileOperationState.value == FileOperationState.Idle) {
-                    sourceAlbumIds.forEach { albumId -> deleteEmptyAlbum(albumId) }
-                    _events.send(GalleryEvent.ShowToast("${sourceAlbumIds.size} albums merged successfully"))
-                    forceSync()
+            val targetAlbum = TargetAlbum(
+                id = targetAlbumId, name = album.name, relativePath = relPath,
+                bucketId = targetAlbumId, volumeName = volumeName
+            )
+
+            val isMove = mergeMode == MergeMode.MOVE || mergeMode == MergeMode.MOVE_AND_DELETE
+
+            performMediaOperation(mediaToProcess, targetAlbum, isMove) { result ->
+                if (mergeMode == MergeMode.MOVE_AND_DELETE && (result is MediaOpResult.Success || result is MediaOpResult.AlreadyExists)) {
+                    viewModelScope.launch {
+                        sourceAlbumIds.forEach { albumId -> deleteEmptyAlbum(albumId) }
+                        _events.send(GalleryEvent.ShowToast("${sourceAlbumIds.size} albums merged successfully"))
+                    }
                 }
             }
         }
@@ -1059,7 +967,6 @@ class GalleryViewModel @Inject constructor(
                     try { dao.deleteManualAlbum(albumId) } catch (_: Exception) {}
                     try { dao.deleteAlbumMeta(albumId) } catch (_: Exception) {}
                 }
-                forceSync()
                 _events.trySend(GalleryEvent.ShowToast("Album moved to Trash"))
             } catch (e: Exception) {
                 Log.e(TAG, "Delete album failed", e)
@@ -1068,48 +975,326 @@ class GalleryViewModel @Inject constructor(
         }
     }
 
+    private suspend fun resolveAlbumVolumeName(bucketId: String): String? = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return@withContext null
+        try {
+            val resolver = getApplication<Application>().contentResolver
+            val uri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            resolver.query(
+                uri, arrayOf(MediaStore.MediaColumns.VOLUME_NAME),
+                "${MediaStore.Files.FileColumns.BUCKET_ID} = ?", arrayOf(bucketId), null
+            )?.use { c -> if (c.moveToFirst()) return@withContext c.getString(0) }
+        } catch (e: Exception) { Log.e(TAG, "Failed to resolve volume for $bucketId", e) }
+        null
+    }
+
     fun moveData(ids: List<Long>, targetAlbumId: String) {
-        val album = allAlbumsState.value.firstOrNull { it.id == targetAlbumId } ?: return
-        viewModelScope.launch(Dispatchers.IO) { dao.updateAlbumUsed(targetAlbumId, true) }
-        val sampleMedia = _rawMedia.value.firstOrNull { it.bucketId == targetAlbumId }
-        val existingRelativePath = sampleMedia?.relativePath ?: "${Environment.DIRECTORY_PICTURES}/${album.name}/"
-        performRealFileOperation(ids, existingRelativePath, true)
+        if (!tryBeginFileOperation()) {
+            _events.trySend(GalleryEvent.ShowToast("An operation is already in progress"))
+            return
+        }
+        val album = allAlbumsState.value.firstOrNull { it.id == targetAlbumId } ?: run { endFileOperation(); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.updateAlbumUsed(targetAlbumId, true)
+            val sample = _rawMedia.value.firstOrNull { it.bucketId == targetAlbumId }
+            var relPath = sample?.relativePath
+
+            if (relPath.isNullOrBlank()) {
+                if (targetAlbumId.startsWith("manual_")) {
+                    relPath = "Pictures/${album.name}/"
+                } else {
+                    endFileOperation()
+                    _events.trySend(GalleryEvent.ShowToast("Error: Cannot resolve path for existing album."))
+                    return@launch
+                }
+            }
+
+            val volumeName = resolveAlbumVolumeName(targetAlbumId)
+            val targetAlbum = TargetAlbum(
+                id = targetAlbumId, name = album.name, relativePath = relPath,
+                bucketId = targetAlbumId, volumeName = volumeName
+            )
+            performMediaOperation(ids, targetAlbum, isMove = true)
+        }
     }
 
     fun copyData(ids: List<Long>, targetAlbumId: String) {
-        val album = allAlbumsState.value.firstOrNull { it.id == targetAlbumId } ?: return
-        viewModelScope.launch(Dispatchers.IO) { dao.updateAlbumUsed(targetAlbumId, true) }
-        val sampleMedia = _rawMedia.value.firstOrNull { it.bucketId == targetAlbumId }
-        val existingRelativePath = sampleMedia?.relativePath ?: "${Environment.DIRECTORY_PICTURES}/${album.name}/"
-        performRealFileOperation(ids, existingRelativePath, false)
+        if (!tryBeginFileOperation()) {
+            _events.trySend(GalleryEvent.ShowToast("An operation is already in progress"))
+            return
+        }
+        val album = allAlbumsState.value.firstOrNull { it.id == targetAlbumId } ?: run { endFileOperation(); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.updateAlbumUsed(targetAlbumId, true)
+            val sample = _rawMedia.value.firstOrNull { it.bucketId == targetAlbumId }
+            var relPath = sample?.relativePath
+
+            if (relPath.isNullOrBlank()) {
+                if (targetAlbumId.startsWith("manual_")) {
+                    relPath = "Pictures/${album.name}/"
+                } else {
+                    endFileOperation()
+                    _events.trySend(GalleryEvent.ShowToast("Error: Cannot resolve path for existing album."))
+                    return@launch
+                }
+            }
+
+            val volumeName = resolveAlbumVolumeName(targetAlbumId)
+            val targetAlbum = TargetAlbum(
+                id = targetAlbumId, name = album.name, relativePath = relPath,
+                bucketId = targetAlbumId, volumeName = volumeName
+            )
+            performMediaOperation(ids, targetAlbum, isMove = false)
+        }
     }
 
     fun createAndMove(ids: List<Long>, newAlbumName: String) {
-        viewModelScope.launch {
-            createAlbum(newAlbumName, false)
-            delay(500)
-            performRealFileOperation(ids, "${Environment.DIRECTORY_PICTURES}/$newAlbumName/", true)
+        if (!tryBeginFileOperation()) {
+            _events.trySend(GalleryEvent.ShowToast("An operation is already in progress"))
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val targetAlbum = TargetAlbum(
+                name = newAlbumName.trim(),
+                relativePath = "Pictures/${newAlbumName.trim()}/",
+                bucketId = ""
+            )
+            val createResult = mediaOpEngine.createAlbum(targetAlbum)
+            if (createResult is MediaOpResult.Success) {
+                performMediaOperation(ids, targetAlbum, isMove = true)
+            } else {
+                if (createResult is MediaOpResult.Failed) {
+                    _events.send(GalleryEvent.ShowToast(createResult.reason))
+                }
+                endFileOperation()
+            }
         }
     }
 
     fun createAndCopy(ids: List<Long>, newAlbumName: String) {
-        viewModelScope.launch {
-            createAlbum(newAlbumName, false)
-            delay(500)
-            performRealFileOperation(ids, "${Environment.DIRECTORY_PICTURES}/$newAlbumName/", false)
+        if (!tryBeginFileOperation()) {
+            _events.trySend(GalleryEvent.ShowToast("An operation is already in progress"))
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val targetAlbum = TargetAlbum(
+                name = newAlbumName.trim(),
+                relativePath = "Pictures/${newAlbumName.trim()}/",
+                bucketId = ""
+            )
+            val createResult = mediaOpEngine.createAlbum(targetAlbum)
+            if (createResult is MediaOpResult.Success) {
+                performMediaOperation(ids, targetAlbum, isMove = false)
+            } else {
+                if (createResult is MediaOpResult.Failed) {
+                    _events.send(GalleryEvent.ShowToast(createResult.reason))
+                }
+                endFileOperation()
+            }
+        }
+    }
+
+    private fun performMediaOperation(ids: List<Long>, targetAlbum: TargetAlbum, isMove: Boolean, onComplete: ((MediaOpResult) -> Unit)? = null) {
+        pendingOperationIds = ids
+        pendingOperationTargetAlbum = targetAlbum
+        pendingOperationIsMove = isMove
+
+        fileOperationJob = viewModelScope.launch(Dispatchers.IO) {
+            _isBusy.value = true
+            var waitingForPermission = false
+            try {
+                val validItems = ids.mapNotNull { _mediaMap.value[it] }
+                if (validItems.isEmpty()) {
+                    clearPendingOperationStates()
+                    onComplete?.invoke(MediaOpResult.Failed("No valid items found"))
+                    return@launch
+                }
+
+                _fileOperationState.value = FileOperationState.Processing("Starting", 0f, 0, validItems.size)
+
+                val result = if (isMove) {
+                    mediaOpEngine.moveMedia(validItems, targetAlbum) { phase, current, total ->
+                        _fileOperationState.value = FileOperationState.Processing(phase, current.toFloat() / total, current, total)
+                    }
+                } else {
+                    mediaOpEngine.copyMedia(validItems, targetAlbum) { phase, current, total ->
+                        _fileOperationState.value = FileOperationState.Processing(phase, current.toFloat() / total, current, total)
+                    }
+                }
+
+                when (result) {
+                    is MediaOpResult.Success -> {
+                        _fileOperationState.value = FileOperationState.Idle
+                        val verb = if (isMove) "Moved" else "Copied"
+
+                        val msg = buildString {
+                            if (result.copiedCount > 0) append("$verb ${result.copiedCount} items. ")
+                            if (result.skippedCount > 0) append("Skipped ${result.skippedCount} items. ")
+                        }.trim()
+
+                        if (isMove) {
+                            removeMediaLocally(validItems.map { it.id }.toSet())
+                        }
+                        forceSync()
+                        invalidatePagingSources()
+
+                        _events.send(GalleryEvent.ShowToast(msg.ifEmpty { "Operation successful" }))
+                        clearPendingOperationStates()
+                        onComplete?.invoke(result)
+                    }
+                    is MediaOpResult.PermissionRequired -> {
+                        _fileOperationState.value = FileOperationState.WaitingForPermission
+                        pendingRollbackUris = result.pendingRollbackUris
+                        pendingDeleteUris = validItems.map { it.uri }
+                        pendingMoveIds = validItems.map { it.id }.toSet()
+                        pendingMoveOperation = isMove
+                        pendingAutoDeleteHandledByOs = result.autoDeleteHandledByOs
+                        pendingIsWriteRequest = result.isWriteRequest
+                        pendingOperationOnComplete = onComplete
+                        waitingForPermission = true
+                        _events.send(GalleryEvent.RequestPermission(result.intentSender))
+                    }
+                    is MediaOpResult.SafPermissionRequired -> {
+                        _fileOperationState.value = FileOperationState.WaitingForPermission
+                        pendingRollbackUris = result.pendingRollbackUris
+                        pendingOperationOnComplete = onComplete
+                        waitingForPermission = true
+                        _events.send(GalleryEvent.LaunchIntent(result.intent))
+                    }
+                    is MediaOpResult.Failed -> {
+                        _fileOperationState.value = FileOperationState.Idle
+                        _events.send(GalleryEvent.ShowToast("Operation failed: ${result.reason}"))
+                        clearPendingOperationStates()
+                        onComplete?.invoke(result)
+                    }
+                    is MediaOpResult.Cancelled -> {
+                        _fileOperationState.value = FileOperationState.Idle
+                        _events.send(GalleryEvent.ShowToast("Operation cancelled safely"))
+                        clearPendingOperationStates()
+                        onComplete?.invoke(result)
+                    }
+                    is MediaOpResult.AlreadyExists -> {
+                        _fileOperationState.value = FileOperationState.Idle
+                        _events.send(GalleryEvent.ShowToast(result.message))
+                        clearPendingOperationStates()
+                        onComplete?.invoke(result)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Media operation failed", e)
+                _fileOperationState.value = FileOperationState.Idle
+                clearPendingOperationStates()
+                _events.send(GalleryEvent.ShowToast("Operation failed: ${e.localizedMessage ?: "Unknown error"}"))
+                onComplete?.invoke(MediaOpResult.Failed(e.localizedMessage ?: "Unknown error"))
+            } finally {
+                if (!waitingForPermission) {
+                    _isBusy.value = false
+                    endFileOperation()
+                }
+            }
+        }
+    }
+
+    fun onPermissionResult(granted: Boolean) = viewModelScope.launch(Dispatchers.IO) {
+        val onComplete = pendingOperationOnComplete
+        try {
+            if (granted) {
+                _fileOperationState.value = FileOperationState.Processing("Finishing", 0f, 0, 1)
+
+                if (pendingIsWriteRequest) {
+                    val ids = pendingOperationIds
+                    val target = pendingOperationTargetAlbum
+                    val isMove = pendingOperationIsMove
+                    clearPendingOperationStates()
+                    if (target != null && ids.isNotEmpty()) {
+                        performMediaOperation(ids, target, isMove, onComplete)
+                    } else {
+                        _fileOperationState.value = FileOperationState.Idle
+                        _isBusy.value = false
+                        endFileOperation()
+                        onComplete?.invoke(MediaOpResult.Failed("Missing operation context"))
+                    }
+                    return@launch
+                } else if (pendingMoveOperation && pendingAutoDeleteHandledByOs) {
+                    removeMediaLocally(pendingMoveIds)
+                    forceSync()
+                    invalidatePagingSources()
+                    _events.trySend(GalleryEvent.OperationSuccess)
+                    _events.trySend(GalleryEvent.ShowToast("Operation completed successfully"))
+                    onComplete?.invoke(MediaOpResult.Success(deletedCount = pendingMoveIds.size))
+                } else if (pendingMoveOperation && pendingDeleteUris.isNotEmpty()) {
+                    val result = mediaOpEngine.resumeDelete(pendingDeleteUris)
+                    when (result) {
+                        is MediaOpResult.Success -> {
+                            removeMediaLocally(pendingMoveIds)
+                            forceSync()
+                            invalidatePagingSources()
+                            _events.trySend(GalleryEvent.OperationSuccess)
+                            _events.trySend(GalleryEvent.ShowToast("Operation completed successfully"))
+                            onComplete?.invoke(result)
+                        }
+                        is MediaOpResult.Failed -> {
+                            mediaOpEngine.rollback(pendingRollbackUris)
+                            forceSync()
+                            _events.trySend(GalleryEvent.ShowToast(result.reason))
+                            onComplete?.invoke(result)
+                        }
+                        else -> {}
+                    }
+                } else {
+                    forceSync()
+                    invalidatePagingSources()
+                    _events.trySend(GalleryEvent.OperationSuccess)
+                    _events.trySend(GalleryEvent.ShowToast("Operation completed successfully"))
+                    onComplete?.invoke(MediaOpResult.Success())
+                }
+            } else {
+                if (pendingRollbackUris.isNotEmpty()) {
+                    mediaOpEngine.rollback(pendingRollbackUris)
+                }
+                forceSync()
+                _events.trySend(GalleryEvent.ShowToast("Permission denied. Rollback complete."))
+                onComplete?.invoke(MediaOpResult.Cancelled)
+            }
+        } finally {
+            _fileOperationState.value = FileOperationState.Idle
+            clearPendingOperationStates()
+            _isBusy.value = false
+            endFileOperation()
+        }
+    }
+
+    fun saveSafTreeUri(uri: Uri) = viewModelScope.launch(Dispatchers.IO) {
+        mediaOpEngine.saveSafTreeUri(uri)
+        if (pendingRollbackUris.isNotEmpty()) {
+            mediaOpEngine.rollback(pendingRollbackUris)
+        }
+        val ids = pendingOperationIds
+        val target = pendingOperationTargetAlbum
+        val isMove = pendingOperationIsMove
+        val onComplete = pendingOperationOnComplete
+
+        clearPendingOperationStates()
+
+        if (target != null && ids.isNotEmpty()) {
+            performMediaOperation(ids, target, isMove, onComplete)
+        } else {
+            _fileOperationState.value = FileOperationState.Idle
+            _isBusy.value = false
+            endFileOperation()
+            onComplete?.invoke(MediaOpResult.Failed("Missing operation context"))
         }
     }
 
     fun renameAlbum(album: Album, newName: String) = if (newName.isNotBlank()) viewModelScope.launch(Dispatchers.IO) {
         dao.insertAlbumMeta((dao.getAlbumMetaSync(album.id) ?: AlbumEntity(id = album.id)).copy(customName = newName))
         _events.trySend(GalleryEvent.ShowToast("Album renamed"))
-        forceSync()
     } else Unit
 
     fun toggleAlbumPin(album: Album) = viewModelScope.launch(Dispatchers.IO) {
         try {
             if (album.isPinned) dao.removePinnedAlbum(album.id) else dao.addPinnedAlbum(AlbumEntity(id = album.id, isPinned = true))
-        } catch (e: Exception) {} finally { forceSync() }
+        } catch (e: Exception) {}
     }
 
     fun createAlbum(name: String, sdCard: Boolean) {
@@ -1121,7 +1306,6 @@ class GalleryViewModel @Inject constructor(
                 val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
                 val albumDir = File(root, name.trim())
                 if (!albumDir.exists()) { albumDir.mkdirs() }
-                forceSync()
                 _events.trySend(GalleryEvent.ShowToast("Album '${name.trim()}' created!"))
             } catch (e: Exception) {
                 Log.e("ALBUM_DEBUG", "Failed to create album", e)
@@ -1130,61 +1314,8 @@ class GalleryViewModel @Inject constructor(
         }
     }
 
-    enum class PendingOp { NONE, DELETE, FAVORITE, UNFAVORITE }
-    @Volatile private var pendingOperationIds: List<Long> = emptyList()
-    @Volatile private var pendingOperationType: PendingOp = PendingOp.NONE
-
-    fun onPermissionResult(granted: Boolean) = viewModelScope.launch(Dispatchers.IO) {
-        val opType: PendingOp
-        val opIds: List<Long>
-        synchronized(this@GalleryViewModel) {
-            opType = pendingOperationType
-            opIds = pendingOperationIds.toList()
-            pendingOperationType = PendingOp.NONE
-            pendingOperationIds = emptyList()
-        }
-
-        if (granted) {
-            if (opIds.isNotEmpty() || pendingDeleteUris.isNotEmpty()) {
-                val successIds = mutableListOf<Long>()
-                when (opType) {
-                    PendingOp.DELETE -> {
-                        val resolver = getApplication<Application>().contentResolver
-                        var deletedCount = 0
-                        pendingDeleteUris.forEach { uri ->
-                            try {
-                                if (resolver.delete(uri, null, null) > 0) deletedCount++
-                            } catch (_: Exception) {}
-                        }
-                        pendingDeleteUris = emptyList()
-                        _events.trySend(GalleryEvent.ShowToast("Successfully completed operation"))
-                    }
-                    PendingOp.FAVORITE -> {
-                        opIds.forEach { id -> try { dao.addFavorite(FavoriteEntity(mediaId = id)) } catch (e: Exception) {} }
-                    }
-                    PendingOp.UNFAVORITE -> {
-                        opIds.forEach { id -> try { dao.removeFavorite(id) } catch (e: Exception) {} }
-                    }
-                    PendingOp.NONE -> {}
-                }
-
-                if (successIds.isNotEmpty()) {
-                    try { dao.deleteTrashItems(successIds) } catch (e: Exception) {}
-                }
-
-                _fileOperationState.value = FileOperationState.Idle
-                _events.trySend(GalleryEvent.OperationSuccess)
-                forceSync()
-            }
-        } else {
-            pendingDeleteUris = emptyList()
-            _fileOperationState.value = FileOperationState.Idle
-            _events.trySend(GalleryEvent.ShowToast("Permission denied. Cannot modify file."))
-        }
-    }
-
     fun hideItems(ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {
-        try { engine.hideItems(ids) } finally { forceSync() }
+        try { engine.hideItems(ids) } finally { removeMediaLocally(ids.toSet()) }
     }.let { Unit }
 
     fun hideAlbums(albumIds: List<String>) = viewModelScope.launch(Dispatchers.IO) {
@@ -1198,7 +1329,7 @@ class GalleryViewModel @Inject constructor(
     fun deleteSecureMedia(ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {
         ids.forEach { dao.removeFromSecure(it) }
         _events.trySend(GalleryEvent.OperationSuccess)
-        forceSync()
+        removeMediaLocally(ids.toSet())
     }
 
     suspend fun decryptToMemory(encryptedFilePath: String): ByteArray? = withContext(Dispatchers.IO) {
@@ -1299,7 +1430,6 @@ class GalleryViewModel @Inject constructor(
     }
 }
 
-// --- Paging Source ---
 class MediaPagingSource(
     private val contentResolver: ContentResolver,
     private val filter: MediaTypeFilter,

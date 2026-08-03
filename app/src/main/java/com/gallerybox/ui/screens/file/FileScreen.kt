@@ -531,7 +531,6 @@ fun EmptyDuplicatesState(type: MatchType) {
         Text("Your gallery is optimized!", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
-
 @RequiresApi(Build.VERSION_CODES.Q)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -593,7 +592,7 @@ fun MoveCopyScreen(
         if (!isGranted) {
             isProcessing = false
             isWaitingForPermission = false
-            Toast.makeText(context, "Permission denied.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Permission denied. Action aborted.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -601,13 +600,21 @@ fun MoveCopyScreen(
         viewModel.events.collectLatest { event ->
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
+
+                // FIX: Added OperationSuccess to properly close the screen after permission grants
+                is GalleryEvent.OperationSuccess -> {
+                    isProcessing = false
+                    isWaitingForPermission = false
+                    onOperationComplete()
+                }
+
                 is GalleryEvent.ShowToast -> {
                     val msg = event.message.lowercase()
                     if (msg.contains("failed") || msg.contains("error") || msg.contains("cancelled")) {
                         isProcessing = false
                         isWaitingForPermission = false
-                        Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
                     }
+                    Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
                 }
                 else -> {}
             }
@@ -676,7 +683,16 @@ fun MoveCopyScreen(
                             if (!isWaitingForPermission) {
                                 LinearProgressIndicator(progress = { currentProgress }, modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape), color = MaterialTheme.colorScheme.primary, trackColor = MaterialTheme.colorScheme.surfaceVariant)
                                 Spacer(Modifier.height(8.dp))
-                                Text("$processedCount of $totalCount processed", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                                // FORMATTED PROGRESS TEXT APPLIED HERE
+                                val percent = (currentProgress * 100).toInt()
+                                val actionVerb = if (operationMode == OperationMode.MOVE) "Moving" else "Copying"
+                                Text(
+                                    text = "$actionVerb $processedCount / $totalCount ($percent%)",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+
                             } else {
                                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                             }

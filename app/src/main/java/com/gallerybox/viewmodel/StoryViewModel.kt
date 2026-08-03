@@ -100,6 +100,9 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
         viewModelScope.launch(Dispatchers.IO) {
             _isGenerating.value = true
             try {
+                var memoryIndex = 1
+                fun nextMemoryName(): String = "Memory ${memoryIndex++}"
+
                 val sortedMedia = mediaList.sortedByDescending { it.dateAdded }
                 yield()
 
@@ -107,6 +110,23 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 val cal = Calendar.getInstance()
                 val currentYear = cal.get(Calendar.YEAR)
                 val currentDay = cal.get(Calendar.DAY_OF_YEAR)
+
+                // Helper to chunk large item lists into stories of ~25 items each
+                fun addChunkedStories(baseId: String, items: List<MediaItem>, minItems: Int) {
+                    if (items.size < minItems) return
+                    items.chunked(25).forEachIndexed { chunkIndex, chunk ->
+                        if (chunk.isNotEmpty()) {
+                            generatedStories.add(
+                                buildEntity(
+                                    idString = "${baseId}_$chunkIndex",
+                                    title = nextMemoryName(),
+                                    subtitle = "",
+                                    items = chunk
+                                )
+                            )
+                        }
+                    }
+                }
 
                 val favorites = mutableListOf<MediaItem>()
                 val videos = mutableListOf<MediaItem>()
@@ -117,6 +137,31 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 val downloads = mutableListOf<MediaItem>()
                 val rain = mutableListOf<MediaItem>()
                 val bursts = mutableListOf<MediaItem>()
+
+                // Expanded story categories
+                val sunrise = mutableListOf<MediaItem>()
+                val morning = mutableListOf<MediaItem>()
+                val afternoon = mutableListOf<MediaItem>()
+                val sunset = mutableListOf<MediaItem>()
+                val evening = mutableListOf<MediaItem>()
+                val night = mutableListOf<MediaItem>()
+
+                val portraits = mutableListOf<MediaItem>()
+                val landscapes = mutableListOf<MediaItem>()
+                val fourK = mutableListOf<MediaItem>()
+                val screenRecords = mutableListOf<MediaItem>()
+
+                val bluetooth = mutableListOf<MediaItem>()
+                val telegram = mutableListOf<MediaItem>()
+                val instagram = mutableListOf<MediaItem>()
+                val facebook = mutableListOf<MediaItem>()
+                val snapchat = mutableListOf<MediaItem>()
+
+                val favoriteVideos = mutableListOf<MediaItem>()
+                val editedPhotos = mutableListOf<MediaItem>()
+
+                val last7Days = mutableListOf<MediaItem>()
+                val last30Days = mutableListOf<MediaItem>()
 
                 val yearBuckets = mutableMapOf<Int, MutableList<MediaItem>>()
                 val monthBuckets = mutableMapOf<String, MutableList<MediaItem>>()
@@ -129,6 +174,7 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 var lastItemTime = 0L
 
                 val monthFormat = SimpleDateFormat("MMMM yyyy", Locale.US)
+                val currentTimeMs = System.currentTimeMillis()
 
                 for (item in sortedMedia) {
                     val timeMs = item.dateAdded * 1000L
@@ -138,10 +184,14 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                     val itemDay = cal.get(Calendar.DAY_OF_YEAR)
                     val itemMonth = cal.get(Calendar.MONTH)
                     val itemDayOfWeek = cal.get(Calendar.DAY_OF_WEEK)
+                    val itemHour = cal.get(Calendar.HOUR_OF_DAY)
+
                     val pathLower = item.path.lowercase()
+                    val isVid = item.duration > 0 || item.mimeType.startsWith("video")
 
                     if (item.isFavorite) favorites.add(item)
-                    if (item.duration > 0 || item.mimeType.startsWith("video")) videos.add(item)
+                    if (isVid) videos.add(item)
+                    if (item.isFavorite && isVid) favoriteVideos.add(item)
 
                     if (pathLower.contains("screenshot")) screenshots.add(item)
                     if (pathLower.contains("whatsapp")) whatsapp.add(item)
@@ -149,6 +199,38 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                     if (pathLower.contains("download")) downloads.add(item)
                     if (pathLower.contains("front") || pathLower.contains("selfie")) selfies.add(item)
                     if (pathLower.contains("rain") || pathLower.contains("monsoon")) rain.add(item)
+
+                    // New category detections
+                    if (pathLower.contains("screenrecord")) screenRecords.add(item)
+                    if (pathLower.contains("bluetooth")) bluetooth.add(item)
+                    if (pathLower.contains("telegram")) telegram.add(item)
+                    if (pathLower.contains("instagram")) instagram.add(item)
+                    if (pathLower.contains("facebook")) facebook.add(item)
+                    if (pathLower.contains("snapchat")) snapchat.add(item)
+                    if (pathLower.contains("edit") || pathLower.contains("snapseed") || pathLower.contains("lightroom") || pathLower.contains("gallerybox")) editedPhotos.add(item)
+
+                    // Time of day
+                    when (itemHour) {
+                        in 5..7 -> sunrise.add(item)
+                        in 8..11 -> morning.add(item)
+                        in 12..16 -> afternoon.add(item)
+                        in 17..18 -> sunset.add(item)
+                        in 19..21 -> evening.add(item)
+                        else -> night.add(item) // 22..4
+                    }
+
+                    // Metadata guesses
+                    if (!isVid && item.width > 0 && item.height > 0) {
+                        if (item.height > item.width * 1.1) portraits.add(item)
+                        else if (item.width > item.height * 1.1) landscapes.add(item)
+                    }
+
+                    if (isVid && item.width * item.height >= 7_000_000) fourK.add(item)
+
+                    // Time relative buckets
+                    val diffMs = currentTimeMs - timeMs
+                    if (diffMs <= 7L * 24 * 60 * 60 * 1000) last7Days.add(item)
+                    if (diffMs <= 30L * 24 * 60 * 60 * 1000) last30Days.add(item)
 
                     yearBuckets.getOrPut(itemYear) { mutableListOf() }.add(item)
                     monthBuckets.getOrPut(monthFormat.format(cal.time)) { mutableListOf() }.add(item)
@@ -164,6 +246,7 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                         }
                     }
 
+                    // Event Clusters
                     if (currentCluster.isEmpty()) {
                         currentCluster.add(item)
                     } else {
@@ -172,57 +255,72 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                             currentCluster.add(item)
                             if (timeDiff <= BURST_TIME_WINDOW_MS) bursts.add(item)
                         } else {
-                            if (currentCluster.size >= 10) clusters.add(currentCluster.toList())
+                            if (currentCluster.size >= 4) clusters.add(currentCluster.toList())
                             currentCluster = mutableListOf(item)
                         }
                     }
                     lastItemTime = timeMs
                 }
-                if (currentCluster.size >= 10) clusters.add(currentCluster)
+                if (currentCluster.size >= 4) clusters.add(currentCluster)
                 yield()
 
-                for (cluster in clusters) {
-                    val durationMs = abs(cluster.first().dateAdded - cluster.last().dateAdded) * 1000L
-                    val (title, subtitle) = when {
-                        durationMs >= VACATION_THRESHOLD_MS -> "Summer Vacation" to "A long getaway"
-                        durationMs >= TRIP_THRESHOLD_MS -> "Weekend Trip" to "Short adventure"
-                        else -> getTimeOfDayTitle(cluster.first().dateAdded * 1000L) to "Moments together"
-                    }
-                    val clusterId = "auto_trip_${cluster.first().dateAdded}"
-                    generatedStories.add(buildEntity(clusterId, title, subtitle, cluster))
+                // 1. Add cluster stories
+                for ((index, cluster) in clusters.withIndex()) {
+                    addChunkedStories("auto_trip_$index", cluster, 4)
                 }
 
-                if (favorites.size >= 15) generatedStories.add(buildEntity("auto_fav", "Your Favorites", "Handpicked moments", favorites.take(50)))
-                if (videos.size >= 10) generatedStories.add(buildEntity("auto_vid", "Recent Videos", "Caught on camera", videos.take(30)))
-                if (screenshots.size >= 20) generatedStories.add(buildEntity("auto_screenshots", "Recent Screenshots", "Saved for later", screenshots.take(40)))
-                if (whatsapp.size >= 20) generatedStories.add(buildEntity("auto_whatsapp", "WhatsApp Memories", "Shared with friends", whatsapp.take(40)))
-                if (camera.size >= 30) generatedStories.add(buildEntity("auto_camera", "Camera Roll", "Shot by you", camera.take(50)))
-                if (selfies.size >= 10) generatedStories.add(buildEntity("auto_selfies", "Selfies", "Looking good", selfies.take(20)))
-                if (rain.size >= 5) generatedStories.add(buildEntity("auto_rain", "Rainy Days", "Cozy weather", rain))
-                if (bursts.size >= 15) generatedStories.add(buildEntity("auto_bursts", "Action Shots", "Burst captures", bursts.take(40)))
+                // 2. Add all generic categories (Lowered Thresholds)
+                addChunkedStories("auto_fav", favorites, 5)
+                addChunkedStories("auto_vid", videos, 3)
+                addChunkedStories("auto_screenshots", screenshots, 5)
+                addChunkedStories("auto_whatsapp", whatsapp, 5)
+                addChunkedStories("auto_camera", camera, 8)
+                addChunkedStories("auto_selfies", selfies, 3)
+                addChunkedStories("auto_rain", rain, 2)
+                addChunkedStories("auto_bursts", bursts, 4)
+                addChunkedStories("auto_today", todayInHistory, 2)
+                addChunkedStories("auto_weekends", weekends, 6)
 
-                if (todayInHistory.size >= 5) generatedStories.add(buildEntity("auto_today", "On This Day", "Look back in time", todayInHistory.take(20)))
-                if (weekends.size >= 30) generatedStories.add(buildEntity("auto_weekends", "Weekend Vibes", "Saturday & Sunday", weekends.take(40)))
+                // 3. New specific categories
+                addChunkedStories("auto_sunrise", sunrise, 3)
+                addChunkedStories("auto_morning", morning, 5)
+                addChunkedStories("auto_afternoon", afternoon, 5)
+                addChunkedStories("auto_sunset", sunset, 3)
+                addChunkedStories("auto_evening", evening, 5)
+                addChunkedStories("auto_night", night, 4)
 
-                val randomMemories = sortedMedia.filter { (System.currentTimeMillis() - it.dateAdded * 1000L) > EVENT_THRESHOLD_MS * 10 }.shuffled().take(20)
-                if (randomMemories.size >= 10) generatedStories.add(buildEntity("auto_random", "Random Memories", "Rediscover the past", randomMemories))
+                addChunkedStories("auto_portraits", portraits, 5)
+                addChunkedStories("auto_landscapes", landscapes, 5)
+                addChunkedStories("auto_4k", fourK, 2)
+                addChunkedStories("auto_screenrecords", screenRecords, 3)
 
+                addChunkedStories("auto_downloads", downloads, 5)
+                addChunkedStories("auto_bluetooth", bluetooth, 2)
+                addChunkedStories("auto_telegram", telegram, 5)
+                addChunkedStories("auto_instagram", instagram, 5)
+                addChunkedStories("auto_facebook", facebook, 5)
+                addChunkedStories("auto_snapchat", snapchat, 5)
+
+                addChunkedStories("auto_fav_videos", favoriteVideos, 2)
+                addChunkedStories("auto_edited", editedPhotos, 3)
+
+                addChunkedStories("auto_last7", last7Days, 5)
+                addChunkedStories("auto_last30", last30Days, 10)
+
+                val randomMemories = sortedMedia.filter { (currentTimeMs - it.dateAdded * 1000L) > EVENT_THRESHOLD_MS * 10 }.shuffled()
+                addChunkedStories("auto_random", randomMemories, 10)
+
+                // 4. Date and Festival Buckets
                 monthBuckets.forEach { (month, items) ->
-                    if (items.size >= 20) {
-                        generatedStories.add(buildEntity("auto_month_${month.replace(" ", "_")}", month, "Month in review", items.take(40)))
-                    }
+                    addChunkedStories("auto_month_${month.replace(" ", "_")}", items, 8)
                 }
 
                 yearBuckets.forEach { (year, items) ->
-                    if (items.size >= 50 && year < currentYear) {
-                        generatedStories.add(buildEntity("auto_year_$year", "$year Memories", "A year to remember", items.take(50)))
-                    }
+                    if (year < currentYear) addChunkedStories("auto_year_$year", items, 15)
                 }
 
                 festivalBuckets.forEach { (name, items) ->
-                    if (items.size >= 5) {
-                        generatedStories.add(buildEntity("auto_fest_${name.replace(" ", "_")}", name, "Celebrations", items.take(30)))
-                    }
+                    addChunkedStories("auto_fest_${name.replace(" ", "_")}", items, 2)
                 }
 
                 yield()
@@ -241,16 +339,6 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
             } finally {
                 _isGenerating.value = false
             }
-        }
-    }
-
-    private fun getTimeOfDayTitle(timeMs: Long): String {
-        val cal = Calendar.getInstance().apply { timeInMillis = timeMs }
-        return when (cal.get(Calendar.HOUR_OF_DAY)) {
-            in 5..11 -> "Morning Light"
-            in 12..16 -> "Afternoon Memories"
-            in 17..20 -> "Evening Walk"
-            else -> "Night Owls"
         }
     }
 

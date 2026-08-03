@@ -3,22 +3,18 @@
 
 package com.gallerybox.ui.screens.vault
 
-import android.app.Activity
 import android.content.Context
-import android.content.ContextWrapper
 import android.content.Intent
 import android.hardware.Sensor
-import java.util.Formatter
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
-import com.gallerybox.findActivity
 import android.hardware.SensorManager
 import android.net.Uri
+import android.util.Log
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.biometric.BiometricPrompt
-import android.util.Log
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.*
@@ -63,7 +59,6 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.exifinterface.media.ExifInterface
-import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -77,6 +72,8 @@ import coil.request.CachePolicy
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import com.gallerybox.data.MediaItem
+import com.gallerybox.findActivity
+import com.gallerybox.findFragmentActivity
 import com.gallerybox.viewmodel.GalleryViewModel
 import com.gallerybox.viewmodel.SecurityViewModel
 import kotlinx.coroutines.*
@@ -118,12 +115,15 @@ fun VaultSecureScreen(
 
     val hiddenItems by viewModel.hiddenMedia.collectAsState(emptyList())
 
-    DisposableEffect(Unit) {
+    // FIX: Do NOT re-lock when unmounting VaultSecureScreen during Global App Guard mode!
+    DisposableEffect(isGlobalAppGuard) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         onDispose {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            securityViewModel.lock()
-            viewModel.clearTempVaultCache()
+            if (!isGlobalAppGuard) {
+                securityViewModel.lock()
+                viewModel.clearTempVaultCache()
+            }
         }
     }
 
@@ -151,47 +151,44 @@ fun VaultSecureScreen(
         }
     }
 
-    AnimatedContent(
-        targetState = when {
-            isUnlocking -> "PROCESSING"
-            !unlocked -> "AUTH_GUARD"
-            else -> "GRANTED"
-        },
-        label = "VaultStateTransition"
-    ) { state ->
-        when (state) {
-            "PROCESSING" -> {
-                Box(
-                    modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text("Preparing Vault...", color = MaterialTheme.colorScheme.onBackground)
-                    }
+    val state = when {
+        isUnlocking -> "PROCESSING"
+        !unlocked -> "AUTH_GUARD"
+        else -> "GRANTED"
+    }
+
+    when (state) {
+        "PROCESSING" -> {
+            Box(
+                modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Preparing...", color = MaterialTheme.colorScheme.onBackground)
                 }
             }
-            "AUTH_GUARD" -> {
-                StandardAppLockScreen(
-                    viewModel = securityViewModel,
-                    isGlobalAppGuard = isGlobalAppGuard,
-                    onBack = onBack
+        }
+        "AUTH_GUARD" -> {
+            StandardAppLockScreen(
+                viewModel = securityViewModel,
+                isGlobalAppGuard = isGlobalAppGuard,
+                onBack = onBack
+            )
+        }
+        "GRANTED" -> {
+            LaunchedEffect(Unit) {
+                isUnlocking = false
+                if (isGlobalAppGuard) onUnlockGlobalSuccess()
+            }
+            if (!isGlobalAppGuard) {
+                VaultGridScreen(
+                    items = hiddenItems,
+                    viewModel = viewModel,
+                    onBack = onBack,
+                    onAdd = onNavigateToPicker
                 )
-            }
-            "GRANTED" -> {
-                LaunchedEffect(Unit) {
-                    isUnlocking = false
-                    if (isGlobalAppGuard) onUnlockGlobalSuccess()
-                }
-                if (!isGlobalAppGuard) {
-                    VaultGridScreen(
-                        items = hiddenItems,
-                        viewModel = viewModel,
-                        onBack = onBack,
-                        onAdd = onNavigateToPicker
-                    )
-                }
             }
         }
     }
@@ -204,7 +201,7 @@ fun StandardAppLockScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val activity = remember(context) { context.findActivity() }
+    val activity = remember(context) { context.findFragmentActivity() }
     var bioShown by rememberSaveable { mutableStateOf(false) }
 
     BackHandler(enabled = isGlobalAppGuard) {
@@ -212,7 +209,9 @@ fun StandardAppLockScreen(
     }
 
     val triggerBiometrics = {
-        if (activity is FragmentActivity && viewModel.canUseSystemAuthentication()) {
+        if (!viewModel.canUseSystemAuthentication()) {
+            Toast.makeText(context, "System authentication unavailable", Toast.LENGTH_SHORT).show()
+        } else if (activity != null) {
             BiometricPrompt(
                 activity,
                 ContextCompat.getMainExecutor(context),
@@ -223,6 +222,11 @@ fun StandardAppLockScreen(
                     }
                     override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                         super.onAuthenticationError(errorCode, errString)
+                        if (isGlobalAppGuard) {
+                            activity.moveTaskToBack(true)
+                        } else {
+                            onBack()
+                        }
                     }
                     override fun onAuthenticationFailed() {
                         super.onAuthenticationFailed()
@@ -238,6 +242,8 @@ fun StandardAppLockScreen(
                     )
                     .build()
             )
+        } else {
+            Toast.makeText(context, "Activity context is invalid", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -269,7 +275,7 @@ fun StandardAppLockScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         FilledTonalButton(
-            onClick = triggerBiometrics,
+            onClick = { triggerBiometrics() },
             modifier = Modifier.fillMaxWidth(0.8f).height(50.dp)
         ) {
             Icon(imageVector = Icons.Default.LockOpen, contentDescription = null)
@@ -863,9 +869,6 @@ fun SecureFullscreenViewer(
     }
 }
 
-// =======================================================
-// 4. UI COMPONENTS
-// =======================================================
 @Composable
 fun SecureAsyncImage(
     item: MediaItem,
@@ -989,9 +992,6 @@ fun MetadataRow(
     }
 }
 
-// =======================================================
-// 5. UTILITIES (PANIC, LOGS, OVERWRITE)
-// =======================================================
 @Composable
 fun VaultShakeDetector(onShakeDetected: () -> Unit) {
     val context = LocalContext.current

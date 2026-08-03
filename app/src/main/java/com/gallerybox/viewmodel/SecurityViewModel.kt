@@ -63,24 +63,15 @@ class SecurityViewModel @Inject constructor(
     }
 
     fun canUseSystemAuthentication(): Boolean {
-        return BiometricManager.from(context).canAuthenticate(
-            BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                    BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        ) == BiometricManager.BIOMETRIC_SUCCESS
-    }
-
-    fun hasBiometricHardware(): Boolean {
-        val result = BiometricManager.from(context).canAuthenticate(
-            BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                    BiometricManager.Authenticators.BIOMETRIC_WEAK
-        )
-        return result != BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE
-    }
-
-    fun isDeviceCredentialAvailable(): Boolean {
-        return BiometricManager.from(context).canAuthenticate(
-            BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        ) == BiometricManager.BIOMETRIC_SUCCESS
+        return when (
+            BiometricManager.from(context).canAuthenticate(
+                BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            )
+        ) {
+            BiometricManager.BIOMETRIC_SUCCESS -> true
+            else -> false
+        }
     }
 
     fun shouldRelock(timeoutMinutes: Int): Boolean {

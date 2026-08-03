@@ -2,16 +2,6 @@
 
 package com.gallerybox.ui.screens
 
-import android.content.Context
-import android.text.format.Formatter
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,19 +36,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -66,8 +51,6 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.gallerybox.viewmodel.GalleryViewModel
 import com.gallerybox.viewmodel.MusicViewModel
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,18 +60,9 @@ fun ScanLibraryScreen(
     galleryViewModel: GalleryViewModel = hiltViewModel(),
     musicViewModel: MusicViewModel = hiltViewModel()
 ) {
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
     val mediaList by galleryViewModel.media.collectAsState()
     val allSongs by musicViewModel.allAudioTracks.collectAsState()
-
-    // Automatically trigger scanning when the screen opens
-    LaunchedEffect(Unit) {
-        launch {
-            galleryViewModel.forceSync()
-        }
-        musicViewModel.loadAllAudioTracks()
-    }
+    val isScanning by galleryViewModel.isBusy.collectAsState()
 
     val photoCount = remember(mediaList) {
         mediaList.count { !it.isVideo }
@@ -141,6 +115,15 @@ fun ScanLibraryScreen(
         ) {
             Spacer(modifier = Modifier.height(32.dp))
 
+            ScannerVisual(isScanning = isScanning)
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            ScannerStatusText(
+                isScanning = isScanning,
+                totalSize = "Calculated Size"
+            )
+
             Spacer(modifier = Modifier.height(48.dp))
 
             LibraryStatsGrid(
@@ -150,66 +133,24 @@ fun ScanLibraryScreen(
             )
 
             Spacer(modifier = Modifier.weight(1f))
+
+            RefreshButton(
+                isScanning = isScanning,
+                onClick = {
+                    galleryViewModel.refreshData()
+                    musicViewModel.loadAllAudioTracks()
+                }
+            )
         }
     }
 }
 
 @Composable
 fun ScannerVisual(isScanning: Boolean) {
-    val rotationAnim = remember { Animatable(0f) }
-    val scaleAnim = remember { Animatable(0.8f) }
-    val alphaAnim = remember { Animatable(0f) }
-
-    LaunchedEffect(isScanning) {
-        if (isScanning) {
-            launch {
-                while (isActive) {
-                    rotationAnim.animateTo(
-                        targetValue = rotationAnim.value + 360f,
-                        animationSpec = tween(2000, easing = LinearEasing)
-                    )
-                }
-            }
-            launch {
-                scaleAnim.animateTo(
-                    targetValue = 1.4f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(1500, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    )
-                )
-            }
-            launch {
-                alphaAnim.animateTo(
-                    targetValue = 0.6f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(1500, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    )
-                )
-            }
-        } else {
-            launch {
-                scaleAnim.animateTo(0.8f, tween(300))
-            }
-            launch {
-                alphaAnim.animateTo(0f, tween(300))
-            }
-        }
-    }
-
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier.size(200.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .size(140.dp)
-                .scale(scaleAnim.value)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = alphaAnim.value))
-        )
-
         Box(
             modifier = Modifier
                 .size(120.dp)
@@ -221,9 +162,7 @@ fun ScannerVisual(isScanning: Boolean) {
                 imageVector = if (isScanning) Icons.Default.Refresh else Icons.Rounded.Storage,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .size(56.dp)
-                    .rotate(rotationAnim.value)
+                modifier = Modifier.size(56.dp)
             )
         }
     }
@@ -231,21 +170,31 @@ fun ScannerVisual(isScanning: Boolean) {
 
 @Composable
 fun ScannerStatusText(isScanning: Boolean, totalSize: String) {
-    Crossfade(
-        targetState = isScanning,
-        animationSpec = tween(300),
-        label = "StatusCrossfade"
-    ) { scanning ->
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (isScanning) {
             Text(
-                text = if (scanning) "Scanning Photos, Videos and Audio..." else "Library Up to Date",
+                text = "Scanning Photos, Videos and Audio...",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = if (scanning) "Searching for new files." else "All files are indexed.\nTotal Vault Size: $totalSize",
+                text = "Searching for new files.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center
+            )
+        } else {
+            Text(
+                text = "Library Up to Date",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "All files are indexed.\nTotal Vault Size: $totalSize",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center
@@ -304,26 +253,26 @@ fun RefreshButton(isScanning: Boolean, onClick: () -> Unit) {
             .padding(bottom = 24.dp),
         shape = RoundedCornerShape(16.dp)
     ) {
-        AnimatedContent(
-            targetState = isScanning,
-            label = "RefreshButtonContent"
-        ) { scanning ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (scanning) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = null
-                    )
-                }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (isScanning) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    strokeWidth = 2.dp
+                )
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
-                    text = if (scanning) "Scanning..." else "Refresh Library",
+                    text = "Scanning...",
+                    fontWeight = FontWeight.Bold
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = "Refresh Library",
                     fontWeight = FontWeight.Bold
                 )
             }

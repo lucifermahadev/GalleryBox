@@ -13,6 +13,7 @@ import android.graphics.Bitmap
 import android.media.AudioManager
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import com.gallerybox.findActivity
 import android.os.Build
 import android.provider.Settings
 import android.util.LruCache
@@ -55,8 +56,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -99,7 +100,7 @@ enum class PremiumRepeatMode { OFF, ONE, ALL }
 
 class VideoFrameLoader(private val context: Context) {
     private var retriever: MediaMetadataRetriever? = MediaMetadataRetriever()
-    private val cache = object : LruCache<Long, Bitmap>(20480) {
+    private val cache = object : LruCache<Long, Bitmap>(6144) {
         override fun sizeOf(key: Long, value: Bitmap) = value.byteCount / 1024
     }
     private var sourceUri: Uri? = null
@@ -121,7 +122,7 @@ class VideoFrameLoader(private val context: Context) {
         }
     }
 
-    suspend fun getFrame(timeMs: Long, durationMs: Long = 0L, width: Int = 320, height: Int = 180): Bitmap? = withContext(Dispatchers.IO) {
+    suspend fun getFrame(timeMs: Long, durationMs: Long = 0L, width: Int = 240, height: Int = 135): Bitmap? = withContext(Dispatchers.IO) {
         val safeTime = timeMs.coerceAtLeast(0L)
         val resolution = (durationMs / 500L).coerceIn(60L, 5000L)
         val cacheKey = (safeTime / resolution) * resolution
@@ -133,7 +134,7 @@ class VideoFrameLoader(private val context: Context) {
             } else {
                 retriever?.getFrameAtTime(safeTime * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
             }
-            frame?.copy(Bitmap.Config.ARGB_8888, false)?.also { cache.put(cacheKey, it) }
+            frame?.copy(Bitmap.Config.RGB_565, false)?.also { cache.put(cacheKey, it) }
         } catch (e: Exception) {
             null
         }
@@ -148,6 +149,7 @@ class VideoFrameLoader(private val context: Context) {
     }
 }
 
+@Stable
 class PlayerGestureState {
     var mode by mutableStateOf(GestureMode.NONE)
     var seekPosition by mutableFloatStateOf(0f)
@@ -157,6 +159,13 @@ class PlayerGestureState {
     var showBrightness by mutableStateOf(false)
     var brightness by mutableFloatStateOf(0.5f)
     var gestureText by mutableStateOf("")
+}
+
+@Stable
+class PlayerProgressState {
+    var currentMs by mutableLongStateOf(0L)
+    var bufferedMs by mutableLongStateOf(0L)
+    var durationMs by mutableLongStateOf(0L)
 }
 
 class PlayerGestureEngine(private val context: Context, private val activity: Activity?, private val player: Player, private val totalDuration: () -> Long) {
@@ -295,12 +304,11 @@ fun VideoPlayerContent(
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     val configuration = LocalConfiguration.current
-    val isSystemLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     var manualRotateOverride by remember { mutableStateOf(false) }
-    val effectivelyRotated = isSystemLandscape || manualRotateOverride
     var originalBrightness by remember { mutableFloatStateOf(-1f) }
 
     var currentVideoUri by remember { mutableStateOf(initialVideoUrl) }
+    var videoSize by remember { mutableStateOf(VideoSize.UNKNOWN) }
 
     DisposableEffect(activity) {
         originalBrightness = activity?.window?.attributes?.screenBrightness ?: -1f
@@ -329,18 +337,9 @@ fun VideoPlayerContent(
     var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
     var isPlaying by remember { mutableStateOf(player.isPlaying) }
 
-    LaunchedEffect(currentVideoUri, isPlaying) {
-        if (isPlaying && currentVideoUri.isNotBlank()) {
-            delay(1500)
-            withContext(Dispatchers.IO) {
-                frameLoader.setSource(Uri.parse(currentVideoUri))
-            }
-        }
-    }
-
     LaunchedEffect(gestureState) {
         snapshotFlow { gestureState.isSeeking to gestureState.seekPosition }
-            .debounce(80)
+            .debounce(100)
             .collect { (isSeeking, pos) ->
                 if (isSeeking) {
                     previewBitmap = frameLoader.getFrame(pos.toLong(), player.duration)
@@ -350,9 +349,7 @@ fun VideoPlayerContent(
             }
     }
 
-    var currentTimeState by remember { mutableLongStateOf(0L) }
-    var bufferedPositionState by remember { mutableLongStateOf(0L) }
-    var totalDuration by remember { mutableLongStateOf(0L) }
+    val progress = remember { PlayerProgressState() }
 
     var isLongPressing by remember { mutableStateOf(false) }
     var resizeMode by remember { mutableStateOf(PremiumResizeMode.FIT) }
@@ -360,10 +357,7 @@ fun VideoPlayerContent(
     var currentSpeed by remember { mutableFloatStateOf(prefs.getFloat("speed", 1f)) }
     var currentPitch by remember { mutableFloatStateOf(prefs.getFloat("pitch", 1f)) }
 
-    var abRepeatStart by remember { mutableStateOf<Long?>(null) }
-    var abRepeatEnd by remember { mutableStateOf<Long?>(null) }
     var sleepTimerMs by remember { mutableStateOf<Long?>(null) }
-    var audioTracks by remember { mutableStateOf<Tracks>(Tracks.EMPTY) }
     var videoFormat by remember { mutableStateOf<Format?>(null) }
 
     val isHdr = remember(videoFormat) {
@@ -378,15 +372,12 @@ fun VideoPlayerContent(
 
     var showControls by remember { mutableStateOf(true) }
     var isLocked by remember { mutableStateOf(false) }
-    var showUnlockButton by remember { mutableStateOf(false) }
-    var unlockHideJob by remember { mutableStateOf<Job?>(null) }
     var hideJob by remember { mutableStateOf<Job?>(null) }
     var isInPiPMode by remember { mutableStateOf(false) }
     var showDoubleTapText by remember { mutableStateOf("") }
     var doubleTapAlignment by remember { mutableStateOf(Alignment.Center) }
     var doubleTapJob by remember { mutableStateOf<Job?>(null) }
     var showMenuSheet by remember { mutableStateOf(false) }
-    var controlsTopBound by remember { mutableFloatStateOf(Float.MAX_VALUE) }
 
     LaunchedEffect(autoRepeat) {
         player.repeatMode = when (autoRepeat) {
@@ -415,15 +406,28 @@ fun VideoPlayerContent(
         }
     }
 
-    LaunchedEffect(isPlaying, playbackState) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    // PiP parameters mapping taking into account true video sizes and limits.
+    LaunchedEffect(isPlaying, playbackState, videoSize) {
+        val compActivity = activity as? ComponentActivity
+        if (compActivity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
-                val shouldAutoEnter = isPlaying && playbackState == Player.STATE_READY
-                (activity as? ComponentActivity)?.setPictureInPictureParams(
-                    PictureInPictureParams.Builder()
-                        .setAutoEnterEnabled(shouldAutoEnter)
-                        .build()
-                )
+                val builder = PictureInPictureParams.Builder()
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val shouldAutoEnter = isPlaying && playbackState == Player.STATE_READY
+                    builder.setAutoEnterEnabled(shouldAutoEnter)
+                }
+
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    val ratio = (videoSize.width.toFloat() / videoSize.height.toFloat())
+                    // Picture-in-Picture aspect ratio bounds limit (min 1/2.39, max 2.39)
+                    val safeRatio = ratio.coerceIn(0.4185f, 2.389f)
+
+                    val safeWidth = (safeRatio * 10000).toInt()
+                    builder.setAspectRatio(Rational(safeWidth, 10000))
+                }
+
+                compActivity.setPictureInPictureParams(builder.build())
             } catch (_: Exception) {}
         }
     }
@@ -439,8 +443,8 @@ fun VideoPlayerContent(
         }
     }
 
-    LaunchedEffect(playbackState, showControls) {
-        if (playbackState == Player.STATE_READY && player.isPlaying && showControls) {
+    LaunchedEffect(playbackState, isPlaying, showControls) {
+        if (playbackState == Player.STATE_READY && isPlaying && showControls) {
             resetControlsTimer()
         }
     }
@@ -451,11 +455,9 @@ fun VideoPlayerContent(
 
     var hasInitializedPlaylist by remember { mutableStateOf(false) }
 
-    // CRITICAL FIX: Ensure we start playing the exact video clicked, unmute the player, and lock re-initialization
     LaunchedEffect(initialVideoUrl, playlistUrls) {
         if (hasInitializedPlaylist) return@LaunchedEffect
 
-        // Wait until playlistUrls has data (or just play it solo if it's completely missing)
         if (playlistUrls.isNotEmpty() || playlistUrls.isEmpty()) {
             withContext(Dispatchers.Default) {
                 val absoluteIndex = playlistUrls.indexOfFirst { it == initialVideoUrl || Uri.parse(it) == Uri.parse(initialVideoUrl) }
@@ -464,14 +466,12 @@ fun VideoPlayerContent(
                 val relativeIndex: Int
 
                 if (absoluteIndex != -1) {
-                    // It exists in the gallery playlist -> chunk it so we don't freeze the app
                     val fromIndex = maxOf(0, absoluteIndex - 20)
                     val toIndex = minOf(playlistUrls.size, absoluteIndex + 40)
                     items = playlistUrls.subList(fromIndex, toIndex).map { MediaItem.fromUri(Uri.parse(it)) }
                     relativeIndex = absoluteIndex - fromIndex
-                    hasInitializedPlaylist = true // Success! Lock it so it never resets when you scroll
+                    hasInitializedPlaylist = true
                 } else {
-                    // Failsafe: If somehow the video isn't in the global list, play it as a solo item
                     items = listOf(MediaItem.fromUri(Uri.parse(initialVideoUrl)))
                     relativeIndex = 0
                 }
@@ -489,14 +489,14 @@ fun VideoPlayerContent(
                                 true
                             )
                             exo.setHandleAudioBecomingNoisy(true)
-                            exo.volume = 1f // FIX: The player might be muted from grid previews. Force 100% volume.
+                            exo.volume = 1f
                         }
 
                         updateSpeedAndPitch(currentSpeed, currentPitch)
 
                         player.setMediaItems(items)
                         player.prepare()
-                        player.seekTo(relativeIndex, savedPos) // Play exact video index!
+                        player.seekTo(relativeIndex, savedPos)
                         player.playWhenReady = true
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -512,11 +512,15 @@ fun VideoPlayerContent(
                 isPlaying = playing
             }
 
+            override fun onVideoSizeChanged(newSize: VideoSize) {
+                videoSize = newSize
+            }
+
             override fun onPlaybackStateChanged(state: Int) {
                 playbackState = state
                 isPlaying = player.isPlaying
                 if (state == Player.STATE_READY) {
-                    totalDuration = player.duration.coerceAtLeast(0L)
+                    progress.durationMs = player.duration.coerceAtLeast(0L)
                 }
                 if (state == Player.STATE_ENDED && player.repeatMode == Player.REPEAT_MODE_OFF && autoPlayNext && player.hasNextMediaItem()) {
                     player.seekToNextMediaItem()
@@ -529,8 +533,6 @@ fun VideoPlayerContent(
             }
 
             override fun onTracksChanged(tracks: Tracks) {
-                audioTracks = tracks
-
                 val selectedVideoFormat = tracks.groups
                     .firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.isSelected }
                     ?.let { group ->
@@ -552,14 +554,8 @@ fun VideoPlayerContent(
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
                 if (!gestureState.isSeeking) {
-                    currentTimeState = player.currentPosition
-                    bufferedPositionState = player.bufferedPosition
-
-                    if (abRepeatStart != null && abRepeatEnd != null) {
-                        if (currentTimeState >= abRepeatEnd!!) {
-                            player.seekTo(abRepeatStart!!)
-                        }
-                    }
+                    progress.currentMs = player.currentPosition
+                    progress.bufferedMs = player.bufferedPosition
 
                     if (sleepTimerMs != null) {
                         if (System.currentTimeMillis() >= sleepTimerMs!!) {
@@ -578,7 +574,7 @@ fun VideoPlayerContent(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE) {
                 viewModel.updatePlaybackState(currentVideoUri, player.currentPosition, currentSpeed, player.playWhenReady)
-                prefs.edit().putLong(currentVideoUri, currentTimeState).apply()
+                prefs.edit().putLong(currentVideoUri, progress.currentMs).apply()
             }
             if (event == Lifecycle.Event.ON_STOP && !backgroundPlay && !isInPiPMode) {
                 player.pause()
@@ -605,12 +601,6 @@ fun VideoPlayerContent(
 
     BackHandler { if (!isInPiPMode) onBackPress() }
 
-    val abRepeatStateStr = when {
-        abRepeatStart != null && abRepeatEnd != null -> "[A-B]"
-        abRepeatStart != null -> "[A- ]"
-        else -> "A-B"
-    }
-
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             factory = { ctx ->
@@ -629,22 +619,25 @@ fun VideoPlayerContent(
                 }
             },
             modifier = Modifier.fillMaxSize()
-                .then(if (effectivelyRotated) Modifier.aspectRatio(16f / 9f) else Modifier)
                 .then(if (isMirrored) Modifier.graphicsLayer { scaleX = -1f } else Modifier)
                 .then(when(resizeMode){
                     PremiumResizeMode.RATIO_16_9 -> Modifier.aspectRatio(16f/9f)
                     PremiumResizeMode.RATIO_4_3 -> Modifier.aspectRatio(4f/3f)
                     else -> Modifier
                 })
-                .pointerInput(isLocked) {
+                .pointerInput(isLocked, configuration.orientation) {
                     if (isLocked) {
                         detectTapGestures(
                             onTap = {
-                                showUnlockButton = true
-                                unlockHideJob?.cancel()
-                                unlockHideJob = scope.launch {
-                                    delay(3000)
-                                    showUnlockButton = false
+                                if (showControls) {
+                                    showControls = false
+                                } else {
+                                    showControls = true
+                                    hideJob?.cancel()
+                                    hideJob = scope.launch {
+                                        delay(3000)
+                                        showControls = false
+                                    }
                                 }
                             }
                         )
@@ -665,23 +658,24 @@ fun VideoPlayerContent(
                                 player.playbackParameters = PlaybackParameters(currentSpeed, currentPitch)
                             }
                         },
-                        onTap = { offset ->
-                            if (offset.y >= controlsTopBound) return@detectTapGestures
+                        onTap = {
                             if (showControls) {
                                 showControls = false
+                                hideJob?.cancel()
                             } else {
                                 resetControlsTimer()
                             }
                         },
                         onDoubleTap = { offset ->
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            val dynamicSeekMs = maxOf(10000L, (totalDuration * 0.01).toLong())
+                            val duration = progress.durationMs
+                            val dynamicSeekMs = maxOf(10000L, (duration * 0.01).toLong())
                             if (offset.x < size.width / 2f) {
                                 player.seekTo((player.currentPosition - dynamicSeekMs).coerceAtLeast(0))
                                 showDoubleTapText = "-${dynamicSeekMs / 1000}s"
                                 doubleTapAlignment = Alignment.CenterStart
                             } else {
-                                player.seekTo((player.currentPosition + dynamicSeekMs).coerceAtMost(totalDuration))
+                                player.seekTo((player.currentPosition + dynamicSeekMs).coerceAtMost(duration))
                                 showDoubleTapText = "+${dynamicSeekMs / 1000}s"
                                 doubleTapAlignment = Alignment.CenterEnd
                             }
@@ -690,10 +684,13 @@ fun VideoPlayerContent(
                         }
                     )
                 }
-                .pointerInput(isLocked) {
+                .pointerInput(isLocked, configuration.orientation) {
                     if (isLocked) return@pointerInput
                     detectDragGestures(
-                        onDragStart = { gestureEngine.onStart(gestureState) },
+                        onDragStart = {
+                            gestureEngine.onStart(gestureState)
+                            scope.launch(Dispatchers.IO) { frameLoader.setSource(Uri.parse(currentVideoUri)) }
+                        },
                         onDragEnd = { gestureEngine.onEnd(gestureState) },
                         onDragCancel = {
                             gestureState.mode = GestureMode.NONE
@@ -713,11 +710,7 @@ fun VideoPlayerContent(
                     title = currentTitle,
                     isPlaying = isPlaying,
                     playbackState = playbackState,
-                    currentTimeStr = formatTime(currentTimeState),
-                    totalTimeStr = formatTime(totalDuration),
-                    sliderValue = currentTimeState.toFloat(),
-                    bufferedValue = bufferedPositionState.toFloat(),
-                    totalDuration = maxOf(1f, totalDuration.toFloat()),
+                    progress = progress,
                     playbackSpeed = if (isLongPressing) (currentSpeed * 2f).coerceAtMost(8f) else currentSpeed,
                     isSeeking = gestureState.isSeeking,
                     previewBitmap = previewBitmap,
@@ -767,19 +760,9 @@ fun VideoPlayerContent(
                     onLock = {
                         isLocked = true
                         showControls = false
-                        showUnlockButton = true
-                        unlockHideJob?.cancel()
-                        unlockHideJob = scope.launch {
-                            delay(3000)
-                            showUnlockButton = false
-                        }
                     },
                     onRotateToggle = {
                         manualRotateOverride = !manualRotateOverride
-                        resetControlsTimer()
-                    },
-                    onScreenshot = {
-                        Toast.makeText(context, "Screenshot captured", Toast.LENGTH_SHORT).show()
                         resetControlsTimer()
                     },
                     onAspectRatioToggle = {
@@ -790,17 +773,16 @@ fun VideoPlayerContent(
                     onOpenMenu = {
                         showMenuSheet = true
                         showControls = false
-                    },
-                    onControlsPositioned = { controlsTopBound = it }
+                    }
                 )
             }
         }
 
-        AnimatedVisibility(visible = isLocked && showUnlockButton, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
+        AnimatedVisibility(visible = isLocked && showControls, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
             IconButton(
                 onClick = {
                     isLocked = false
-                    showUnlockButton = false
+                    showControls = true
                     resetControlsTimer()
                 },
                 modifier = Modifier.background(Color.Black.copy(0.6f), CircleShape).padding(8.dp)
@@ -822,11 +804,8 @@ fun VideoPlayerContent(
             autoPlayNext = autoPlayNext,
             autoRepeat = autoRepeat,
             backgroundPlay = backgroundPlay,
-            audioTracks = audioTracks,
-            player = player,
             sleepTimerActive = sleepTimerMs != null,
             audioDelayMs = audioDelayMs,
-            abRepeatState = abRepeatStateStr,
             onDismissRequest = {
                 showMenuSheet = false
                 resetControlsTimer()
@@ -839,8 +818,25 @@ fun VideoPlayerContent(
             onToggleAutoPlay = {
                 autoPlayNext = it
                 prefs.edit().putBoolean("autoPlayNext", it).apply()
+                if (it) {
+                    autoRepeat = PremiumRepeatMode.OFF
+                    prefs.edit().putInt("autoRepeat", PremiumRepeatMode.OFF.ordinal).apply()
+                    player.repeatMode = Player.REPEAT_MODE_OFF
+                }
             },
-            onToggleAutoRepeat = { autoRepeat = it },
+            onToggleAutoRepeat = {
+                autoRepeat = it
+                prefs.edit().putInt("autoRepeat", it.ordinal).apply()
+                player.repeatMode = when(it) {
+                    PremiumRepeatMode.OFF -> Player.REPEAT_MODE_OFF
+                    PremiumRepeatMode.ONE -> Player.REPEAT_MODE_ONE
+                    PremiumRepeatMode.ALL -> Player.REPEAT_MODE_ALL
+                }
+                if (it != PremiumRepeatMode.OFF) {
+                    autoPlayNext = false
+                    prefs.edit().putBoolean("autoPlayNext", false).apply()
+                }
+            },
             onToggleBackgroundPlay = {
                 backgroundPlay = it
                 prefs.edit().putBoolean("backgroundPlay", it).apply()
@@ -858,29 +854,7 @@ fun VideoPlayerContent(
             onSetAudioDelay = { delayOffset ->
                 audioDelayMs = delayOffset
                 Toast.makeText(context, "Audio Delay: ${delayOffset.toInt()} ms", Toast.LENGTH_SHORT).show()
-            },
-            onShare = { /* Handle Share */ },
-            onDetails = { /* Handle Details */ },
-            onAbRepeatToggle = {
-                when {
-                    abRepeatStart == null -> abRepeatStart = player.currentPosition
-                    abRepeatEnd == null -> {
-                        val current = player.currentPosition
-                        if (current > abRepeatStart!!) {
-                            abRepeatEnd = current
-                        } else {
-                            abRepeatStart = null
-                            Toast.makeText(context, "Invalid A-B range", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    else -> {
-                        abRepeatStart = null
-                        abRepeatEnd = null
-                    }
-                }
-            },
-            onFrameStepForward = { viewModel.stepFrame(player, true) },
-            onFrameStepBackward = { viewModel.stepFrame(player, false) }
+            }
         )
     }
 }
@@ -890,11 +864,7 @@ fun VideoControlsOverlay(
     title: String,
     isPlaying: Boolean,
     playbackState: Int,
-    currentTimeStr: String,
-    totalTimeStr: String,
-    sliderValue: Float,
-    bufferedValue: Float,
-    totalDuration: Float,
+    progress: PlayerProgressState,
     playbackSpeed: Float,
     isSeeking: Boolean,
     previewBitmap: Bitmap?,
@@ -911,13 +881,9 @@ fun VideoControlsOverlay(
     onBack: () -> Unit,
     onLock: () -> Unit,
     onRotateToggle: () -> Unit,
-    onScreenshot: () -> Unit,
     onAspectRatioToggle: () -> Unit,
-    onOpenMenu: () -> Unit,
-    onControlsPositioned: (Float) -> Unit
+    onOpenMenu: () -> Unit
 ) {
-    var thumbXOffset by remember { mutableFloatStateOf(0f) }
-
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxWidth().height(120.dp).align(Alignment.TopCenter).background(Brush.verticalGradient(listOf(Color.Black.copy(0.65f), Color.Transparent))))
 
@@ -944,38 +910,24 @@ fun VideoControlsOverlay(
             }
         }
 
-        Box(Modifier.fillMaxWidth().height(260.dp).align(Alignment.BottomCenter).background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(0.65f)))).onGloballyPositioned { onControlsPositioned(it.boundsInWindow().top) })
+        Box(Modifier.fillMaxWidth().height(260.dp).align(Alignment.BottomCenter).background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(0.65f)))))
 
         Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 16.dp)) {
 
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                IconButton(onClick = onScreenshot) { Icon(Icons.Outlined.PhotoCamera, contentDescription = "Screenshot", tint = Color.White) }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), horizontalArrangement = Arrangement.End) {
                 IconButton(onClick = onAspectRatioToggle) {
                     Icon(Icons.Outlined.AspectRatio, contentDescription = "Aspect Ratio", tint = Color.White)
                 }
             }
 
-            Box(Modifier.fillMaxWidth().height(60.dp)) {
-                if (isSeeking && previewBitmap != null) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.align(Alignment.BottomStart).offset(x = with(LocalDensity.current) { thumbXOffset.toDp() } - 60.dp, y = (-20).dp)) {
-                        Image(bitmap = previewBitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.size(120.dp, 68.dp).clip(RoundedCornerShape(8.dp)))
-                        Text(formatTime(seekPosition.toLong()), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp))
-                    }
-                }
-                SamsungSeekBar(
-                    current = if (isSeeking) seekPosition else sliderValue,
-                    buffered = bufferedValue,
-                    total = totalDuration,
-                    modifier = Modifier.fillMaxWidth().height(24.dp).align(Alignment.BottomCenter),
-                    onSeek = { pos, xOffset -> thumbXOffset = xOffset; onSeek(pos) },
-                    onSeekFinished = onSeekFinished
-                )
-            }
-
-            Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(currentTimeStr, color = Color.White, style = MaterialTheme.typography.labelMedium)
-                Text(totalTimeStr, color = Color.White.copy(0.7f), style = MaterialTheme.typography.labelMedium)
-            }
+            PlayerTimelineSection(
+                progress = progress,
+                isSeeking = isSeeking,
+                previewBitmap = previewBitmap,
+                seekPosition = seekPosition,
+                onSeek = onSeek,
+                onSeekFinished = onSeekFinished
+            )
 
             Row(
                 Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
@@ -1005,6 +957,46 @@ fun VideoControlsOverlay(
                     Icon(Icons.Outlined.ScreenRotation, null, tint = Color.White, modifier = Modifier.size(28.dp))
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun PlayerTimelineSection(
+    progress: PlayerProgressState,
+    isSeeking: Boolean,
+    previewBitmap: Bitmap?,
+    seekPosition: Float,
+    onSeek: (Float) -> Unit,
+    onSeekFinished: () -> Unit
+) {
+    var thumbXOffset by remember { mutableFloatStateOf(0f) }
+
+    Column(Modifier.fillMaxWidth()) {
+        Box(Modifier.fillMaxWidth().height(60.dp)) {
+            if (isSeeking && previewBitmap != null) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.align(Alignment.BottomStart)
+                        .offset(x = with(LocalDensity.current) { thumbXOffset.toDp() } - 60.dp, y = (-20).dp)
+                ) {
+                    Image(bitmap = previewBitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.size(120.dp, 68.dp).clip(RoundedCornerShape(8.dp)))
+                    Text(formatTime(seekPosition.toLong()), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+            SamsungSeekBar(
+                current = if (isSeeking) seekPosition else progress.currentMs.toFloat(),
+                buffered = progress.bufferedMs.toFloat(),
+                total = maxOf(1f, progress.durationMs.toFloat()),
+                modifier = Modifier.fillMaxWidth().height(24.dp).align(Alignment.BottomCenter),
+                onSeek = { pos, xOffset -> thumbXOffset = xOffset; onSeek(pos) },
+                onSeekFinished = onSeekFinished
+            )
+        }
+
+        Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(formatTime(progress.currentMs), color = Color.White, style = MaterialTheme.typography.labelMedium)
+            Text(formatTime(progress.durationMs), color = Color.White.copy(0.7f), style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -1053,11 +1045,8 @@ private fun PlaybackMenuSheet(
     autoPlayNext: Boolean,
     autoRepeat: PremiumRepeatMode,
     backgroundPlay: Boolean,
-    audioTracks: Tracks,
-    player: Player,
     sleepTimerActive: Boolean,
     audioDelayMs: Float,
-    abRepeatState: String,
     onDismissRequest: () -> Unit,
     onSpeedChange: (Float) -> Unit,
     onToggleAutoPlay: (Boolean) -> Unit,
@@ -1065,12 +1054,7 @@ private fun PlaybackMenuSheet(
     onToggleBackgroundPlay: (Boolean) -> Unit,
     onSetSleepTimer: (Int) -> Unit,
     onCancelSleepTimer: () -> Unit,
-    onSetAudioDelay: (Float) -> Unit,
-    onShare: () -> Unit,
-    onDetails: () -> Unit,
-    onAbRepeatToggle: () -> Unit,
-    onFrameStepForward: () -> Unit,
-    onFrameStepBackward: () -> Unit
+    onSetAudioDelay: (Float) -> Unit
 ) {
     var currentSubMenu by remember { mutableStateOf<String?>(null) }
 
@@ -1097,42 +1081,6 @@ private fun PlaybackMenuSheet(
                                     currentSubMenu = null
                                 }
                             )
-                        }
-                    }
-                }
-                "AUDIO_TRACKS" -> {
-                    val trackGroups = audioTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-                    LazyColumn(Modifier.padding(24.dp)) {
-                        item {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { currentSubMenu = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
-                                Text("Audio Tracks", fontWeight = FontWeight.Medium, style = MaterialTheme.typography.titleLarge)
-                            }
-                            Spacer(Modifier.height(16.dp))
-                        }
-                        if (trackGroups.isEmpty()) {
-                            item { Text("No alternate audio tracks available.", modifier = Modifier.padding(16.dp)) }
-                        } else {
-                            for (group in trackGroups) {
-                                for (i in 0 until group.length) {
-                                    val isSelected = group.isTrackSelected(i)
-                                    val format = group.getTrackFormat(i)
-                                    val trackName = "${format.language ?: "Unknown"} - ${format.sampleMimeType ?: "Audio"}"
-                                    item {
-                                        ListItem(
-                                            headlineContent = { Text(trackName) },
-                                            trailingContent = { if (isSelected) Icon(Icons.Default.Check, null) },
-                                            modifier = Modifier.clickable {
-                                                player.trackSelectionParameters = player.trackSelectionParameters
-                                                    .buildUpon()
-                                                    .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
-                                                    .build()
-                                                currentSubMenu = null
-                                            }
-                                        )
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -1202,13 +1150,6 @@ private fun PlaybackMenuSheet(
                         }
                         item {
                             ListItem(
-                                headlineContent = { Text("Audio Tracks") },
-                                leadingContent = { Icon(Icons.Rounded.Audiotrack, null) },
-                                modifier = Modifier.clickable { currentSubMenu = "AUDIO_TRACKS" }
-                            )
-                        }
-                        item {
-                            ListItem(
                                 headlineContent = { Text("Sleep Timer") },
                                 supportingContent = { if (sleepTimerActive) Text("Active", color = MaterialTheme.colorScheme.primary) else null },
                                 leadingContent = { Icon(Icons.Rounded.Timer, null) },
@@ -1236,28 +1177,6 @@ private fun PlaybackMenuSheet(
                                 }
                             )
                         }
-                        item {
-                            ListItem(
-                                headlineContent = { Text("A-B Repeat") },
-                                supportingContent = { Text(abRepeatState) },
-                                leadingContent = { Icon(Icons.Rounded.Repeat, null) },
-                                modifier = Modifier.clickable { onAbRepeatToggle() }
-                            )
-                        }
-                        item {
-                            ListItem(
-                                headlineContent = { Text("Frame Step Forward") },
-                                leadingContent = { Icon(Icons.Rounded.SkipNext, null) },
-                                modifier = Modifier.clickable { onFrameStepForward() }
-                            )
-                        }
-                        item {
-                            ListItem(
-                                headlineContent = { Text("Frame Step Backward") },
-                                leadingContent = { Icon(Icons.Rounded.SkipPrevious, null) },
-                                modifier = Modifier.clickable { onFrameStepBackward() }
-                            )
-                        }
                         item { HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp)) }
 
                         item {
@@ -1272,8 +1191,6 @@ private fun PlaybackMenuSheet(
                                 trailingContent = { Switch(checked = backgroundPlay, onCheckedChange = onToggleBackgroundPlay) }
                             )
                         }
-                        item { ListItem(headlineContent = { Text("Share") }, leadingContent = { Icon(Icons.Default.Share, null) }, modifier = Modifier.clickable { onShare() }) }
-                        item { ListItem(headlineContent = { Text("Details") }, leadingContent = { Icon(Icons.Default.Info, null) }, modifier = Modifier.clickable { onDetails() }) }
                     }
                 }
             }
@@ -1287,13 +1204,4 @@ fun formatTime(ms: Long): String {
     val m = (ts / 60) % 60
     val h = ts / 3600
     return if (h > 0) String.format(Locale.US, "%02d:%02d:%02d", h, m, s) else String.format(Locale.US, "%02d:%02d", m, s)
-}
-
-fun Context.findActivity(): Activity? {
-    var c = this
-    while (c is ContextWrapper) {
-        if (c is Activity) return c
-        c = c.baseContext
-    }
-    return null
 }

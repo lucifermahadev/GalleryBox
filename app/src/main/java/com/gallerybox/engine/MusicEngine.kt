@@ -14,14 +14,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
-import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.intPreferencesKey
-import com.gallerybox.ui.screens.setting.dataStore
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
-import com.gallerybox.ui.screens.setting.SettingsRepository
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.audiofx.BassBoost
@@ -74,13 +70,6 @@ enum class PlaybackMode {
     LOCAL_MUSIC,
     FM_RADIO
 }
-
-private data class PlaybackSettings(
-    val crossfade: Int,
-    val gapless: Boolean,
-    val pause: Boolean,
-    val resume: Boolean
-)
 
 @Singleton
 class FmRadioEngine @Inject constructor(
@@ -399,16 +388,15 @@ class DynamicStereoProcessor(initialMode: ChannelMode) : BaseAudioProcessor() {
 @Singleton
 class PlayerManager @Inject constructor(@ApplicationContext private val context: Context) {
 
-    private val prefs = context.getSharedPreferences("gallerybox_music_prefs", Context.MODE_PRIVATE)
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private var crossfadeJob: Job? = null
 
     var crossfadeDurationMs = 2000
-    var resumeOnPlug = prefs.getBoolean("resume_on_plug", false)
-    var pauseOnUnplug = prefs.getBoolean("pause_on_unplug", true)
-    var gaplessPlayback = prefs.getBoolean("gapless_playback", true)
+    var resumeOnPlug = false
+    var pauseOnUnplug = true
+    var gaplessPlayback = true
 
     private var wasPausedByUnplug = false
 
@@ -932,7 +920,6 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
 @AndroidEntryPoint
 class MusicService : Service() {
 
-    @Inject lateinit var settingsRepository: SettingsRepository
     @Inject lateinit var playerManager: PlayerManager
     @Inject lateinit var fmRadioEngine: FmRadioEngine
 
@@ -960,7 +947,6 @@ class MusicService : Service() {
         setupMediaSession()
         setupNotification()
         coordinateEngines()
-        observeSettings()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -1002,22 +988,6 @@ class MusicService : Service() {
                 setShowBadge(false)
             }
             notificationManagerService.createNotificationChannel(channel)
-        }
-    }
-
-    private fun observeSettings() {
-        val KEY_CROSSFADE = intPreferencesKey("music_crossfade_duration")
-        val KEY_GAPLESS = booleanPreferencesKey("music_gapless_playback")
-        val KEY_PAUSE = booleanPreferencesKey("music_pause_unplug")
-        val KEY_RESUME = booleanPreferencesKey("music_resume_plug")
-
-        serviceScope.launch {
-            applicationContext.dataStore.data.collect { prefs ->
-                playerManager.crossfadeDurationMs = (prefs[KEY_CROSSFADE] ?: 2) * 1000
-                playerManager.gaplessPlayback = prefs[KEY_GAPLESS] ?: true
-                playerManager.pauseOnUnplug = prefs[KEY_PAUSE] ?: true
-                playerManager.resumeOnPlug = prefs[KEY_RESUME] ?: false
-            }
         }
     }
 

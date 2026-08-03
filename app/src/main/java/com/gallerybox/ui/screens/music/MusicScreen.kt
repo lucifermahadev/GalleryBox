@@ -78,7 +78,6 @@ sealed class MusicRoute(val route: String) {
     data object Folders : MusicRoute("folders")
     data object History : MusicRoute("history")
     data object Queue : MusicRoute("queue")
-    data object Settings : MusicRoute("settings")
     data object AudioInfo : MusicRoute("audio_info")
     data object Radio : MusicRoute("radio")
     data object Favorites : MusicRoute("favorites")
@@ -150,7 +149,7 @@ fun MusicScreen(
 
     Scaffold(
         topBar = {
-            if (!showFullPlayer) MusicTopAppBar(currentRoute, isSearchActive, searchQuery, viewModel::setSearchQuery, { isSearchActive = it; if (!it) viewModel.setSearchQuery("") }, navController::popBackStack, onNavigateToEqualizer, { navController.navigate(MusicRoute.Dashboard.route) }, { navController.navigate(MusicRoute.Settings.route) })
+            if (!showFullPlayer) MusicTopAppBar(currentRoute, isSearchActive, searchQuery, viewModel::setSearchQuery, { isSearchActive = it; if (!it) viewModel.setSearchQuery("") }, navController::popBackStack, onNavigateToEqualizer, { navController.navigate(MusicRoute.Dashboard.route) })
         },
         bottomBar = {
             AnimatedVisibility(
@@ -166,14 +165,13 @@ fun MusicScreen(
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             NavHost(navController = navController, startDestination = MusicRoute.Dashboard.route, enterTransition = { fadeIn(tween(300)) }, exitTransition = { fadeOut(tween(300)) }) {
-                composable(MusicRoute.Dashboard.route) { DashboardScreen(viewModel, loadedSongs, { navController.navigate(MusicRoute.Library.route) { launchSingleTop = true } }, onNavigateToRadio, { navController.navigate(MusicRoute.History.route) }, { navController.navigate(MusicRoute.Playlists.route) }, { navController.navigate(MusicRoute.Folders.route) }, { navController.navigate(MusicRoute.Queue.route) }, { navController.navigate(MusicRoute.Settings.route) }, onNavigateToDuoPlayer, { navController.navigate(MusicRoute.Favorites.route) }) }
+                composable(MusicRoute.Dashboard.route) { DashboardScreen(viewModel, loadedSongs, { navController.navigate(MusicRoute.Library.route) { launchSingleTop = true } }, onNavigateToRadio, { navController.navigate(MusicRoute.History.route) }, { navController.navigate(MusicRoute.Playlists.route) }, { navController.navigate(MusicRoute.Folders.route) }, { navController.navigate(MusicRoute.Queue.route) }, onNavigateToDuoPlayer, { navController.navigate(MusicRoute.Favorites.route) }) }
                 composable(MusicRoute.Library.route) { LibraryContent(displaySongs, viewModel) { trackToTrash = it } }
                 composable(MusicRoute.History.route) { HistoryScreen(viewModel, loadedSongs) { trackToTrash = it } }
                 composable(MusicRoute.Favorites.route) { FavoritesScreen(viewModel, loadedSongs) { trackToTrash = it } }
                 composable(MusicRoute.Playlists.route) { PlaylistsScreen(viewModel, loadedSongs, currentTrack?.id) { viewModel.playQueue(it.first, it.second) } }
                 composable(MusicRoute.Folders.route) { FolderList(displaySongs, viewModel) { trackToTrash = it } }
                 composable(MusicRoute.Queue.route) { QueueScreen(viewModel, currentTrack) { trackToTrash = it } }
-                composable(MusicRoute.Settings.route) { SettingsScreen() }
                 composable(MusicRoute.AudioInfo.route) { AudioInfoScreen(currentTrack) }
             }
         }
@@ -193,9 +191,8 @@ fun MusicScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MusicTopAppBar(currentRoute: String?, isSearchActive: Boolean, searchQuery: String, onSearchChange: (String) -> Unit, onToggleSearch: (Boolean) -> Unit, onNavigateBack: () -> Unit, onNavigateToEqualizer: () -> Unit, onNavigateToDashboard: () -> Unit, onNavigateToSettings: () -> Unit) {
+fun MusicTopAppBar(currentRoute: String?, isSearchActive: Boolean, searchQuery: String, onSearchChange: (String) -> Unit, onToggleSearch: (Boolean) -> Unit, onNavigateBack: () -> Unit, onNavigateToEqualizer: () -> Unit, onNavigateToDashboard: () -> Unit) {
     val keyboard = LocalSoftwareKeyboardController.current
-    var showMenu by remember { mutableStateOf(false) }
 
     if (isSearchActive) {
         TopAppBar(
@@ -204,7 +201,7 @@ fun MusicTopAppBar(currentRoute: String?, isSearchActive: Boolean, searchQuery: 
             colors = TopAppBarDefaults.topAppBarColors(containerColor = BgColor)
         )
     } else {
-        val title = when (currentRoute) { MusicRoute.Library.route -> "All Songs"; MusicRoute.Playlists.route -> "Playlists"; MusicRoute.History.route -> "Playback History"; MusicRoute.Folders.route -> "Folders"; MusicRoute.Queue.route -> "Up Next"; MusicRoute.Favorites.route -> "Favorites"; MusicRoute.Settings.route -> "Settings"; MusicRoute.AudioInfo.route -> "Audio Info"; MusicRoute.Dashboard.route -> "Dashboard"; else -> "Music" }
+        val title = when (currentRoute) { MusicRoute.Library.route -> "All Songs"; MusicRoute.Playlists.route -> "Playlists"; MusicRoute.History.route -> "Playback History"; MusicRoute.Folders.route -> "Folders"; MusicRoute.Queue.route -> "Up Next"; MusicRoute.Favorites.route -> "Favorites"; MusicRoute.AudioInfo.route -> "Audio Info"; MusicRoute.Dashboard.route -> "Dashboard"; else -> "Music" }
         TopAppBar(
             title = { Text(text = title, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 22.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             navigationIcon = { if (currentRoute != MusicRoute.Dashboard.route) IconButton(onClick = onNavigateBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) } },
@@ -212,19 +209,13 @@ fun MusicTopAppBar(currentRoute: String?, isSearchActive: Boolean, searchQuery: 
                 IconButton(onClick = { onToggleSearch(true) }) { Icon(Icons.Default.Search, "Search", tint = TextPrimary) }
                 if (currentRoute == MusicRoute.Library.route || currentRoute == MusicRoute.History.route) IconButton(onClick = onNavigateToDashboard) { Icon(Icons.Rounded.Dashboard, "Dashboard", tint = TextPrimary) }
                 if (currentRoute == MusicRoute.Dashboard.route || currentRoute == MusicRoute.Library.route) IconButton(onClick = onNavigateToEqualizer) { Icon(Icons.Rounded.GraphicEq, "Equalizer", tint = TextPrimary) }
-                Box {
-                    IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More", tint = TextPrimary) }
-                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.background(SurfaceColor).clip(RoundedCornerShape(12.dp))) {
-                        DropdownMenuItem(text = { Text("Settings", color = TextPrimary) }, onClick = { showMenu = false; onNavigateToSettings() }, leadingIcon = { Icon(Icons.Outlined.Settings, null, tint = TextPrimary) })
-                    }
-                }
             }, colors = TopAppBarDefaults.topAppBarColors(containerColor = BgColor)
         )
     }
 }
 
 @Composable
-fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: ImmutableList<AudioTrack>, onNavigateToAllSongs: () -> Unit, onNavigateToRadio: () -> Unit, onNavigateToHistory: () -> Unit, onNavigateToPlaylists: () -> Unit, onNavigateToFolders: () -> Unit, onNavigateToQueue: () -> Unit, onNavigateToSettings: () -> Unit, onNavigateToDuoMode: () -> Unit, onNavigateToFavorites: () -> Unit) {
+fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: ImmutableList<AudioTrack>, onNavigateToAllSongs: () -> Unit, onNavigateToRadio: () -> Unit, onNavigateToHistory: () -> Unit, onNavigateToPlaylists: () -> Unit, onNavigateToFolders: () -> Unit, onNavigateToQueue: () -> Unit, onNavigateToDuoMode: () -> Unit, onNavigateToFavorites: () -> Unit) {
     val recentHistoryRaw by viewModel.recentHistory.collectAsStateWithLifecycle(initialValue = emptyList())
     val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
 
@@ -236,7 +227,6 @@ fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: ImmutableList<AudioT
         item {
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Library & Actions", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onNavigateToSettings) { Icon(Icons.Rounded.Settings, "Settings", tint = TextSecondary) }
             }
 
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -671,22 +661,6 @@ fun PlaybackControls(isPlaying: Boolean, isShuffleEnabled: Boolean, repeatMode: 
 }
 
 @Composable
-fun SettingsScreen() {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-        item { SettingsHeader("Playback") }
-        item { SettingsSwitchRow("Gapless Playback", "Eliminate gaps between consecutive tracks", true) }
-        item { SettingsSwitchRow("Crossfade", "Fade out current track while fading in next", false) }
-        item { SettingsSwitchRow("Pause on Unplug", "Automatically pause when headphones disconnect", true) }
-        item { SettingsSwitchRow("Resume Playback", "Resume when headphones are plugged in", false) }
-        item { SettingsHeader("Audio Engine") }
-        item { SettingsNavRow("10-Band Equalizer & Effects", "Configure Parametric EQ, Bass, Reverb") }
-        item { SettingsSwitchRow("Mono Audio", "Combine left and right channels", false) }
-        item { SettingsHeader("Library") }
-        item { SettingsNavRow("Force Rescan Media", "Detect newly added or modified music") }
-    }
-}
-
-@Composable
 fun AudioInfoScreen(currentTrack: AudioTrack?) {
     Box(modifier = Modifier.fillMaxSize().background(BgColor), contentAlignment = Alignment.Center) {
         Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1032,33 +1006,6 @@ fun TrackMetadata(track: AudioTrack?, isFavorite: Boolean, onToggleFavorite: () 
         Column(Modifier.weight(1f)) {
             Text(track?.title ?: "Not Playing", fontSize = 22.sp, color = TextPrimary, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(track?.artist ?: "Unknown", fontSize = 16.sp, color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-    }
-}
-
-@Composable
-fun SettingsHeader(title: String) {
-    Text(title, color = PrimaryColor, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 8.dp))
-}
-
-@Composable
-fun SettingsSwitchRow(title: String, sub: String, def: Boolean) {
-    var checked by remember { mutableStateOf(def) }
-    Row(Modifier.fillMaxWidth().clickable { checked = !checked }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = TextPrimary, fontSize = 16.sp)
-            Text(sub, color = TextSecondary, fontSize = 12.sp)
-        }
-        Switch(checked = checked, onCheckedChange = { checked = it }, colors = SwitchDefaults.colors(checkedThumbColor = PrimaryColor, checkedTrackColor = PrimaryColor.copy(alpha=0.5f)))
-    }
-}
-
-@Composable
-fun SettingsNavRow(title: String, sub: String) {
-    Row(Modifier.fillMaxWidth().clickable {}.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = TextPrimary, fontSize = 16.sp)
-            Text(sub, color = TextSecondary, fontSize = 12.sp)
         }
     }
 }
