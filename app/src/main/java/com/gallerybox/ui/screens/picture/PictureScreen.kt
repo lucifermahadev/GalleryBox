@@ -45,6 +45,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -253,8 +255,29 @@ fun PictureScreen(
                 else GalleryGridContent(
                     pagedMedia = pagedMedia, gridState = gridState, columnCount = columnCount, isSelectionMode = isSelectionMode, selectedIds = selectedIds, mediaMap = mediaMap, isLowRam = isLowRam,
                     onSelectionChange = { selectedIds = it }, onSelectionModeChange = { isSelectionMode = it },
-                    onItemClick = { item -> if (isSelectionMode) selectedIds = if (selectedIds.contains(item.id)) selectedIds - item.id else (selectedIds + item.id).takeIf { it.size < 5000 } ?: selectedIds else viewModel.openViewer(item.id) },
-                    onItemLongClick = { item -> haptic.performHapticFeedback(HapticFeedbackType.LongPress); if (isSelectionMode) selectedIds = if (selectedIds.contains(item.id)) selectedIds - item.id else (selectedIds + item.id).takeIf { it.size < 5000 } ?: selectedIds else activeDialog = PictureUiDialog.QuickAction(item) },
+                    onItemClick = { item ->
+                        if (isSelectionMode) {
+                            val newSet = selectedIds.toMutableSet()
+                            if (!newSet.remove(item.id)) {
+                                if (newSet.size < 5000) newSet.add(item.id)
+                            }
+                            selectedIds = newSet.toSet()
+                        } else {
+                            viewModel.openViewer(item.id)
+                        }
+                    },
+                    onItemLongClick = { item ->
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        if (isSelectionMode) {
+                            val newSet = selectedIds.toMutableSet()
+                            if (!newSet.remove(item.id)) {
+                                if (newSet.size < 5000) newSet.add(item.id)
+                            }
+                            selectedIds = newSet.toSet()
+                        } else {
+                            activeDialog = PictureUiDialog.QuickAction(item)
+                        }
+                    },
                     header = {
                         if (!isSelectionMode && !isSearchActive) {
                             ModernFilterRow(
@@ -349,40 +372,77 @@ fun GalleryGridContent(
 
     val gridCells = remember(columnCount) { GridCells.Fixed(columnCount) }
 
+    var autoScrollSpeed by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(autoScrollSpeed) {
+        if (autoScrollSpeed != 0f) {
+            while (isActive) {
+                gridState.scrollBy(autoScrollSpeed)
+                delay(16)
+            }
+        }
+    }
+
+    fun getMediaItemAt(offset: Offset): MediaItem? {
+        val layoutInfo = gridState.layoutInfo
+        val itemInfo = layoutInfo.visibleItemsInfo.find {
+            offset.x >= it.offset.x && offset.x <= it.offset.x + it.size.width &&
+                    offset.y >= it.offset.y && offset.y <= it.offset.y + it.size.height
+        }
+        if (itemInfo != null && itemInfo.index >= 0 && itemInfo.index < pagedMedia.itemCount) {
+            val item = pagedMedia.peek(itemInfo.index) as? GalleryGridItem.Media
+            return item?.item
+        }
+        return null
+    }
+
+    val dragModifier = Modifier.pointerInput(isSelectionMode) {
+        var activeDragSet: MutableSet<Long>? = null
+
+        detectDragGesturesAfterLongPress(
+            onDragStart = { offset ->
+                activeDragSet = selectedIds.toMutableSet()
+                val item = getMediaItemAt(offset)
+                if (item != null) {
+                    if (!isSelectionMode) {
+                        onSelectionModeChange(true)
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    }
+                    activeDragSet?.add(item.id)
+                    onSelectionChange(activeDragSet?.toSet() ?: emptySet())
+                }
+            },
+            onDrag = { change, _ ->
+                var changed = false
+                val item = getMediaItemAt(change.position)
+                if (item != null && activeDragSet?.contains(item.id) == false && (activeDragSet?.size ?: 0) < 5000) {
+                    activeDragSet?.add(item.id)
+                    changed = true
+                }
+
+                if (changed) {
+                    onSelectionChange(activeDragSet?.toSet() ?: emptySet())
+                }
+
+                val y = change.position.y
+                val topThreshold = 150.dp.toPx()
+                val bottomThreshold = size.height - 150.dp.toPx()
+
+                autoScrollSpeed = when {
+                    y < topThreshold -> -((topThreshold - y) / topThreshold) * 40f
+                    y > bottomThreshold -> ((y - bottomThreshold) / 150.dp.toPx()) * 40f
+                    else -> 0f
+                }
+            },
+            onDragEnd = { autoScrollSpeed = 0f; activeDragSet = null },
+            onDragCancel = { autoScrollSpeed = 0f; activeDragSet = null }
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyVerticalGrid(
             state = gridState, columns = gridCells,
-            modifier = Modifier.fillMaxSize().pointerInput(isSelectionMode) {
-                if (!isSelectionMode) return@pointerInput
-                var initialKey: Long? = null
-                var lastKey: Long? = null
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        gridState.layoutInfo.visibleItemsInfo.find { offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) && offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width) }?.let { itemInfo ->
-                            val item = pagedMedia.peek(itemInfo.index) as? GalleryGridItem.Media
-                            if (item != null) {
-                                initialKey = item.item.id
-                                lastKey = item.item.id
-                                onSelectionChange((selectedIds + item.item.id).takeIf { s -> s.size < 5000 } ?: selectedIds)
-                            }
-                        }
-                    },
-                    onDrag = { change, _ ->
-                        val offset = change.position
-                        gridState.layoutInfo.visibleItemsInfo.find { offset.y >= it.offset.y && offset.y <= (it.offset.y + it.size.height) && offset.x >= it.offset.x && offset.x <= (it.offset.x + it.size.width) }?.let { itemInfo ->
-                            val item = pagedMedia.peek(itemInfo.index) as? GalleryGridItem.Media
-                            if (item != null && item.item.id != initialKey && item.item.id != lastKey) {
-                                lastKey = item.item.id
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                if (!selectedIds.contains(item.item.id)) {
-                                    onSelectionChange((selectedIds + item.item.id).takeIf { s -> s.size < 5000 } ?: selectedIds)
-                                }
-                            }
-                        }
-                    },
-                    onDragEnd = { initialKey = null; lastKey = null }, onDragCancel = { initialKey = null; lastKey = null }
-                )
-            },
+            modifier = Modifier.fillMaxSize().then(dragModifier),
             contentPadding = PaddingValues(top = 4.dp, bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp, start = 2.dp, end = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
@@ -397,6 +457,49 @@ fun GalleryGridContent(
                         ModernMediaGridTile(modifier = Modifier, item = mediaItem, thumbSize = dynamicThumbSize, isSelected = selectedIds.contains(mediaItem.id), isSelectionMode = isSelectionMode, isLowRam = isLowRam, onClick = { onItemClick(mediaItem) }, onLongClick = { onItemLongClick(mediaItem) })
                     }
                     null -> Box(modifier = Modifier.aspectRatio(1f).clip(RoundedCornerShape(8.dp)).background(Color.LightGray.copy(alpha = 0.3f)))
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ModernMediaGridTile(
+    modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, isLowRam: Boolean,
+    onClick: () -> Unit, onLongClick: () -> Unit
+) {
+    val cornerRadius = 10.dp
+    val scale by animateFloatAsState(targetValue = if (isSelected) 0.85f else 1f, animationSpec = tween(100), label = "scale")
+
+    Box(modifier = modifier.aspectRatio(1f).scale(scale).clip(RoundedCornerShape(cornerRadius)).combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick, onLongClick = onLongClick)) {
+
+        val request = remember(item.id, thumbSize) {
+            ImageRequest.Builder(LocalContext.current)
+                .data(item.uri)
+                .size(thumbSize)
+                .precision(Precision.INEXACT)
+                .memoryCacheKey("thumb_${item.id}")
+                .diskCacheKey("thumb_${item.id}")
+                .bitmapConfig(Bitmap.Config.RGB_565)
+                .memoryCachePolicy(CachePolicy.ENABLED)
+                .diskCachePolicy(CachePolicy.ENABLED)
+                .crossfade(false)
+                .build()
+        }
+
+        AsyncImage(model = request, placeholder = null, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low, modifier = Modifier.fillMaxSize())
+
+        if (item.isVideo) {
+            Box(modifier = Modifier.fillMaxSize().drawWithCache { val brush = Brush.verticalGradient(0.5f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.75f)); onDrawBehind { drawRect(brush) } })
+            Surface(modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp), shape = RoundedCornerShape(12.dp), color = Color.Black.copy(alpha = 0.6f)) { Text(text = formatDuration(item.duration), fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)) }
+        }
+        if (isSelectionMode) {
+            Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(cornerRadius))) {
+                Box(modifier = Modifier.fillMaxSize().background(if (isSelected) Color.White.copy(alpha = 0.25f) else Color.Transparent))
+                Box(modifier = Modifier.padding(8.dp).align(Alignment.TopStart)) {
+                    if (isSelected) Icon(imageVector = Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp).background(Color.White, CircleShape))
+                    else Icon(imageVector = Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(22.dp))
                 }
             }
         }
@@ -496,45 +599,6 @@ fun VideoPreviewPage(item: MediaItem, videoIndex: Int, isCurrentPage: Boolean, s
 @Composable
 private fun SamsungViewerAction(icon: ImageVector, label: String, tint: Color = Color.White, onClick: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick).padding(8.dp)) { Icon(imageVector = icon, contentDescription = label, tint = tint, modifier = Modifier.size(24.dp)); Spacer(modifier = Modifier.height(4.dp)); Text(text = label, color = tint, style = MaterialTheme.typography.labelSmall) }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun ModernMediaGridTile(modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, isLowRam: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
-    val context = LocalContext.current
-    val tileShape = if (isLowRam) RoundedCornerShape(0.dp) else RoundedCornerShape(8.dp)
-
-    Box(modifier = modifier.aspectRatio(1f).clip(tileShape).combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick, onLongClick = onLongClick)) {
-        val request = remember(item.id, thumbSize) {
-            ImageRequest.Builder(context)
-                .data(item.uri)
-                .size(thumbSize)
-                .precision(Precision.INEXACT)
-                .memoryCacheKey("thumb_${item.id}")
-                .diskCacheKey("thumb_${item.id}")
-                .bitmapConfig(Bitmap.Config.RGB_565)
-                .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(CachePolicy.ENABLED)
-                .crossfade(false)
-                .build()
-        }
-
-        AsyncImage(model = request, placeholder = null, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low, modifier = Modifier.fillMaxSize())
-
-        if (item.isVideo) {
-            Surface(modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp), shape = tileShape, color = Color.Black.copy(alpha = 0.6f)) {
-                Text(text = "▶ ${formatDuration(item.duration)}", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
-            }
-        }
-
-        if (isSelectionMode) {
-            Box(modifier = Modifier.fillMaxSize().background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent))
-            Box(modifier = Modifier.padding(6.dp).align(Alignment.TopStart)) {
-                if (isSelected) Icon(imageVector = Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp).background(Color.White, CircleShape))
-                else Icon(imageVector = Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(20.dp))
-            }
-        }
-    }
 }
 
 @Composable

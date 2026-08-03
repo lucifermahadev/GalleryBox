@@ -427,8 +427,11 @@ class GalleryViewModel @Inject constructor(
         onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
     }
 
-    suspend fun forceSync() { safeLoadLibrary(forceRefresh = true) }
-    fun refreshData() = viewModelScope.launch { forceSync() }
+    fun forceSync() {
+        viewModelScope.launch { safeLoadLibrary(forceRefresh = true) }
+    }
+
+    fun refreshData() = forceSync()
 
     @Volatile private var isReloading = false
     private suspend fun safeLoadLibrary(forceRefresh: Boolean = false) {

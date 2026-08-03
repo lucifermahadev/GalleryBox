@@ -49,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -136,7 +137,8 @@ data class AlbumActions(
     val onNavigateToHidden: () -> Unit,
     val onLockApp: () -> Unit = {},
     val onNavigateToDuplicates: () -> Unit,
-    val onNavigateToScan: () -> Unit
+    val onNavigateToScan: () -> Unit,
+    val onNavigateToThemePicker: () -> Unit = {}
 )
 
 @Stable
@@ -158,6 +160,7 @@ sealed class AlbumUiDialog {
     data object None : AlbumUiDialog()
     data object GridSize : AlbumUiDialog()
     data object Sort : AlbumUiDialog()
+    data object Theme : AlbumUiDialog()
     data object CreateAlbum : AlbumUiDialog()
     data object HiddenAlbums : AlbumUiDialog()
     data class Rename(val album: Album) : AlbumUiDialog()
@@ -175,6 +178,14 @@ sealed class DetailUiDialog {
     data object DeleteAlbum : DetailUiDialog()
     data class Delete(val mediaIds: List<Long>) : DetailUiDialog()
     data class QuickAction(val item: MediaItem) : DetailUiDialog()
+}
+
+fun Modifier.glassEffect(isEnabled: Boolean): Modifier {
+    return if (isEnabled) {
+        this.background(Color.Black.copy(alpha = 0.4f))
+    } else {
+        this
+    }
 }
 
 fun Context.findFragmentActivity(): FragmentActivity? {
@@ -329,7 +340,6 @@ fun AlbumScreen(
 ) {
     val context = LocalContext.current
     val isLowRam = remember { isLowRAMDevice(context) }
-    val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
     val enginePrefs = remember { context.getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE) }
@@ -350,13 +360,17 @@ fun AlbumScreen(
     var selectedIds by remember { mutableStateOf<ImmutableSet<String>>(persistentListOf<String>().toImmutableSet()) }
     var activeDialog by remember { mutableStateOf<AlbumUiDialog>(AlbumUiDialog.None) }
     var showSelectionMenu by remember { mutableStateOf(false) }
-    var ignoreUpdatesUntil by remember { mutableLongStateOf(0L) }
+    var optimisticallyRemovedAlbums by remember { mutableStateOf(persistentSetOf<String>()) }
+
+    var themeMode by remember { mutableStateOf(enginePrefs.getString("theme_mode", "DARK") ?: "DARK") }
+    var bgUri by remember { mutableStateOf(enginePrefs.getString("bg_uri", null)) }
+    val isGlassTheme = themeMode == "IMAGE" && bgUri != null
 
     LaunchedEffect(viewerState, isSelectionMode) { onViewerStateChanged(viewerState is GalleryViewerState.Open || isSelectionMode) }
 
     val albumPreviews = remember(rawAlbumPreviews) { rawAlbumPreviews.mapValues { it.value.toImmutableList() }.toImmutableMap() }
 
-    val displayAlbums = remember(vmAlbums, searchQuery, sortOption, favoriteIds, allMedia) {
+    val displayAlbums = remember(vmAlbums, searchQuery, sortOption, favoriteIds, allMedia, optimisticallyRemovedAlbums) {
         val favMedia = allMedia.filter { favoriteIds.contains(it.id) }
         val virtualAlbumsMutable = vmAlbums.filter { it.id.startsWith("virtual_") && it.id != ID_FAVORITES && albumMatchesQuery(it, searchQuery) }.toMutableList()
         if (favMedia.isNotEmpty()) {
@@ -364,7 +378,7 @@ fun AlbumScreen(
             if (albumMatchesQuery(updatedFavAlbum, searchQuery)) virtualAlbumsMutable.add(updatedFavAlbum)
         }
         val sortedVirtualAlbums = virtualAlbumsMutable.sortedBy { when (it.id) { ID_RECENT -> 0; ID_FAVORITES -> 1; ID_DOWNLOADS -> 2; else -> 99 } }
-        val userAlbums = vmAlbums.filter { !it.id.startsWith("virtual_") && albumMatchesQuery(it, searchQuery) }
+        val userAlbums = vmAlbums.filter { !it.id.startsWith("virtual_") && albumMatchesQuery(it, searchQuery) && !optimisticallyRemovedAlbums.contains(it.id) }
         val sortedUserAlbums = if (sortOption == AlbumSort.Custom) userAlbums else userAlbums.sortedWith(Comparator { a, b ->
             if (a.isPinned != b.isPinned) b.isPinned.compareTo(a.isPinned)
             else when (sortOption.name) { "NameAsc" -> a.name.compareTo(b.name, ignoreCase = true); "NameDesc" -> b.name.compareTo(a.name, ignoreCase = true); "SizeDesc" -> b.sizeBytes.compareTo(a.sizeBytes); "CountDesc" -> b.mediaCount.compareTo(a.mediaCount); else -> 0 }
@@ -381,7 +395,7 @@ fun AlbumScreen(
     val dynamicList = remember { mutableStateListOf<Album>() }
 
     LaunchedEffect(displayAlbums) {
-        if (!isDragging && System.currentTimeMillis() > ignoreUpdatesUntil) {
+        if (!isDragging) {
             if (dynamicList.map { it.id } != displayAlbums.map { it.id }) {
                 dynamicList.clear()
                 dynamicList.addAll(displayAlbums)
@@ -417,6 +431,16 @@ fun AlbumScreen(
     BackHandler(enabled = viewerState is GalleryViewerState.Open) { viewModel.closeViewer() }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        if (isGlassTheme) {
+            AsyncImage(
+                model = ImageRequest.Builder(context).data(bgUri).crossfade(true).build(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f))) // Dim Overlay
+        }
+
         Scaffold(
             modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
             containerColor = Color.Transparent,
@@ -432,27 +456,28 @@ fun AlbumScreen(
                                 Text(text = if (isAllSelected) "Deselect All" else "Select All", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                             }
                         },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface),
+                        modifier = Modifier.glassEffect(isGlassTheme)
                     )
                 } else if (isSearchActive) {
-                    SearchTopBar(query = searchQuery, onQueryChange = { searchQuery = it }, onClose = { isSearchActive = false; searchQuery = "" })
+                    SearchTopBar(query = searchQuery, onQueryChange = { searchQuery = it }, onClose = { isSearchActive = false; searchQuery = "" }, isGlassTheme = isGlassTheme)
                 } else {
                     ModernAlbumTopBar(
                         scrollBehavior = scrollBehavior,
                         isAppLockEnabled = isAppLockEnabled,
+                        isGlassTheme = isGlassTheme,
                         onSearchClick = { isSearchActive = true },
                         onMenuAction = { action ->
                             when (action) {
                                 "grid" -> activeDialog = AlbumUiDialog.GridSize
                                 "sort" -> activeDialog = AlbumUiDialog.Sort
+                                "theme" -> activeDialog = AlbumUiDialog.Theme
                                 "create" -> activeDialog = AlbumUiDialog.CreateAlbum
                                 "trash" -> actions.onNavigateToTrash()
                                 "hidden" -> activeDialog = AlbumUiDialog.HiddenAlbums
                                 "duplicates" -> actions.onNavigateToDuplicates()
                                 "scan" -> actions.onNavigateToScan()
-                                "toggle_lock" -> {
-                                    toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it }
-                                }
+                                "toggle_lock" -> toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it }
                             }
                         }
                     )
@@ -484,11 +509,13 @@ fun AlbumScreen(
                                 if (isSelectionMode) selectedIds = if (selectedIds.contains(album.id)) (selectedIds - album.id).toImmutableSet() else (selectedIds + album.id).toImmutableSet()
                                 else actions.onAlbumClick(album)
                             },
-                            onAlbumLongClick = { album -> if (!isSelectionMode) { isSelectionMode = true; selectedIds = persistentListOf(album.id).toImmutableSet() } },
+                            onAlbumLongClick = { album ->
+                                isSelectionMode = true
+                                selectedIds = persistentSetOf(album.id)
+                            },
                             onDragStateChange = { dragging ->
                                 isDragging = dragging
                                 if (!dragging) {
-                                    ignoreUpdatesUntil = System.currentTimeMillis() + 1500L
                                     viewModel.saveCustomAlbumOrder(dynamicList.toList())
                                 }
                             }
@@ -500,8 +527,8 @@ fun AlbumScreen(
 
         if (isSelectionMode) {
             Surface(
-                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surface, shadowElevation = 16.dp, shape = RectangleShape
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().glassEffect(isGlassTheme),
+                color = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, shadowElevation = 16.dp, shape = RectangleShape
             ) {
                 Row(modifier = Modifier.navigationBarsPadding().padding(horizontal = 8.dp, vertical = 8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                     BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") { activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, true) }
@@ -509,12 +536,12 @@ fun AlbumScreen(
                     BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Delete", isDestructive = true) { activeDialog = AlbumUiDialog.Delete(dynamicList.filter { selectedIds.contains(it.id) }) }
                     Box {
                         BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showSelectionMenu = true }
-                        DropdownMenu(expanded = showSelectionMenu, onDismissRequest = { showSelectionMenu = false }) {
+                        DropdownMenu(expanded = showSelectionMenu, onDismissRequest = { showSelectionMenu = false }, modifier = Modifier.glassEffect(isGlassTheme)) {
                             val allPinned = dynamicList.filter { selectedIds.contains(it.id) }.all { it.isPinned }
-                            if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Rename") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Rename(it) } })
-                            DropdownMenuItem(text = { Text(if (allPinned) "Unpin" else "Pin") }, onClick = { showSelectionMenu = false; dynamicList.filter { selectedIds.contains(it.id) }.forEach { viewModel.toggleAlbumPin(it) }; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
-                            if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Info") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Info(it) } })
-                            DropdownMenuItem(text = { Text("Copy") }, onClick = { showSelectionMenu = false; activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, false) })
+                            if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Rename") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Rename(it) } }, colors = MenuDefaults.itemColors(Color.Transparent))
+                            DropdownMenuItem(text = { Text(if (allPinned) "Unpin" else "Pin") }, onClick = { showSelectionMenu = false; dynamicList.filter { selectedIds.contains(it.id) }.forEach { viewModel.toggleAlbumPin(it) }; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }, colors = MenuDefaults.itemColors(Color.Transparent))
+                            if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Info") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Info(it) } }, colors = MenuDefaults.itemColors(Color.Transparent))
+                            DropdownMenuItem(text = { Text("Copy") }, onClick = { showSelectionMenu = false; activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, false) }, colors = MenuDefaults.itemColors(Color.Transparent))
                             DropdownMenuItem(text = { Text("Hide Album") }, onClick = {
                                 showSelectionMenu = false
                                 val currentHidden = enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
@@ -524,7 +551,7 @@ fun AlbumScreen(
                                 isSelectionMode = false
                                 selectedIds = persistentListOf<String>().toImmutableSet()
                                 Toast.makeText(context, "Albums hidden", Toast.LENGTH_SHORT).show()
-                            }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
+                            }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
                         }
                     }
                 }
@@ -533,8 +560,21 @@ fun AlbumScreen(
     }
 
     when (val dialog = activeDialog) {
+        is AlbumUiDialog.Theme -> {
+            ModernThemeSheet(
+                currentTheme = themeMode,
+                hasBackgroundImage = bgUri != null,
+                isGlassTheme = isGlassTheme,
+                onDismiss = { activeDialog = AlbumUiDialog.None },
+                onSelectLight = { themeMode = "LIGHT"; enginePrefs.edit().putString("theme_mode", "LIGHT").apply(); activeDialog = AlbumUiDialog.None },
+                onSelectDark = { themeMode = "DARK"; enginePrefs.edit().putString("theme_mode", "DARK").apply(); activeDialog = AlbumUiDialog.None },
+                onSelectImage = { actions.onNavigateToThemePicker(); activeDialog = AlbumUiDialog.None },
+                onChangeImage = { actions.onNavigateToThemePicker(); activeDialog = AlbumUiDialog.None },
+                onRemoveImage = { bgUri = null; themeMode = "DARK"; enginePrefs.edit().remove("bg_uri").putString("theme_mode", "DARK").apply(); activeDialog = AlbumUiDialog.None }
+            )
+        }
         is AlbumUiDialog.Info -> {
-            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = MaterialTheme.colorScheme.surface) {
+            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme)) {
                 Column(Modifier.padding(24.dp).padding(bottom = 24.dp)) {
                     val albumItems = allMedia.filter { it.bucketId == dialog.album.id }
                     val oldestItem = albumItems.minByOrNull { it.dateAdded }
@@ -551,14 +591,19 @@ fun AlbumScreen(
             }
         }
         is AlbumUiDialog.MoveCopy -> {
-            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = MaterialTheme.colorScheme.surface) {
+            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme)) {
                 val allAlbumsState by viewModel.allAlbumsState.collectAsState(initial = emptyList())
                 Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
                     Text(text = if (dialog.isMove) "Move To..." else "Copy To...", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
                     LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f, fill = false), contentPadding = PaddingValues(bottom = 12.dp)) {
-                        item { ListItem(headlineContent = { Text("Create New Album", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Rounded.CreateNewFolder, null, tint = MaterialTheme.colorScheme.primary) }, modifier = Modifier.clickable { activeDialog = AlbumUiDialog.CreateAndMoveCopy(dialog.albums, dialog.isMove) }) }
+                        item { ListItem(headlineContent = { Text("Create New Album", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Rounded.CreateNewFolder, null, tint = MaterialTheme.colorScheme.primary) }, modifier = Modifier.clickable { activeDialog = AlbumUiDialog.CreateAndMoveCopy(dialog.albums, dialog.isMove) }, colors = ListItemDefaults.colors(containerColor = Color.Transparent)) }
                         items(allAlbumsState.filter { !it.id.startsWith("virtual_") && dialog.albums.none { sel -> sel.id == it.id } }.sortedBy { it.name.lowercase() }) { targetAlbum ->
-                            ListItem(headlineContent = { Text(targetAlbum.name, fontWeight = FontWeight.Medium) }, leadingContent = { Icon(Icons.Outlined.Folder, null) }, modifier = Modifier.clickable { viewModel.mergeAlbums(sourceAlbumIds = dialog.albums.map { id -> id.id }, targetAlbumId = targetAlbum.id, mergeMode = if (dialog.isMove) MergeMode.MOVE_AND_DELETE else MergeMode.COPY); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
+                            ListItem(headlineContent = { Text(targetAlbum.name, fontWeight = FontWeight.Medium) }, leadingContent = { Icon(Icons.Outlined.Folder, null) }, modifier = Modifier.clickable {
+                                if (dialog.isMove) optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
+                                viewModel.mergeAlbums(sourceAlbumIds = dialog.albums.map { id -> id.id }, targetAlbumId = targetAlbum.id, mergeMode = if (dialog.isMove) MergeMode.MOVE_AND_DELETE else MergeMode.COPY)
+                                viewModel.forceSync()
+                                activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
+                            }, colors = ListItemDefaults.colors(containerColor = Color.Transparent))
                         }
                     }
                 }
@@ -566,19 +611,26 @@ fun AlbumScreen(
         }
         is AlbumUiDialog.CreateAndMoveCopy -> {
             val initialName = if (dialog.albums.size == 1) "${dialog.albums.first().name} Copy" else "New Album"
-            ModernInputSheet(title = if (dialog.isMove) "New Album & Move" else "New Album & Copy", initial = initialName, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String ->
+            ModernInputSheet(title = if (dialog.isMove) "New Album & Move" else "New Album & Copy", initial = initialName, isGlassTheme = isGlassTheme, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String ->
                 val mediaIds = allMedia.filter { item -> dialog.albums.any { album -> album.id == item.bucketId } }.map { it.id }
                 if (dialog.isMove) viewModel.createAndMove(mediaIds, newName) else viewModel.createAndCopy(mediaIds, newName)
+                if (dialog.isMove) optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
+                viewModel.forceSync()
                 activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
             })
         }
-        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String -> viewModel.renameAlbum(dialog.album, newName); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
-        is AlbumUiDialog.Delete -> ModernSmartDeleteSheet(count = dialog.albums.size, onDismiss = { activeDialog = AlbumUiDialog.None }, onDeleteAll = { trashViewModel.confirmPendingAlbumTrash(dialog.albums, allMedia.toList()); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
-        is AlbumUiDialog.CreateAlbum -> ModernCreateAlbumSheet(onDismiss = { activeDialog = AlbumUiDialog.None }, onCreate = { name: String, sd: Boolean -> viewModel.createAlbum(name, sd); activeDialog = AlbumUiDialog.None })
-        is AlbumUiDialog.Sort -> ModernAlbumSortSheet(activeSort = sortOption, onDismiss = { activeDialog = AlbumUiDialog.None }, onSortSelected = { sort: AlbumSort -> viewModel.updateAlbumSort(sort); activeDialog = AlbumUiDialog.None })
-        is AlbumUiDialog.GridSize -> ModernGridSheet(currentColumns = columnCount, max = 8, onDismiss = { activeDialog = AlbumUiDialog.None }, onUpdate = { cols: Int -> columnCount = cols; prefs.edit().putInt("gallery_album_grid_columns", cols).apply() })
+        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, isGlassTheme = isGlassTheme, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String -> viewModel.renameAlbum(dialog.album, newName); viewModel.forceSync(); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
+        is AlbumUiDialog.Delete -> ModernSmartDeleteSheet(count = dialog.albums.size, isGlassTheme = isGlassTheme, onDismiss = { activeDialog = AlbumUiDialog.None }, onDeleteAll = {
+            optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { it.id })
+            trashViewModel.confirmPendingAlbumTrash(dialog.albums, allMedia.toList())
+            viewModel.forceSync()
+            activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
+        })
+        is AlbumUiDialog.CreateAlbum -> ModernCreateAlbumSheet(isGlassTheme = isGlassTheme, onDismiss = { activeDialog = AlbumUiDialog.None }, onCreate = { name: String, sd: Boolean -> viewModel.createAlbum(name, sd); activeDialog = AlbumUiDialog.None })
+        is AlbumUiDialog.Sort -> ModernAlbumSortSheet(activeSort = sortOption, isGlassTheme = isGlassTheme, onDismiss = { activeDialog = AlbumUiDialog.None }, onSortSelected = { sort: AlbumSort -> viewModel.updateAlbumSort(sort); activeDialog = AlbumUiDialog.None })
+        is AlbumUiDialog.GridSize -> ModernGridSheet(currentColumns = columnCount, max = 8, isGlassTheme = isGlassTheme, onDismiss = { activeDialog = AlbumUiDialog.None }, onUpdate = { cols: Int -> columnCount = cols; prefs.edit().putInt("gallery_album_grid_columns", cols).apply() })
         is AlbumUiDialog.HiddenAlbums -> {
-            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = MaterialTheme.colorScheme.surface) {
+            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme)) {
                 val allPossibleAlbums = remember(allMedia) { allMedia.groupBy { it.bucketId }.map { (id, items) -> val first = items.first(); Album(id = id, name = first.bucketName, coverUri = first.uri, mediaCount = items.size, sizeBytes = items.sumOf { it.size }, isPinned = false) }.filter { !it.id.startsWith("virtual_") }.sortedBy { it.name.lowercase() } }
                 Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
                     Text(text = "Hide or Unhide", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
@@ -605,6 +657,64 @@ fun AlbumScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ModernThemeSheet(
+    currentTheme: String,
+    hasBackgroundImage: Boolean,
+    isGlassTheme: Boolean,
+    onDismiss: () -> Unit,
+    onSelectLight: () -> Unit,
+    onSelectDark: () -> Unit,
+    onSelectImage: () -> Unit,
+    onChangeImage: () -> Unit,
+    onRemoveImage: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text("Theme", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
+
+            ListItem(
+                headlineContent = { Text("Light") },
+                leadingContent = { Icon(Icons.Outlined.LightMode, null) },
+                trailingContent = { if (currentTheme == "LIGHT") Icon(Icons.Rounded.CheckCircle, null, tint = MaterialTheme.colorScheme.primary) },
+                modifier = Modifier.clickable { onSelectLight() },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+            )
+            ListItem(
+                headlineContent = { Text("Dark") },
+                leadingContent = { Icon(Icons.Outlined.DarkMode, null) },
+                trailingContent = { if (currentTheme == "DARK") Icon(Icons.Rounded.CheckCircle, null, tint = MaterialTheme.colorScheme.primary) },
+                modifier = Modifier.clickable { onSelectDark() },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+            )
+            ListItem(
+                headlineContent = { Text("Background Image") },
+                leadingContent = { Icon(Icons.Outlined.Image, null) },
+                trailingContent = { if (currentTheme == "IMAGE") Icon(Icons.Rounded.CheckCircle, null, tint = MaterialTheme.colorScheme.primary) },
+                modifier = Modifier.clickable { onSelectImage() },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+            )
+
+            if (hasBackgroundImage) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                ListItem(
+                    headlineContent = { Text("Change Background") },
+                    leadingContent = { Icon(Icons.Outlined.SwapHoriz, null) },
+                    modifier = Modifier.clickable { onChangeImage() },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                )
+                ListItem(
+                    headlineContent = { Text("Remove Background", color = MaterialTheme.colorScheme.error) },
+                    leadingContent = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    modifier = Modifier.clickable { onRemoveImage() },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun AlbumDetailScreen(
@@ -627,6 +737,8 @@ fun AlbumDetailScreen(
     val vmAlbums by viewModel.albumsState.collectAsState(initial = emptyList())
     val viewerState by viewModel.viewerState.collectAsState()
     val allMedia by viewModel.media.collectAsState()
+
+    var optimisticallyRemovedIds by remember { mutableStateOf(persistentSetOf<Long>()) }
 
     val albumMedia = remember(allMedia, albumId, favoriteIds) {
         allMedia.filter { item ->
@@ -657,6 +769,10 @@ fun AlbumDetailScreen(
     var currentPhotoSort by rememberSaveable { mutableStateOf(PhotoSort.DateDesc) }
     var isSelectionMode by remember { mutableStateOf(false) }
 
+    var selectedIds by remember { mutableStateOf<ImmutableSet<Long>>(persistentListOf<Long>().toImmutableSet()) }
+    var selectedSize by remember { mutableLongStateOf(0L) }
+    val dragSelection = remember { mutableSetOf<Long>() }
+
     val intentSenderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         val g = result.resultCode == Activity.RESULT_OK
         trashViewModel.onPermissionResultGlobal(g)
@@ -675,6 +791,14 @@ fun AlbumDetailScreen(
     }
 
     LaunchedEffect(viewerState, isSelectionMode) { onViewerStateChanged(viewerState is GalleryViewerState.Open || isSelectionMode) }
+
+    LaunchedEffect(isSelectionMode) {
+        if (!isSelectionMode) {
+            dragSelection.clear()
+            selectedIds = persistentListOf<Long>().toImmutableSet()
+            selectedSize = 0L
+        }
+    }
 
     val album = remember(vmAlbums, albumId) {
         when (albumId) {
@@ -695,12 +819,14 @@ fun AlbumDetailScreen(
     }
 
     val isVirtual = albumId.startsWith("virtual_")
-    var selectedIds by remember { mutableStateOf<ImmutableSet<Long>>(persistentListOf<Long>().toImmutableSet()) }
-    var selectedSize by remember { mutableLongStateOf(0L) }
     var showMediaSelectionMenu by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var mediaFilter by remember { mutableStateOf(AlbumMediaFilter.ALL) }
     var showRenameSheet by remember { mutableStateOf(false) }
+
+    var themeMode by remember { mutableStateOf(enginePrefs.getString("theme_mode", "DARK") ?: "DARK") }
+    var bgUri by remember { mutableStateOf(enginePrefs.getString("bg_uri", null)) }
+    val isGlassTheme = themeMode == "IMAGE" && bgUri != null
 
     val configuration = LocalConfiguration.current; val density = LocalDensity.current
     val screenWidthPx = with(density) { configuration.screenWidthDp.dp.roundToPx() }
@@ -719,7 +845,7 @@ fun AlbumDetailScreen(
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
 
     BackHandler(enabled = localSearchQuery.isNotEmpty()) { localSearchQuery = "" }
-    BackHandler(enabled = isSelectionMode) { isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L }
+    BackHandler(enabled = isSelectionMode) { isSelectionMode = false }
     BackHandler(enabled = activeDialog != DetailUiDialog.None) { activeDialog = DetailUiDialog.None }
     BackHandler(enabled = metadataItemToShow != null) { metadataItemToShow = null }
     BackHandler(enabled = viewerState is GalleryViewerState.Open) { viewModel.closeViewer() }
@@ -731,7 +857,21 @@ fun AlbumDetailScreen(
         searched.sortedWith(comparator).toImmutableList()
     }
 
+    val actuallyFilteredMedia = remember(filteredMedia, optimisticallyRemovedIds) {
+        filteredMedia.filter { !optimisticallyRemovedIds.contains(it.id) }.toImmutableList()
+    }
+
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        if (isGlassTheme) {
+            AsyncImage(
+                model = ImageRequest.Builder(context).data(bgUri).crossfade(true).build(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f))) // Dim Overlay
+        }
+
         Scaffold(
             modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
             containerColor = Color.Transparent,
@@ -740,15 +880,23 @@ fun AlbumDetailScreen(
                 if (isSelectionMode) {
                     TopAppBar(
                         title = { Text(text = "${selectedIds.size} selected", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold) },
-                        navigationIcon = { IconButton(onClick = { isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close Selection") } },
+                        navigationIcon = { IconButton(onClick = { isSelectionMode = false }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close Selection") } },
                         actions = {
-                            val isAllSelected = selectedIds.size == filteredMedia.size && filteredMedia.isNotEmpty()
+                            val isAllSelected = selectedIds.size == actuallyFilteredMedia.size && actuallyFilteredMedia.isNotEmpty()
                             TextButton(onClick = {
-                                if (isAllSelected) { selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L }
-                                else { selectedIds = filteredMedia.map { it.id }.toImmutableSet(); selectedSize = filteredMedia.sumOf { it.size } }
+                                if (isAllSelected) {
+                                    dragSelection.clear()
+                                    selectedSize = 0L
+                                } else {
+                                    dragSelection.clear()
+                                    actuallyFilteredMedia.forEach { dragSelection.add(it.id) }
+                                    selectedSize = actuallyFilteredMedia.sumOf { it.size }
+                                }
+                                selectedIds = dragSelection.toImmutableSet()
                             }) { Text(text = if (isAllSelected) "Deselect All" else "Select All", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold) }
                         },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface),
+                        modifier = Modifier.glassEffect(isGlassTheme)
                     )
                 } else {
                     CenterAlignedTopAppBar(
@@ -757,11 +905,11 @@ fun AlbumDetailScreen(
                         actions = {
                             Box {
                                 IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
-                                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(12.dp))) {
-                                    DropdownMenuItem(text = { Text("Select items") }, onClick = { isSelectionMode = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Checklist, null) })
-                                    if (!isVirtual) DropdownMenuItem(text = { Text("Add Photos") }, onClick = { actions.onAddMediaToAlbum?.invoke(albumId); showMenu = false }, leadingIcon = { Icon(Icons.Rounded.AddPhotoAlternate, null) })
-                                    DropdownMenuItem(text = { Text("Sort Media") }, onClick = { activeDialog = DetailUiDialog.Sort; showMenu = false }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) })
-                                    DropdownMenuItem(text = { Text("Grid Size") }, onClick = { activeDialog = DetailUiDialog.GridSize; showMenu = false }, leadingIcon = { Icon(Icons.Default.Grid4x4, null) })
+                                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(12.dp)).glassEffect(isGlassTheme)) {
+                                    DropdownMenuItem(text = { Text("Select items") }, onClick = { isSelectionMode = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Checklist, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                    if (!isVirtual) DropdownMenuItem(text = { Text("Add Photos") }, onClick = { actions.onAddMediaToAlbum?.invoke(albumId); showMenu = false }, leadingIcon = { Icon(Icons.Rounded.AddPhotoAlternate, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                    DropdownMenuItem(text = { Text("Sort Media") }, onClick = { activeDialog = DetailUiDialog.Sort; showMenu = false }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                    DropdownMenuItem(text = { Text("Grid Size") }, onClick = { activeDialog = DetailUiDialog.GridSize; showMenu = false }, leadingIcon = { Icon(Icons.Default.Grid4x4, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
                                     if (!isVirtual && album != null) {
                                         DropdownMenuItem(text = { Text("Hide Album") }, onClick = {
                                             viewModel.toggleHiddenAlbum(album.id)
@@ -770,22 +918,23 @@ fun AlbumDetailScreen(
                                             Toast.makeText(context, "Album Hidden", Toast.LENGTH_SHORT).show()
                                             showMenu = false
                                             actions.onBack()
-                                        }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
-                                        DropdownMenuItem(text = { Text(if (album.isPinned) "Unpin Album" else "Pin Album") }, onClick = { viewModel.toggleAlbumPin(album); showMenu = false }, leadingIcon = { Icon(if (album.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, null) })
-                                        DropdownMenuItem(text = { Text("Rename") }, onClick = { showRenameSheet = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Edit, null) })
-                                        DropdownMenuItem(text = { Text("Delete Album", color = MaterialTheme.colorScheme.error) }, onClick = { activeDialog = DetailUiDialog.DeleteAlbum; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) })
+                                        }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                        DropdownMenuItem(text = { Text(if (album.isPinned) "Unpin Album" else "Pin Album") }, onClick = { viewModel.toggleAlbumPin(album); showMenu = false }, leadingIcon = { Icon(if (album.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                        DropdownMenuItem(text = { Text("Rename") }, onClick = { showRenameSheet = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Edit, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                        DropdownMenuItem(text = { Text("Delete Album", color = MaterialTheme.colorScheme.error) }, onClick = { activeDialog = DetailUiDialog.DeleteAlbum; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) }, colors = MenuDefaults.itemColors(Color.Transparent))
                                     }
-                                    DropdownMenuItem(text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") }, onClick = { showMenu = false; toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it } }, leadingIcon = { Icon(if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, null) })
+                                    DropdownMenuItem(text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") }, onClick = { showMenu = false; toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it } }, leadingIcon = { Icon(if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
                                 }
                             }
                         },
                         scrollBehavior = scrollBehavior,
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = MaterialTheme.colorScheme.surface)
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface),
+                        modifier = Modifier.glassEffect(isGlassTheme)
                     )
                 }
             }
         ) { padding ->
-            if (filteredMedia.isEmpty() && localSearchQuery.isBlank() && mediaFilter == AlbumMediaFilter.ALL) {
+            if (actuallyFilteredMedia.isEmpty() && localSearchQuery.isBlank() && mediaFilter == AlbumMediaFilter.ALL) {
                 Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(imageVector = Icons.Outlined.ImageNotSupported, contentDescription = null, modifier = Modifier.size(72.dp), tint = Color.LightGray)
@@ -797,27 +946,45 @@ fun AlbumDetailScreen(
             } else {
                 Column(Modifier.padding(padding)) {
                     StatelessMediaGrid(
-                        gridState = gridState, mediaList = filteredMedia, columnCount = detailColumns, screenWidthPx = screenWidthPx, isSelectionMode = isSelectionMode, selectedIds = selectedIds, isLowRam = isLowRam,
+                        gridState = gridState, mediaList = actuallyFilteredMedia, columnCount = detailColumns, screenWidthPx = screenWidthPx, isSelectionMode = isSelectionMode, selectedIds = selectedIds, isLowRam = isLowRam,
                         onToggleSelection = { item ->
-                            if (selectedIds.contains(item.id)) {
-                                selectedIds = (selectedIds - item.id).toImmutableSet()
+                            if (dragSelection.contains(item.id)) {
+                                dragSelection.remove(item.id)
                                 selectedSize = maxOf(0L, selectedSize - item.size)
                             } else {
-                                if (selectedIds.size < 5000) {
-                                    selectedIds = (selectedIds + item.id).toImmutableSet()
+                                if (dragSelection.size < 5000) {
+                                    dragSelection.add(item.id)
                                     selectedSize += item.size
                                 }
                             }
+                            selectedIds = dragSelection.toImmutableSet()
                         },
-                        onSelectAll = { isAllSelected -> if (isAllSelected) { selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L } else { selectedIds = filteredMedia.map { it.id }.toImmutableSet(); selectedSize = filteredMedia.sumOf { it.size } } },
+                        onForceSelect = { item ->
+                            if (!dragSelection.contains(item.id) && dragSelection.size < 5000) {
+                                dragSelection.add(item.id)
+                                selectedSize += item.size
+                                selectedIds = dragSelection.toImmutableSet()
+                            }
+                        },
+                        onSelectAll = { isAllSelected ->
+                            if (isAllSelected) {
+                                dragSelection.clear()
+                                selectedSize = 0L
+                            } else {
+                                dragSelection.clear()
+                                actuallyFilteredMedia.forEach { dragSelection.add(it.id) }
+                                selectedSize = actuallyFilteredMedia.sumOf { it.size }
+                            }
+                            selectedIds = dragSelection.toImmutableSet()
+                        },
                         onMediaClick = { item -> viewModel.openViewer(item.id) },
-                        onMediaLongClick = { if (!isSelectionMode) { isSelectionMode = true; haptic.performHapticFeedback(HapticFeedbackType.LongPress) } },
+                        onMediaLongClick = { if (!isSelectionMode) { isSelectionMode = true } },
                         onToggleFavorite = { viewModel.toggleFavorite(it) },
                         header = {
                             Column(modifier = Modifier.padding(horizontal = 13.dp)) {
                                 BasicTextField(
                                     value = localSearchQuery, onValueChange = { localSearchQuery = it },
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).height(46.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).height(46.dp).clip(CircleShape).background(if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh),
                                     singleLine = true, textStyle = LocalTextStyle.current.copy(fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface),
                                     decorationBox = { innerTextField ->
                                         Row(modifier = Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -830,11 +997,11 @@ fun AlbumDetailScreen(
                                 )
                                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.ALL, label = "All") { mediaFilter = AlbumMediaFilter.ALL }
-                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.PHOTOS, label = "Photos") { mediaFilter = AlbumMediaFilter.PHOTOS }
-                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.VIDEOS, label = "Videos") { mediaFilter = AlbumMediaFilter.VIDEOS }
+                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.ALL, label = "All", isGlassTheme = isGlassTheme) { mediaFilter = AlbumMediaFilter.ALL }
+                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.PHOTOS, label = "Photos", isGlassTheme = isGlassTheme) { mediaFilter = AlbumMediaFilter.PHOTOS }
+                                        SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.VIDEOS, label = "Videos", isGlassTheme = isGlassTheme) { mediaFilter = AlbumMediaFilter.VIDEOS }
                                     }
-                                    Surface(onClick = { activeDialog = DetailUiDialog.Sort }, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                                    Surface(onClick = { activeDialog = DetailUiDialog.Sort }, shape = RoundedCornerShape(16.dp), color = if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh) {
                                         Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                                             Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
                                             Spacer(Modifier.width(6.dp))
@@ -850,18 +1017,18 @@ fun AlbumDetailScreen(
         }
 
         if (isSelectionMode) {
-            Surface(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(), color = MaterialTheme.colorScheme.surface, shadowElevation = 16.dp, shape = RectangleShape) {
+            Surface(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().glassEffect(isGlassTheme), color = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, shadowElevation = 16.dp, shape = RectangleShape) {
                 Row(modifier = Modifier.navigationBarsPadding().padding(horizontal = 8.dp, vertical = 8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") { actions.onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), albumId); isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L }
+                    BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") { actions.onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), albumId); isSelectionMode = false }
                     BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") { shareMediaItems(context, selectedIds.mapNotNull { mediaMap[it] }) }
                     BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Delete", isDestructive = true) { activeDialog = DetailUiDialog.Delete(selectedIds.toList()) }
                     Box {
                         BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showMediaSelectionMenu = true }
-                        DropdownMenu(expanded = showMediaSelectionMenu, onDismissRequest = { showMediaSelectionMenu = false }) {
-                            DropdownMenuItem(text = { Text("Copy to album") }, onClick = { showMediaSelectionMenu = false; actions.onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), albumId); isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L })
-                            if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Details") }, onClick = { showMediaSelectionMenu = false; metadataItemToShow = mediaMap[selectedIds.first()] })
-                            if (albumId == ID_HIDDEN) DropdownMenuItem(text = { Text("Unhide") }, onClick = { showMediaSelectionMenu = false; viewModel.unhideMedia(selectedIds.toList()); Toast.makeText(context, "Items restored", Toast.LENGTH_SHORT).show(); isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L })
-                            else DropdownMenuItem(text = { Text("Hide") }, onClick = { showMediaSelectionMenu = false; viewModel.hideItems(selectedIds.toList()); Toast.makeText(context, "${selectedIds.size} items hidden", Toast.LENGTH_SHORT).show(); isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L })
+                        DropdownMenu(expanded = showMediaSelectionMenu, onDismissRequest = { showMediaSelectionMenu = false }, modifier = Modifier.glassEffect(isGlassTheme)) {
+                            DropdownMenuItem(text = { Text("Copy to album") }, onClick = { showMediaSelectionMenu = false; actions.onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), albumId); isSelectionMode = false }, colors = MenuDefaults.itemColors(Color.Transparent))
+                            if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Details") }, onClick = { showMediaSelectionMenu = false; metadataItemToShow = mediaMap[selectedIds.first()] }, colors = MenuDefaults.itemColors(Color.Transparent))
+                            if (albumId == ID_HIDDEN) DropdownMenuItem(text = { Text("Unhide") }, onClick = { showMediaSelectionMenu = false; viewModel.unhideMedia(selectedIds.toList()); Toast.makeText(context, "Items restored", Toast.LENGTH_SHORT).show(); isSelectionMode = false }, colors = MenuDefaults.itemColors(Color.Transparent))
+                            else DropdownMenuItem(text = { Text("Hide") }, onClick = { showMediaSelectionMenu = false; viewModel.hideItems(selectedIds.toList()); Toast.makeText(context, "${selectedIds.size} items hidden", Toast.LENGTH_SHORT).show(); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(selectedIds); viewModel.forceSync(); isSelectionMode = false }, colors = MenuDefaults.itemColors(Color.Transparent))
                         }
                     }
                 }
@@ -871,19 +1038,19 @@ fun AlbumDetailScreen(
 
     when (val dialog = activeDialog) {
         is DetailUiDialog.DeleteAlbum -> AlertDialog(onDismissRequest = { activeDialog = DetailUiDialog.None }, icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Delete Album?") }, text = { Text("This will delete the manual album placeholder. Any physical media stored within this folder on your device will remain intact.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { actions.onDeleteAlbum?.invoke(albumId); activeDialog = DetailUiDialog.None; actions.onBack() }) { Text("Delete") } }, dismissButton = { TextButton(onClick = { activeDialog = DetailUiDialog.None }) { Text("Cancel") } })
-        is DetailUiDialog.Delete -> AlertDialog(onDismissRequest = { activeDialog = DetailUiDialog.None }, icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Move to Trash?") }, text = { Text("Items will be moved to Trash. They can be recovered within 30 days.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { val itemsToTrash = albumMedia.filter { dialog.mediaIds.contains(it.id) }; trashViewModel.confirmPendingGalleryTrash(itemsToTrash); activeDialog = DetailUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<Long>().toImmutableSet(); selectedSize = 0L; viewModel.closeViewer() }) { Text("Move to Trash") } }, dismissButton = { TextButton(onClick = { activeDialog = DetailUiDialog.None }) { Text("Cancel") } })
-        is DetailUiDialog.GridSize -> ModernGridSheet(currentColumns = detailColumns, max = 8, onDismiss = { activeDialog = DetailUiDialog.None }, onUpdate = { cols: Int -> detailColumns = cols; prefs.edit().putInt("gallery_media_grid_columns", cols).apply() })
-        is DetailUiDialog.Sort -> ModernMediaSortSheet(activeSort = currentPhotoSort, onDismiss = { activeDialog = DetailUiDialog.None }, onSortSelected = { sort: PhotoSort -> currentPhotoSort = sort; activeDialog = DetailUiDialog.None })
+        is DetailUiDialog.Delete -> AlertDialog(onDismissRequest = { activeDialog = DetailUiDialog.None }, icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Move to Trash?") }, text = { Text("Items will be moved to Trash. They can be recovered within 30 days.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { val itemsToTrash = actuallyFilteredMedia.filter { dialog.mediaIds.contains(it.id) }; trashViewModel.confirmPendingGalleryTrash(itemsToTrash); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(dialog.mediaIds); viewModel.forceSync(); activeDialog = DetailUiDialog.None; isSelectionMode = false; viewModel.closeViewer() }) { Text("Move to Trash") } }, dismissButton = { TextButton(onClick = { activeDialog = DetailUiDialog.None }) { Text("Cancel") } })
+        is DetailUiDialog.GridSize -> ModernGridSheet(currentColumns = detailColumns, max = 8, isGlassTheme = isGlassTheme, onDismiss = { activeDialog = DetailUiDialog.None }, onUpdate = { cols: Int -> detailColumns = cols; prefs.edit().putInt("gallery_media_grid_columns", cols).apply() })
+        is DetailUiDialog.Sort -> ModernMediaSortSheet(activeSort = currentPhotoSort, isGlassTheme = isGlassTheme, onDismiss = { activeDialog = DetailUiDialog.None }, onSortSelected = { sort: PhotoSort -> currentPhotoSort = sort; activeDialog = DetailUiDialog.None })
         else -> {}
     }
 
-    if (showRenameSheet && album != null) ModernInputSheet(title = "Rename Album", initial = album.name, onDismiss = { showRenameSheet = false }, onConfirm = { newName: String -> viewModel.renameAlbum(album, newName); showRenameSheet = false })
+    if (showRenameSheet && album != null) ModernInputSheet(title = "Rename Album", initial = album.name, isGlassTheme = isGlassTheme, onDismiss = { showRenameSheet = false }, onConfirm = { newName: String -> viewModel.renameAlbum(album, newName); showRenameSheet = false })
 
-    metadataItemToShow?.let { MediaMetadataSheet(item = it, onDismiss = { metadataItemToShow = null }) }
+    metadataItemToShow?.let { MediaMetadataSheet(item = it, isGlassTheme = isGlassTheme, onDismiss = { metadataItemToShow = null }) }
 
     val openViewerState = viewerState as? GalleryViewerState.Open
     val viewerItemId = openViewerState?.mediaId
-    val stableMediaList = if (viewerState is GalleryViewerState.Open) filteredMedia else emptyList()
+    val stableMediaList = if (viewerState is GalleryViewerState.Open) actuallyFilteredMedia else emptyList()
 
     if (viewerState is GalleryViewerState.Open && stableMediaList.isNotEmpty()) {
         val stableStartIndex = stableMediaList.indexOfFirst { it.id == viewerItemId }.coerceAtLeast(0)
@@ -933,11 +1100,18 @@ fun StatelessAlbumGrid(
     ) {
         itemsIndexed(items = dynamicList, key = { _, album -> album.id }, contentType = { _, _ -> "album" }) { index, album ->
             val isBeingDragged = draggedIndex == index
-            val canDrag = sortOption == AlbumSort.Custom && searchQuery.isBlank() && isSelectionMode && selectedIds.size == 1 && selectedIds.contains(album.id) && !album.id.startsWith("virtual_")
-            val dragModifier = if (canDrag) {
-                Modifier.pointerInput(album.id) {
-                    detectDragGesturesAfterLongPress(
-                        onDragStart = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); draggedIndex = index; dragOffset = Offset.Zero; onDragStateChange(true) },
+            val canSimpleDrag = sortOption == AlbumSort.Custom && searchQuery.isBlank() && isSelectionMode && selectedIds.size == 1 && selectedIds.contains(album.id)
+            val canLongPressDrag = sortOption == AlbumSort.Custom && searchQuery.isBlank() && !canSimpleDrag
+
+            val dragModifier = Modifier.pointerInput(album.id, canSimpleDrag, canLongPressDrag, isSelectionMode) {
+                if (canSimpleDrag) {
+                    detectDragGestures(
+                        onDragStart = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            draggedIndex = index
+                            dragOffset = Offset.Zero
+                            onDragStateChange(true)
+                        },
                         onDrag = { change, dragAmount ->
                             change.consume(); dragOffset += dragAmount
                             val layoutInfo = gridState.layoutInfo; val visibleItems = layoutInfo.visibleItemsInfo; val draggedItemInfo = visibleItems.find { it.index == draggedIndex }
@@ -945,7 +1119,7 @@ fun StatelessAlbumGrid(
                                 val draggedCenterX = draggedItemInfo.offset.x + (draggedItemInfo.size.width / 2) + dragOffset.x.roundToInt()
                                 val draggedCenterY = draggedItemInfo.offset.y + (draggedItemInfo.size.height / 2) + dragOffset.y.roundToInt()
                                 scrollVelocity = when { draggedCenterY < layoutInfo.viewportStartOffset + 180 -> -15f; draggedCenterY > layoutInfo.viewportEndOffset - 180 -> 15f; else -> 0f }
-                                val targetItemInfo = visibleItems.find { it.index != draggedIndex && it.index < dynamicList.size && !dynamicList[it.index].id.startsWith("virtual_") && draggedCenterX in it.offset.x..(it.offset.x + it.size.width) && draggedCenterY in it.offset.y..(it.offset.y + it.size.height) }
+                                val targetItemInfo = visibleItems.find { it.index != draggedIndex && it.index < dynamicList.size && draggedCenterX in it.offset.x..(it.offset.x + it.size.width) && draggedCenterY in it.offset.y..(it.offset.y + it.size.height) }
                                 if (targetItemInfo != null) {
                                     val targetIndex = targetItemInfo.index
                                     dragOffset -= Offset((targetItemInfo.offset.x - draggedItemInfo.offset.x).toFloat(), (targetItemInfo.offset.y - draggedItemInfo.offset.y).toFloat())
@@ -956,22 +1130,58 @@ fun StatelessAlbumGrid(
                                 }
                             }
                         },
-                        onDragEnd = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false) },
+                        onDragEnd = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false); onOrderSaved(dynamicList.toList()) },
+                        onDragCancel = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false) }
+                    )
+                } else if (canLongPressDrag) {
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onAlbumLongClick(album)
+                            draggedIndex = index
+                            dragOffset = Offset.Zero
+                            onDragStateChange(true)
+                        },
+                        onDrag = { change, dragAmount ->
+                            change.consume(); dragOffset += dragAmount
+                            val layoutInfo = gridState.layoutInfo; val visibleItems = layoutInfo.visibleItemsInfo; val draggedItemInfo = visibleItems.find { it.index == draggedIndex }
+                            if (draggedItemInfo != null) {
+                                val draggedCenterX = draggedItemInfo.offset.x + (draggedItemInfo.size.width / 2) + dragOffset.x.roundToInt()
+                                val draggedCenterY = draggedItemInfo.offset.y + (draggedItemInfo.size.height / 2) + dragOffset.y.roundToInt()
+                                scrollVelocity = when { draggedCenterY < layoutInfo.viewportStartOffset + 180 -> -15f; draggedCenterY > layoutInfo.viewportEndOffset - 180 -> 15f; else -> 0f }
+                                val targetItemInfo = visibleItems.find { it.index != draggedIndex && it.index < dynamicList.size && draggedCenterX in it.offset.x..(it.offset.x + it.size.width) && draggedCenterY in it.offset.y..(it.offset.y + it.size.height) }
+                                if (targetItemInfo != null) {
+                                    val targetIndex = targetItemInfo.index
+                                    dragOffset -= Offset((targetItemInfo.offset.x - draggedItemInfo.offset.x).toFloat(), (targetItemInfo.offset.y - draggedItemInfo.offset.y).toFloat())
+                                    val item = dynamicList.removeAt(draggedIndex)
+                                    dynamicList.add(targetIndex, item)
+                                    draggedIndex = targetIndex
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                            }
+                        },
+                        onDragEnd = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false); onOrderSaved(dynamicList.toList()) },
                         onDragCancel = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false) }
                     )
                 }
-            } else Modifier
+            }
 
             Box(modifier = Modifier
+                .animateItem()
                 .zIndex(if (isBeingDragged) 1f else 0f)
-                .graphicsLayer { if (isBeingDragged) { translationX = dragOffset.x; translationY = dragOffset.y; shadowElevation = 24f } }
+                .graphicsLayer {
+                    if (isBeingDragged) {
+                        translationX = dragOffset.x; translationY = dragOffset.y;
+                        scaleX = 1.04f; scaleY = 1.04f; shadowElevation = 16.dp.toPx()
+                    }
+                }
             ) {
                 OptimizedAlbumTile(
                     album = album,
                     previews = albumPreviews[album.id] ?: persistentListOf(),
                     isSelected = selectedIds.contains(album.id),
                     isSelectionMode = isSelectionMode,
-                    canDrag = canDrag,
+                    canDrag = canSimpleDrag || canLongPressDrag,
                     isSdCard = sdCardAlbums.contains(album.id),
                     dragModifier = dragModifier,
                     thumbSize = dynamicThumbSize,
@@ -983,11 +1193,10 @@ fun StatelessAlbumGrid(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun StatelessMediaGrid(
     gridState: LazyGridState, mediaList: ImmutableList<MediaItem>, columnCount: Int, screenWidthPx: Int, isSelectionMode: Boolean, selectedIds: ImmutableSet<Long>, isLowRam: Boolean,
-    onToggleSelection: (MediaItem) -> Unit, onSelectAll: (Boolean) -> Unit, onMediaClick: (MediaItem) -> Unit, onMediaLongClick: () -> Unit, onToggleFavorite: (Long) -> Unit,
+    onToggleSelection: (MediaItem) -> Unit, onForceSelect: (MediaItem) -> Unit, onSelectAll: (Boolean) -> Unit, onMediaClick: (MediaItem) -> Unit, onMediaLongClick: () -> Unit, onToggleFavorite: (Long) -> Unit,
     header: @Composable () -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
@@ -997,8 +1206,97 @@ fun StatelessMediaGrid(
         (raw / 40) * 40
     }
 
+    var autoScrollSpeed by remember { mutableFloatStateOf(0f) }
+    var lastPointerPosition by remember { mutableStateOf<Offset?>(null) }
+
+    fun getMediaItemAt(offset: Offset): MediaItem? {
+        val layoutInfo = gridState.layoutInfo
+        val itemInfo = layoutInfo.visibleItemsInfo.find {
+            it.index > 0 &&
+                    offset.x >= it.offset.x && offset.x <= it.offset.x + it.size.width &&
+                    offset.y >= it.offset.y && offset.y <= it.offset.y + it.size.height
+        }
+        if (itemInfo != null) {
+            val mediaIndex = itemInfo.index - 1
+            if (mediaIndex in mediaList.indices) {
+                return mediaList[mediaIndex]
+            }
+        }
+        return null
+    }
+
+    val currentOnForceSelect by rememberUpdatedState(onForceSelect)
+
+    LaunchedEffect(autoScrollSpeed) {
+        if (autoScrollSpeed != 0f) {
+            while (isActive) {
+                gridState.scrollBy(autoScrollSpeed)
+                lastPointerPosition?.let { pos ->
+                    val item = getMediaItemAt(pos)
+                    if (item != null) {
+                        currentOnForceSelect(item)
+                    }
+                }
+                delay(16)
+            }
+        }
+    }
+
+    val currentIsSelectionMode by rememberUpdatedState(isSelectionMode)
+    val currentOnMediaLongClick by rememberUpdatedState(onMediaLongClick)
+
+    val slideModifier = Modifier.pointerInput(Unit) {
+        detectDragGesturesAfterLongPress(
+            onDragStart = { offset ->
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                if (!currentIsSelectionMode) {
+                    currentOnMediaLongClick()
+                }
+                lastPointerPosition = offset
+                val item = getMediaItemAt(offset)
+                if (item != null) {
+                    currentOnForceSelect(item)
+                }
+            },
+            onDrag = { change, _ ->
+                change.consume()
+                lastPointerPosition = change.position
+                val item = getMediaItemAt(change.position)
+                if (item != null) {
+                    currentOnForceSelect(item)
+                }
+
+                val y = change.position.y
+                val height = size.height
+                val d = density
+
+                val top10 = 10 * d
+                val top25 = 25 * d
+                val top40 = 40 * d
+
+                autoScrollSpeed = when {
+                    y < top10 -> -18f
+                    y < top25 -> -10f
+                    y < top40 -> -5f
+                    y > height - top10 -> 18f
+                    y > height - top25 -> 10f
+                    y > height - top40 -> 5f
+                    else -> 0f
+                }
+            },
+            onDragEnd = {
+                autoScrollSpeed = 0f
+                lastPointerPosition = null
+            },
+            onDragCancel = {
+                autoScrollSpeed = 0f
+                lastPointerPosition = null
+            }
+        )
+    }
+
     LazyVerticalGrid(
-        columns = GridCells.Fixed(columnCount), state = gridState, modifier = Modifier.fillMaxSize(),
+        columns = GridCells.Fixed(columnCount), state = gridState, modifier = Modifier.fillMaxSize().then(slideModifier),
         contentPadding = PaddingValues(start = 3.dp, end = 3.dp, top = 8.dp, bottom = 90.dp), verticalArrangement = Arrangement.spacedBy(3.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)
     ) {
         item(span = { GridItemSpan(maxLineSpan) }, contentType = "header") {
@@ -1013,10 +1311,16 @@ fun StatelessMediaGrid(
         } else {
             items(count = mediaList.size, key = { i -> mediaList[i].id }, contentType = { if (mediaList[it].isVideo) "video" else "photo" }) { index ->
                 val currentItem = mediaList[index]
+                val itemSelected = selectedIds.contains(currentItem.id)
                 ModernMediaGridTile(
-                    modifier = Modifier, item = currentItem, thumbSize = dynamicThumbSize, isSelected = selectedIds.contains(currentItem.id), isSelectionMode = isSelectionMode, isLowRam = isLowRam,
-                    onClick = { if (isSelectionMode) { onToggleSelection(currentItem); haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) } else onMediaClick(currentItem) },
-                    onLongClick = { onMediaLongClick(); onToggleSelection(currentItem) }, onToggleFavorite = { onToggleFavorite(currentItem.id) }
+                    modifier = Modifier, item = currentItem, thumbSize = dynamicThumbSize, isSelected = itemSelected, isSelectionMode = isSelectionMode, isLowRam = isLowRam,
+                    onClick = {
+                        if (isSelectionMode) {
+                            onToggleSelection(currentItem)
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        } else onMediaClick(currentItem)
+                    },
+                    onToggleFavorite = { onToggleFavorite(currentItem.id) }
                 )
             }
         }
@@ -1070,14 +1374,15 @@ private fun OptimizedAlbumTile(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ModernMediaGridTile(
     modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, isLowRam: Boolean,
-    onClick: () -> Unit, onLongClick: () -> Unit, onToggleFavorite: () -> Unit
+    onClick: () -> Unit, onToggleFavorite: () -> Unit
 ) {
     val cornerRadius = 10.dp
-    Box(modifier = modifier.aspectRatio(1f).clip(RoundedCornerShape(cornerRadius)).combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick, onLongClick = onLongClick)) {
+    val scale by animateFloatAsState(targetValue = if (isSelected) 0.85f else 1f, animationSpec = tween(100), label = "scale")
+
+    Box(modifier = modifier.aspectRatio(1f).scale(scale).clip(RoundedCornerShape(cornerRadius)).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)) {
 
         val request = rememberGridImageRequest(uri = item.uri, size = thumbSize, isVideo = item.isVideo)
         AsyncImage(model = request, placeholder = null, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low, modifier = Modifier.fillMaxSize())
@@ -1104,8 +1409,8 @@ fun SelectionOverlay(isSelected: Boolean, isSelectionMode: Boolean, cornerRadius
 }
 
 @Composable
-fun SamsungFilterChip(selected: Boolean, label: String, onClick: () -> Unit) {
-    Surface(onClick = onClick, shape = CircleShape, color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHigh, contentColor = if (selected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface) {
+fun SamsungFilterChip(selected: Boolean, label: String, isGlassTheme: Boolean = false, onClick: () -> Unit) {
+    Surface(onClick = onClick, shape = CircleShape, color = if (selected) MaterialTheme.colorScheme.onSurface else if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh, contentColor = if (selected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface) {
         Text(text = label, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }
@@ -1133,12 +1438,12 @@ fun BottomBarActionItem(icon: ImageVector, label: String, isDestructive: Boolean
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit) {
-    Surface(modifier = Modifier.fillMaxWidth(), tonalElevation = 6.dp, shadowElevation = 10.dp, color = MaterialTheme.colorScheme.surface) {
+fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit, isGlassTheme: Boolean = false) {
+    Surface(modifier = Modifier.fillMaxWidth().glassEffect(isGlassTheme), tonalElevation = 6.dp, shadowElevation = 10.dp, color = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface) {
         Row(modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            FilledIconButton(onClick = onClose, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) { Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaterialTheme.colorScheme.onSurface) }
+            FilledIconButton(onClick = onClose, colors = IconButtonDefaults.filledIconButtonColors(containerColor = if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh)) { Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaterialTheme.colorScheme.onSurface) }
             Spacer(Modifier.width(14.dp))
-            Surface(modifier = Modifier.weight(1f), shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            Surface(modifier = Modifier.weight(1f), shape = RoundedCornerShape(28.dp), color = if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh) {
                 Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(imageVector = Icons.Rounded.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
                     Spacer(Modifier.width(10.dp))
@@ -1155,6 +1460,7 @@ fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> 
 fun ModernAlbumTopBar(
     scrollBehavior: TopAppBarScrollBehavior,
     isAppLockEnabled: Boolean,
+    isGlassTheme: Boolean = false,
     onSearchClick: () -> Unit,
     onMenuAction: (String) -> Unit
 ) {
@@ -1165,9 +1471,10 @@ fun ModernAlbumTopBar(
             IconButton(onClick = onSearchClick) { Icon(imageVector = Icons.Outlined.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.onSurface) }
             Box {
                 IconButton(onClick = { showMenu = true }) { Icon(imageVector = Icons.Rounded.MoreVert, contentDescription = "More", tint = MaterialTheme.colorScheme.onSurface) }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surface)) {
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(24.dp)).glassEffect(isGlassTheme).background(if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface)) {
                     PremiumAlbumMenuItem("Grid Size", Icons.Rounded.GridView) { onMenuAction("grid"); showMenu = false }
                     PremiumAlbumMenuItem("Sort Albums", Icons.AutoMirrored.Filled.Sort) { onMenuAction("sort"); showMenu = false }
+                    PremiumAlbumMenuItem("Theme", Icons.Outlined.Palette) { onMenuAction("theme"); showMenu = false }
                     PremiumAlbumMenuItem("Create Album", Icons.Rounded.CreateNewFolder) { onMenuAction("create"); showMenu = false }
                     HorizontalDivider()
                     PremiumAlbumMenuItem("Duplicates", Icons.Outlined.FileCopy) { onMenuAction("duplicates"); showMenu = false }
@@ -1179,18 +1486,19 @@ fun ModernAlbumTopBar(
                 }
             }
         },
-        scrollBehavior = scrollBehavior, colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = MaterialTheme.colorScheme.surface)
+        scrollBehavior = scrollBehavior, colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface),
+        modifier = Modifier.glassEffect(isGlassTheme)
     )
 }
 
 @Composable
 private fun PremiumAlbumMenuItem(text: String, icon: ImageVector, onClick: () -> Unit) {
-    DropdownMenuItem(text = { Text(text, fontWeight = FontWeight.SemiBold) }, onClick = onClick, leadingIcon = { Box(modifier = Modifier.size(34.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Icon(imageVector = icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp)) } })
+    DropdownMenuItem(text = { Text(text, fontWeight = FontWeight.SemiBold) }, onClick = onClick, leadingIcon = { Box(modifier = Modifier.size(34.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Icon(imageVector = icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp)) } }, colors = MenuDefaults.itemColors(Color.Transparent))
 }
 
 @Composable
 fun EmptyAlbumsOverlay(onCreateClick: () -> Unit) {
-    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(modifier = Modifier.size(112.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Outlined.PhotoAlbum, contentDescription = null, modifier = Modifier.size(58.dp), tint = MaterialTheme.colorScheme.primary) }
             Spacer(Modifier.height(28.dp)); Text(text = "No Albums", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface); Spacer(Modifier.height(10.dp)); Text(text = "Create albums to organize your memories.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center); Spacer(Modifier.height(34.dp))
@@ -1201,8 +1509,8 @@ fun EmptyAlbumsOverlay(onCreateClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModernAlbumSortSheet(activeSort: AlbumSort, onDismiss: () -> Unit, onSortSelected: (AlbumSort) -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { Box(modifier = Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f))) }) {
+fun ModernAlbumSortSheet(activeSort: AlbumSort, isGlassTheme: Boolean = false, onDismiss: () -> Unit, onSortSelected: (AlbumSort) -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme), dragHandle = { Box(modifier = Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f))) }) {
         Column(modifier = Modifier.fillMaxWidth().padding(bottom = 34.dp)) {
             Row(modifier = Modifier.padding(horizontal = 22.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.size(56.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp)) }
@@ -1212,7 +1520,7 @@ fun ModernAlbumSortSheet(activeSort: AlbumSort, onDismiss: () -> Unit, onSortSel
             Spacer(Modifier.height(8.dp))
             AlbumSort.entries.forEach { option ->
                 val isSelected = activeSort == option; val sortLabel = when (option.name) { "DateDesc" -> "Newest First"; "DateAsc" -> "Oldest First"; "NameAsc" -> "A → Z"; "NameDesc" -> "Z → A"; "SizeDesc" -> "Largest First"; "CountDesc" -> "Most Items"; "Custom" -> "Manual Order"; else -> option.name }
-                Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp).clip(RoundedCornerShape(24.dp)).clickable { onSortSelected(option) }, shape = RoundedCornerShape(24.dp), color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = if (isSelected) 4.dp else 0.dp) {
+                Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp).clip(RoundedCornerShape(24.dp)).clickable { onSortSelected(option) }, shape = RoundedCornerShape(24.dp), color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = if (isSelected) 4.dp else 0.dp) {
                     Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(modifier = Modifier.size(28.dp).clip(CircleShape).background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) { Icon(imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)) }
                         Spacer(Modifier.width(16.dp)); Text(text = sortLabel, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface); Spacer(Modifier.weight(1f)); if (isSelected) { Icon(imageVector = Icons.Rounded.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
@@ -1225,8 +1533,8 @@ fun ModernAlbumSortSheet(activeSort: AlbumSort, onDismiss: () -> Unit, onSortSel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModernMediaSortSheet(activeSort: PhotoSort, onDismiss: () -> Unit, onSortSelected: (PhotoSort) -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { Box(modifier = Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f))) }) {
+fun ModernMediaSortSheet(activeSort: PhotoSort, isGlassTheme: Boolean = false, onDismiss: () -> Unit, onSortSelected: (PhotoSort) -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme), dragHandle = { Box(modifier = Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f))) }) {
         Column(modifier = Modifier.fillMaxWidth().padding(bottom = 34.dp)) {
             Row(modifier = Modifier.padding(horizontal = 22.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.size(56.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp)) }
@@ -1236,7 +1544,7 @@ fun ModernMediaSortSheet(activeSort: PhotoSort, onDismiss: () -> Unit, onSortSel
             Spacer(Modifier.height(8.dp))
             PhotoSort.entries.forEach { option ->
                 val isSelected = activeSort == option; val sortLabel = when (option) { PhotoSort.DateDesc -> "Newest First"; PhotoSort.DateAsc -> "Oldest First"; PhotoSort.NameAsc -> "Name (A → Z)"; PhotoSort.NameDesc -> "Name (Z → A)"; PhotoSort.SizeDesc -> "Largest First" }
-                Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp).clip(RoundedCornerShape(24.dp)).clickable { onSortSelected(option) }, shape = RoundedCornerShape(24.dp), color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = if (isSelected) 4.dp else 0.dp) {
+                Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp).clip(RoundedCornerShape(24.dp)).clickable { onSortSelected(option) }, shape = RoundedCornerShape(24.dp), color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = if (isSelected) 4.dp else 0.dp) {
                     Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(modifier = Modifier.size(28.dp).clip(CircleShape).background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) { Icon(imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)) }
                         Spacer(Modifier.width(16.dp)); Text(text = sortLabel, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface); Spacer(Modifier.weight(1f)); if (isSelected) { Icon(imageVector = Icons.Rounded.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
@@ -1249,9 +1557,9 @@ fun ModernMediaSortSheet(activeSort: PhotoSort, onDismiss: () -> Unit, onSortSel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModernGridSheet(currentColumns: Int, max: Int = 8, onDismiss: () -> Unit, onUpdate: (Int) -> Unit) {
+fun ModernGridSheet(currentColumns: Int, max: Int = 8, isGlassTheme: Boolean = false, onDismiss: () -> Unit, onUpdate: (Int) -> Unit) {
     var sliderValue by remember { mutableFloatStateOf(currentColumns.toFloat()) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { Box(modifier = Modifier.padding(top = 10.dp, bottom = 10.dp).width(40.dp).height(4.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f))) }) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme), dragHandle = { Box(modifier = Modifier.padding(top = 10.dp, bottom = 10.dp).width(40.dp).height(4.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f))) }) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp, top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(text = "Grid Layout", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(24.dp))
             Slider(value = sliderValue, onValueChange = { sliderValue = it }, valueRange = 1f..max.toFloat(), steps = (max - 2).coerceAtLeast(0), onValueChangeFinished = { onUpdate(sliderValue.toInt()) }, colors = SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary, inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)))
@@ -1262,16 +1570,16 @@ fun ModernGridSheet(currentColumns: Int, max: Int = 8, onDismiss: () -> Unit, on
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModernCreateAlbumSheet(onDismiss: () -> Unit, onCreate: (String, Boolean) -> Unit) {
+fun ModernCreateAlbumSheet(isGlassTheme: Boolean = false, onDismiss: () -> Unit, onCreate: (String, Boolean) -> Unit) {
     var text by remember { mutableStateOf("") }; var useSdCard by remember { mutableStateOf(false) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { Box(modifier = Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f))) }) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme), dragHandle = { Box(modifier = Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f))) }) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 34.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.size(58.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Rounded.CreateNewFolder, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp)) }
                 Spacer(Modifier.width(16.dp)); Column { Text(text = "Create Album", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Organize your memories", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
             Spacer(Modifier.height(28.dp)); OutlinedTextField(value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(22.dp), label = { Text("Album Name") }, leadingIcon = { Icon(Icons.Rounded.Folder, null) }); Spacer(Modifier.height(18.dp))
-            Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp), color = if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh) {
                 Row(modifier = Modifier.fillMaxWidth().clickable { useSdCard = !useSdCard }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = useSdCard, onCheckedChange = { useSdCard = it }); Spacer(Modifier.width(10.dp)); Column { Text("Create on SD Card", fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(2.dp)); Text(text = "Store album externally", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
@@ -1283,9 +1591,9 @@ fun ModernCreateAlbumSheet(onDismiss: () -> Unit, onCreate: (String, Boolean) ->
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModernInputSheet(title: String, initial: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+fun ModernInputSheet(title: String, initial: String, isGlassTheme: Boolean = false, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var text by remember { mutableStateOf(initial) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme)) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 34.dp)) {
             Text(text = title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Spacer(Modifier.height(24.dp))
             OutlinedTextField(value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(22.dp)); Spacer(Modifier.height(28.dp))
@@ -1296,8 +1604,8 @@ fun ModernInputSheet(title: String, initial: String, onDismiss: () -> Unit, onCo
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ModernSmartDeleteSheet(count: Int, onDismiss: () -> Unit, onDeleteAll: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
+fun ModernSmartDeleteSheet(count: Int, isGlassTheme: Boolean = false, onDismiss: () -> Unit, onDeleteAll: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme)) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 34.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.size(58.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Rounded.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(30.dp)) }
@@ -1314,16 +1622,16 @@ fun ModernSmartDeleteSheet(count: Int, onDismiss: () -> Unit, onDeleteAll: () ->
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) {
+fun MediaMetadataSheet(item: MediaItem, isGlassTheme: Boolean = false, onDismiss: () -> Unit) {
     val context = LocalContext.current; val ds = remember(item) { SimpleDateFormat("EEEE, MMMM dd, yyyy 'at' hh a", Locale.getDefault()).format(Date(item.dateAdded * 1000)) }; val sz = remember(item) { Formatter.formatFileSize(context, item.size) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { Box(modifier = Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f))) }) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = if(isGlassTheme) Color.Transparent else MaterialTheme.colorScheme.surface, modifier = Modifier.glassEffect(isGlassTheme), dragHandle = { Box(modifier = Modifier.padding(top = 10.dp).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f))) }) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 34.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.size(58.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Outlined.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp)) }
                 Spacer(Modifier.width(16.dp)); Column { Text(text = "Media Details", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Information & metadata", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
             Spacer(Modifier.height(28.dp))
-            Surface(shape = RoundedCornerShape(30.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            Surface(shape = RoundedCornerShape(30.dp), color = if(isGlassTheme) Color.White.copy(alpha=0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh) {
                 Column(modifier = Modifier.padding(18.dp)) {
                     MetadataRow(icon = Icons.Outlined.Title, label = "Name", value = item.name); MetadataRow(icon = Icons.Outlined.Folder, label = "Path", value = item.path); MetadataRow(icon = Icons.Outlined.CalendarToday, label = "Date", value = ds); MetadataRow(icon = Icons.Outlined.Storage, label = "Size", value = sz)
                     if (item.width > 0 && item.height > 0) MetadataRow(icon = Icons.Outlined.AspectRatio, label = "Resolution", value = "${item.width} × ${item.height}")
@@ -1348,16 +1656,77 @@ fun FullscreenMediaPager(
     initialIndex: Int, mediaList: List<MediaItem>, mediaMap: Map<Long, MediaItem>, favoriteIds: List<Long>, sharedPlayer: Player,
     onPageChanged: (MediaItem) -> Unit, onClose: () -> Unit, onToggleFavorite: (Long) -> Unit, onEdit: (MediaItem) -> Unit, onPlayVideo: (String, List<String>) -> Unit, onDelete: (MediaItem) -> Unit, onMove: (MediaItem) -> Unit, onCopy: (MediaItem) -> Unit, onWallpaper: (MediaItem) -> Unit
 ) {
-    if (mediaList.isEmpty()) return; val ctx = LocalContext.current; val vi = LocalView.current; val safe = initialIndex.coerceIn(0, maxOf(mediaList.lastIndex, 0)); val st = rememberPagerState(initialPage = safe) { mediaList.size }; var ctrl by remember { mutableStateOf(true) }; var meta by remember { mutableStateOf(false) }; var more by remember { mutableStateOf(false) }; val act = remember { ctx.findActivity() }
-    val vid = remember(mediaList) { mediaList.filter { it.isVideo } }; LaunchedEffect(vid) { if (vid.isNotEmpty()) { sharedPlayer.setMediaItems(vid.map { Media3Item.fromUri(it.uri) }); sharedPlayer.prepare() } }; LaunchedEffect(initialIndex, mediaList.size) { if (st.currentPage != initialIndex && initialIndex in mediaList.indices) st.scrollToPage(initialIndex) }; LaunchedEffect(st.currentPage) { ctrl = true; mediaList.getOrNull(st.currentPage)?.let(onPageChanged) }
-    DisposableEffect(act) { val w = act?.window; if (w != null) { val c = WindowCompat.getInsetsController(w, vi); c.hide(WindowInsetsCompat.Type.systemBars()); c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE }; onDispose { w?.let { WindowCompat.getInsetsController(it, vi).show(WindowInsetsCompat.Type.systemBars()) } } }; BackHandler(enabled = !ctrl) { ctrl = true }; BackHandler(enabled = ctrl) { onClose() }
-    val currId = mediaList.getOrNull(st.currentPage.coerceIn(0, maxOf(mediaList.lastIndex, 0)))?.id; LaunchedEffect(currId) { if (currId == null && mediaList.isNotEmpty()) onClose() }; val curr = remember(currId, mediaMap, mediaList) { currId?.let { mediaMap[it] ?: mediaList.find { i -> i.id == it } } }
+    if (mediaList.isEmpty()) return
+    val ctx = LocalContext.current
+    val vi = LocalView.current
+    val safe = initialIndex.coerceIn(0, maxOf(mediaList.lastIndex, 0))
+    val st = rememberPagerState(initialPage = safe) { mediaList.size }
+    var ctrl by remember { mutableStateOf(true) }
+    var meta by remember { mutableStateOf(false) }
+    var more by remember { mutableStateOf(false) }
+    val act = remember { ctx.findActivity() }
+    val vid = remember(mediaList) { mediaList.filter { it.isVideo } }
+
+    LaunchedEffect(initialIndex, mediaList.size) { if (st.currentPage != initialIndex && initialIndex in mediaList.indices) st.scrollToPage(initialIndex) }
+
+    val performClose = {
+        sharedPlayer.playWhenReady = false
+        sharedPlayer.pause()
+        sharedPlayer.stop()
+        sharedPlayer.clearMediaItems()
+        onClose()
+    }
+
+    val currId = mediaList.getOrNull(st.currentPage.coerceIn(0, maxOf(mediaList.lastIndex, 0)))?.id
+    LaunchedEffect(currId) { if (currId == null && mediaList.isNotEmpty()) performClose() }
+    val curr = remember(currId, mediaMap, mediaList) { currId?.let { mediaMap[it] ?: mediaList.find { i -> i.id == it } } }
+
+    LaunchedEffect(curr) {
+        ctrl = true
+        if (curr != null) {
+            onPageChanged(curr)
+            if (curr.isVideo) {
+                sharedPlayer.setMediaItem(Media3Item.fromUri(curr.uri))
+                sharedPlayer.prepare()
+                sharedPlayer.playWhenReady = false
+            } else {
+                sharedPlayer.playWhenReady = false
+                sharedPlayer.pause()
+                sharedPlayer.stop()
+                sharedPlayer.clearMediaItems()
+            }
+        }
+    }
+
+    DisposableEffect(act) {
+        val w = act?.window
+        if (w != null) {
+            val c = WindowCompat.getInsetsController(w, vi)
+            c.hide(WindowInsetsCompat.Type.systemBars())
+            c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        onDispose { w?.let { WindowCompat.getInsetsController(it, vi).show(WindowInsetsCompat.Type.systemBars()) } }
+    }
+
+    BackHandler(enabled = !ctrl) { ctrl = true }
+    BackHandler(enabled = ctrl) { performClose() }
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         HorizontalPager(state = st, pageSpacing = 18.dp, key = { mediaList[it].id }, modifier = Modifier.fillMaxSize()) { p ->
             val itm = mediaList[p]
-            if (itm.isVideo) VideoPreviewPage(item = itm, videoItems = vid, isCurrentPage = st.currentPage == p, showControls = ctrl, sharedPlayer = sharedPlayer, onTap = { ctrl = !ctrl }, onPlay = { onPlayVideo(itm.uri.toString(), vid.map { it.uri.toString() }) }) else ZoomableImagePage(item = itm, onTap = { ctrl = !ctrl }, onDismiss = onClose, onZoomChanged = {}, onControlsVisibilityChange = { ctrl = it })
+            if (itm.isVideo) {
+                VideoPreviewPage(
+                    item = itm, videoItems = vid, isCurrentPage = st.currentPage == p, showControls = ctrl,
+                    sharedPlayer = sharedPlayer, onTap = { ctrl = !ctrl }, onPlay = { onPlayVideo(itm.uri.toString(), vid.map { it.uri.toString() }) }
+                )
+            } else {
+                ZoomableImagePage(
+                    item = itm, onTap = { ctrl = !ctrl }, onDismiss = { performClose() },
+                    onZoomChanged = {}, onControlsVisibilityChange = { ctrl = it }
+                )
+            }
         }
-        if (ctrl) Box(modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent))).statusBarsPadding().padding(horizontal = 18.dp, vertical = 16.dp)) { Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { FilledIconButton(onClick = onClose, colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.White.copy(alpha = 0.16f))) { Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White) }; Spacer(Modifier.size(48.dp)) } }
+        if (ctrl) Box(modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent))).statusBarsPadding().padding(horizontal = 18.dp, vertical = 16.dp)) { Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { FilledIconButton(onClick = { performClose() }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.White.copy(alpha = 0.16f))) { Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White) }; Spacer(Modifier.size(48.dp)) } }
         if (ctrl && curr != null) Column(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f)))).navigationBarsPadding().padding(bottom = 18.dp)) { Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) { PremiumViewerAction(icon = Icons.Outlined.Edit, label = "Edit") { onEdit(curr) }; PremiumViewerAction(icon = if (favoriteIds.contains(curr.id)) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, label = if (favoriteIds.contains(curr.id)) "Unfavorite" else "Favorite", tint = if (favoriteIds.contains(curr.id)) Color.Red else Color.White) { onToggleFavorite(curr.id) }; PremiumViewerAction(icon = Icons.Outlined.Share, label = "Share") { ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = if (curr.isVideo) "video/*" else "image/*"; putExtra(Intent.EXTRA_STREAM, curr.uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, "Share Media")) }; PremiumViewerAction(icon = Icons.Outlined.Delete, label = "Delete", tint = Color.Red) { onDelete(curr) }; PremiumViewerAction(icon = Icons.Default.MoreVert, label = "More") { more = true } } }
     }
     if (meta && curr != null) MediaMetadataSheet(item = curr) { meta = false }
@@ -1380,8 +1749,40 @@ fun FullscreenMediaPager(
 @OptIn(UnstableApi::class)
 @Composable
 fun VideoPreviewPage(item: MediaItem, videoItems: List<MediaItem>, isCurrentPage: Boolean, showControls: Boolean, sharedPlayer: Player, onTap: () -> Unit, onPlay: () -> Unit) {
-    val ctx = LocalContext.current; var m by rememberSaveable(item.id) { mutableStateOf(true) }; val idx = remember(item.id, videoItems) { videoItems.indexOfFirst { it.id == item.id } }; LaunchedEffect(m) { sharedPlayer.volume = if (m) 0f else 1f }; LaunchedEffect(isCurrentPage) { if (isCurrentPage) { if (idx >= 0 && sharedPlayer.currentMediaItemIndex != idx) sharedPlayer.seekTo(idx, 0); sharedPlayer.playWhenReady = false } else sharedPlayer.pause() }
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) { AndroidView(factory = { PlayerView(ctx).apply { useController = false; setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER); layoutParams = android.view.ViewGroup.LayoutParams(-1, -1) } }, update = { if (it.player != sharedPlayer) it.player = sharedPlayer }, modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onTap = { onTap() }) }); if (showControls) Box(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(bottom = 90.dp)) { Surface(modifier = Modifier.align(Alignment.Center).clickable { sharedPlayer.pause(); onPlay() }, shape = RoundedCornerShape(50.dp), color = Color.Black.copy(alpha = 0.55f)) { Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(text = "Play video", color = Color.White, fontSize = 14.sp) } } } }
+    val ctx = LocalContext.current
+    var m by rememberSaveable(item.id) { mutableStateOf(true) }
+
+    LaunchedEffect(m) { sharedPlayer.volume = if (m) 0f else 1f }
+    LaunchedEffect(isCurrentPage) {
+        if (!isCurrentPage) {
+            sharedPlayer.pause()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(
+            factory = {
+                PlayerView(ctx).apply {
+                    useController = false
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+                    layoutParams = android.view.ViewGroup.LayoutParams(-1, -1)
+                }
+            },
+            update = {
+                if (it.player != sharedPlayer) it.player = sharedPlayer
+            },
+            modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onTap = { onTap() }) }
+        )
+        if (showControls) Box(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(bottom = 90.dp)) {
+            Surface(modifier = Modifier.align(Alignment.Center).clickable { sharedPlayer.pause(); onPlay() }, shape = RoundedCornerShape(50.dp), color = Color.Black.copy(alpha = 0.55f)) {
+                Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(text = "Play video", color = Color.White, fontSize = 14.sp)
+                }
+            }
+        }
+    }
 }
 
 @Composable
