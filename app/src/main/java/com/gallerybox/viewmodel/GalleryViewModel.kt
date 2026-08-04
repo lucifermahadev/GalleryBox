@@ -1257,10 +1257,6 @@ class GalleryViewModel @Inject constructor(
     }
 
     fun deleteAlbum(albumId: String) {
-        if (albumId.startsWith("virtual_")) {
-            _events.trySend(GalleryEvent.ShowToast("Cannot delete virtual albums"))
-            return
-        }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val mediaToTrash = _rawMedia.value.filter { item ->
