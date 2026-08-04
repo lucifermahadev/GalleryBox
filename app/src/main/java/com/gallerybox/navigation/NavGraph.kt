@@ -15,7 +15,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -43,6 +42,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlin.reflect.KClass
+
 import com.gallerybox.ui.screens.ScanLibraryScreen
 import com.gallerybox.ui.screens.album.*
 import com.gallerybox.ui.screens.editor.EditorScreen
@@ -295,6 +295,7 @@ private fun NavGraphBuilder.mainTabs(
         AlbumScreen(
             viewModel = galleryViewModel,
             trashViewModel = trashViewModel,
+            securityViewModel = hiltViewModel(),
             onViewerStateChanged = onViewerStateChanged,
             actions = AlbumActions(
                 onAlbumClick = { a -> nav.navigate(Route.AlbumView(a.id.toSafeRouteArgs())) },
@@ -310,8 +311,7 @@ private fun NavGraphBuilder.mainTabs(
     composable<Route.Stories> {
         StoriesScreen(
             viewModel = galleryViewModel,
-            storyViewModel = hiltViewModel(),
-            trashViewModel = trashViewModel
+            storyViewModel = hiltViewModel()
         )
     }
 
@@ -340,6 +340,27 @@ private fun NavGraphBuilder.albumGraphs(
             albumId = backStack.toRoute<Route.AlbumView>().albumId.fromSafeRouteArgs(),
             viewModel = galleryViewModel,
             trashViewModel = trashViewModel,
+            securityViewModel = hiltViewModel(),
+            onViewerStateChanged = onViewerStateChanged,
+            actions = DetailActions(
+                onBack = { nav.popBackStack() },
+                onNavigateToPhotoEditor = { uri, id -> nav.navigate(Route.MediaEditor(uri.toSafeRouteArgs(), id)) },
+                onNavigateToVideoEditor = { uri, id -> nav.navigate(Route.MediaEditor(uri.toSafeRouteArgs(), id)) },
+                onNavigateToVideoPlayer = navToVid,
+                onNavigateToMoveCopy = { m, ids, src -> nav.navigate(Route.MoveCopy(m, ids, src?.toSafeRouteArgs())) },
+                onNavigateToTrash = { nav.navigate(Route.Trash) },
+                onNavigateToHidden = { nav.navigate(Route.Hidden) },
+                onNavigateToWallpaper = { uri, id -> nav.navigate(Route.Wallpaper(uri.toSafeRouteArgs(), id)) }
+            )
+        )
+    }
+
+    composable<Route.Hidden> {
+        AlbumDetailScreen(
+            albumId = "virtual_hidden",
+            viewModel = galleryViewModel,
+            trashViewModel = trashViewModel,
+            securityViewModel = hiltViewModel(),
             onViewerStateChanged = onViewerStateChanged,
             actions = DetailActions(
                 onBack = { nav.popBackStack() },
@@ -473,9 +494,9 @@ fun BottomNavigationBar(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-        tonalElevation = 10.dp,
-        shadowElevation = 4.dp,
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 8.dp,
+        shadowElevation = 8.dp,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
     ) {
         Row(

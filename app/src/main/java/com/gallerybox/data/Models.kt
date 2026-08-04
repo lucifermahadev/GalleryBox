@@ -665,6 +665,9 @@ abstract class GalleryDao {
     @Query("SELECT * FROM stories ORDER BY createdAt DESC")
     abstract fun getStories(): Flow<List<StoryEntity>>
 
+    @Query("SELECT * FROM stories")
+    abstract suspend fun getStoriesSync(): List<StoryEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun insertStory(story: StoryEntity): Long
 

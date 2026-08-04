@@ -2,10 +2,12 @@
 
 package com.gallerybox.viewmodel
 
+import android.app.Application
+import android.content.Context
 import android.content.ContentUris
 import android.net.Uri
 import android.provider.MediaStore
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gallerybox.data.GalleryDao
 import com.gallerybox.data.MediaItem
@@ -25,7 +27,10 @@ import javax.inject.Inject
 import kotlin.math.*
 
 @HiltViewModel
-class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewModel() {
+class StoryViewModel @Inject constructor(
+    application: Application,
+    private val dao: GalleryDao
+) : AndroidViewModel(application) {
 
     private val _events = Channel<GalleryEvent>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
@@ -33,6 +38,12 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
     private val _mediaMap = MutableStateFlow<Map<Long, MediaItem>>(emptyMap())
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating = _isGenerating.asStateFlow()
+
+    private val _generationProgress = MutableStateFlow(0)
+    val generationProgress = _generationProgress.asStateFlow()
+
+    private val _generationTotal = MutableStateFlow(0)
+    val generationTotal = _generationTotal.asStateFlow()
 
     val stories: StateFlow<List<UiStory>> = combine(dao.getStories(), _mediaMap) { ents, map ->
         ents.mapNotNull { e ->
@@ -74,13 +85,14 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                     subtitle = "${mediaIds.size} selected items",
                     coverUri = coverUri,
                     mediaIdsJson = mediaIds.joinToString(",", "[", "]"),
-                    createdAt = System.currentTimeMillis()
+                    createdAt = System.currentTimeMillis(),
+                    storyType = "MANUAL"
                 )
 
                 dao.insertStory(entity)
-                _events.trySend(GalleryEvent.ShowToast("Story created successfully!"))
+                _events.trySend(GalleryEvent.ShowToast("Memory created successfully!"))
             } catch (e: Exception) {
-                _events.trySend(GalleryEvent.ShowToast("Failed to create story"))
+                _events.trySend(GalleryEvent.ShowToast("Failed to create memory"))
             }
         }
     }
@@ -88,18 +100,53 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
     fun deleteStory(storyId: String) = viewModelScope.launch(Dispatchers.IO) {
         try {
             dao.deleteStory(storyId)
-            _events.trySend(GalleryEvent.ShowToast("Story removed"))
-        } catch (e: Exception) {
-
-        }
+            _events.trySend(GalleryEvent.ShowToast("Memory removed"))
+        } catch (e: Exception) {}
     }
 
-    private fun triggerOfflineStoryGeneration(mediaList: List<MediaItem>) {
+    fun deleteGeneratedMemories() = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            val allStories = dao.getStoriesSync()
+            val generated = allStories.filter { it.storyType != "MANUAL" }
+            generated.forEach { dao.deleteStory(it.id) }
+            _events.trySend(GalleryEvent.ShowToast("All generated memories deleted"))
+        } catch (e: Exception) {}
+    }
+
+    fun refreshMemories() = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            val allStories = dao.getStoriesSync()
+            val generated = allStories.filter { it.storyType != "MANUAL" }
+            generated.forEach { dao.deleteStory(it.id) }
+
+            val prefs = getApplication<Application>().getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putLong("last_memory_scan_time", 0L).apply()
+            prefs.edit().putInt("last_memory_hash", 0).apply()
+
+            triggerOfflineStoryGeneration(_mediaMap.value.values.toList(), force = true)
+        } catch (e: Exception) {}
+    }
+
+    private fun triggerOfflineStoryGeneration(mediaList: List<MediaItem>, force: Boolean = false) {
         if (_isGenerating.value) return
 
         viewModelScope.launch(Dispatchers.IO) {
-            _isGenerating.value = true
             try {
+                val prefs = getApplication<Application>().getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE)
+                val lastScanned = prefs.getLong("last_memory_scan_time", 0L)
+                val lastHash = prefs.getInt("last_memory_hash", 0)
+
+                val currentHash = mediaList.hashCode()
+                val hasNewItems = mediaList.any { (it.dateAdded * 1000L) > lastScanned }
+
+                if (!force && currentHash == lastHash && !hasNewItems) {
+                    return@launch
+                }
+
+                _isGenerating.value = true
+                _generationProgress.value = 0
+                _generationTotal.value = 100
+
                 var memoryIndex = 1
                 fun nextMemoryName(): String = "Memory ${memoryIndex++}"
 
@@ -111,17 +158,17 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 val currentYear = cal.get(Calendar.YEAR)
                 val currentDay = cal.get(Calendar.DAY_OF_YEAR)
 
-                // Helper to chunk large item lists into stories of ~25 items each
                 fun addChunkedStories(baseId: String, items: List<MediaItem>, minItems: Int) {
                     if (items.size < minItems) return
-                    items.chunked(25).forEachIndexed { chunkIndex, chunk ->
+                    items.chunked(35).forEachIndexed { chunkIndex, chunk ->
                         if (chunk.isNotEmpty()) {
                             generatedStories.add(
                                 buildEntity(
                                     idString = "${baseId}_$chunkIndex",
                                     title = nextMemoryName(),
                                     subtitle = "",
-                                    items = chunk
+                                    items = chunk,
+                                    isManual = false
                                 )
                             )
                         }
@@ -138,7 +185,6 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 val rain = mutableListOf<MediaItem>()
                 val bursts = mutableListOf<MediaItem>()
 
-                // Expanded story categories
                 val sunrise = mutableListOf<MediaItem>()
                 val morning = mutableListOf<MediaItem>()
                 val afternoon = mutableListOf<MediaItem>()
@@ -176,7 +222,14 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 val monthFormat = SimpleDateFormat("MMMM yyyy", Locale.US)
                 val currentTimeMs = System.currentTimeMillis()
 
-                for (item in sortedMedia) {
+                _generationTotal.value = sortedMedia.size
+
+                for ((idx, item) in sortedMedia.withIndex()) {
+                    if (idx % 100 == 0) {
+                        _generationProgress.value = idx
+                        yield()
+                    }
+
                     val timeMs = item.dateAdded * 1000L
                     cal.timeInMillis = timeMs
 
@@ -200,7 +253,6 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                     if (pathLower.contains("front") || pathLower.contains("selfie")) selfies.add(item)
                     if (pathLower.contains("rain") || pathLower.contains("monsoon")) rain.add(item)
 
-                    // New category detections
                     if (pathLower.contains("screenrecord")) screenRecords.add(item)
                     if (pathLower.contains("bluetooth")) bluetooth.add(item)
                     if (pathLower.contains("telegram")) telegram.add(item)
@@ -209,17 +261,15 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                     if (pathLower.contains("snapchat")) snapchat.add(item)
                     if (pathLower.contains("edit") || pathLower.contains("snapseed") || pathLower.contains("lightroom") || pathLower.contains("gallerybox")) editedPhotos.add(item)
 
-                    // Time of day
                     when (itemHour) {
                         in 5..7 -> sunrise.add(item)
                         in 8..11 -> morning.add(item)
                         in 12..16 -> afternoon.add(item)
                         in 17..18 -> sunset.add(item)
                         in 19..21 -> evening.add(item)
-                        else -> night.add(item) // 22..4
+                        else -> night.add(item)
                     }
 
-                    // Metadata guesses
                     if (!isVid && item.width > 0 && item.height > 0) {
                         if (item.height > item.width * 1.1) portraits.add(item)
                         else if (item.width > item.height * 1.1) landscapes.add(item)
@@ -227,7 +277,6 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
 
                     if (isVid && item.width * item.height >= 7_000_000) fourK.add(item)
 
-                    // Time relative buckets
                     val diffMs = currentTimeMs - timeMs
                     if (diffMs <= 7L * 24 * 60 * 60 * 1000) last7Days.add(item)
                     if (diffMs <= 30L * 24 * 60 * 60 * 1000) last30Days.add(item)
@@ -246,7 +295,6 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                         }
                     }
 
-                    // Event Clusters
                     if (currentCluster.isEmpty()) {
                         currentCluster.add(item)
                     } else {
@@ -264,12 +312,12 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 if (currentCluster.size >= 4) clusters.add(currentCluster)
                 yield()
 
-                // 1. Add cluster stories
+                _generationProgress.value = sortedMedia.size
+
                 for ((index, cluster) in clusters.withIndex()) {
                     addChunkedStories("auto_trip_$index", cluster, 4)
                 }
 
-                // 2. Add all generic categories (Lowered Thresholds)
                 addChunkedStories("auto_fav", favorites, 5)
                 addChunkedStories("auto_vid", videos, 3)
                 addChunkedStories("auto_screenshots", screenshots, 5)
@@ -281,7 +329,6 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 addChunkedStories("auto_today", todayInHistory, 2)
                 addChunkedStories("auto_weekends", weekends, 6)
 
-                // 3. New specific categories
                 addChunkedStories("auto_sunrise", sunrise, 3)
                 addChunkedStories("auto_morning", morning, 5)
                 addChunkedStories("auto_afternoon", afternoon, 5)
@@ -310,7 +357,6 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
                 val randomMemories = sortedMedia.filter { (currentTimeMs - it.dateAdded * 1000L) > EVENT_THRESHOLD_MS * 10 }.shuffled()
                 addChunkedStories("auto_random", randomMemories, 10)
 
-                // 4. Date and Festival Buckets
                 monthBuckets.forEach { (month, items) ->
                     addChunkedStories("auto_month_${month.replace(" ", "_")}", items, 8)
                 }
@@ -325,15 +371,19 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
 
                 yield()
 
+                val existingIds = dao.getStoriesSync().map { it.id }.toSet()
+
                 if (generatedStories.isNotEmpty()) {
                     generatedStories.forEach { entity ->
-                        try {
-                            dao.insertStory(entity)
-                        } catch (e: Exception) {
-
+                        if (!existingIds.contains(entity.id)) {
+                            try { dao.insertStory(entity) } catch (_: Exception) {}
                         }
                     }
                 }
+
+                prefs.edit().putLong("last_memory_scan_time", System.currentTimeMillis()).apply()
+                prefs.edit().putInt("last_memory_hash", currentHash).apply()
+
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
@@ -342,7 +392,7 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
         }
     }
 
-    private fun buildEntity(idString: String, title: String, subtitle: String, items: List<MediaItem>): StoryEntity {
+    private fun buildEntity(idString: String, title: String, subtitle: String, items: List<MediaItem>, isManual: Boolean = false): StoryEntity {
         val validItems = items.filter { it.id > 0 }
         val bestCover = selectBestCover(validItems)
         val coverUri = bestCover?.uri?.toString() ?: validItems.firstOrNull()?.uri?.toString() ?: ""
@@ -353,7 +403,8 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
             subtitle = subtitle,
             coverUri = coverUri,
             mediaIdsJson = validItems.map { it.id }.joinToString(",", "[", "]"),
-            createdAt = System.currentTimeMillis()
+            createdAt = System.currentTimeMillis(),
+            storyType = if (isManual) "MANUAL" else "AUTO"
         )
     }
 
@@ -380,8 +431,6 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
 
     companion object {
         const val EVENT_THRESHOLD_MS = 21600000L
-        const val TRIP_THRESHOLD_MS = 172800000L
-        const val VACATION_THRESHOLD_MS = 1209600000L
         const val BURST_TIME_WINDOW_MS = 2000L
 
         fun calculateStoryScore(photos: Int, videos: Int, days: Int, favorites: Int): Double {
@@ -392,81 +441,8 @@ class StoryViewModel @Inject constructor(private val dao: GalleryDao) : ViewMode
             return photoScore + videoScore + dayScore + favoriteScore
         }
 
-        fun calculateImportance(mediaCount: Int, duration: Double, ratio: Double): Double {
-            return mediaCount * duration * ratio
-        }
-
-        fun calculateCoverScore(resolution: Double, brightness: Double, aspectRatio: Double, sharpness: Double): Double {
-            val resScore = 0.4 * resolution
-            val brightScore = 0.3 * brightness
-            val ratioScore = 0.2 * aspectRatio
-            val sharpScore = 0.1 * sharpness
-            return resScore + brightScore + ratioScore + sharpScore
-        }
-
-        fun calculateBurstRate(photos: Int, timeMs: Long): Double {
-            if (timeMs <= 0) {
-                return 0.0
-            }
-            return photos.toDouble() / timeMs
-        }
-
-        fun calculateSimilarity(diff: Int, limit: Int = 64): Double {
-            val differenceRatio = diff.toDouble() / limit
-            return 1.0 - differenceRatio
-        }
-
-        fun calculateDragOpacity(dragDist: Float, maxDist: Float = 1000f): Float {
-            val opacity = 1f - (dragDist / maxDist)
-            return opacity.coerceIn(0f, 1f)
-        }
-
-        fun calculateDragScale(dragDist: Float): Float {
-            val scale = 1f - (0.0005f * dragDist)
-            return scale.coerceIn(0.4f, 1f)
-        }
-
-        fun calculateSpringForce(displacement: Float, stiffness: Float = 300f): Float {
-            return -stiffness * displacement
-        }
-
-        fun calculateDampingForce(velocity: Float, damping: Float = 25f): Float {
-            return -damping * velocity
-        }
-
-        fun calculateNextFlingVelocity(velocity: Float, friction: Float = 0.92f): Float {
-            return velocity * friction
-        }
-
-        fun calculateExponentialFade(timeMs: Long, tau: Float = 300f): Float {
-            val decay = -timeMs.toFloat() / tau
-            return exp(decay).coerceIn(0f, 1f)
-        }
-
-        fun calculateThumbnailCacheSize(ramBytes: Long): Int {
-            val tenPercentRam = (0.1 * ramBytes).toLong()
-            val maxLimit = 512L
-            val selectedSize = min(tenPercentRam, maxLimit)
-            return selectedSize.toInt() * 1048576
-        }
-
-        fun calculateThumbnailSampleSize(ratio: Double): Int {
-            if (ratio <= 1.0) {
-                return 1
-            }
-            val exponent = floor(log2(ratio))
-            return 2.0.pow(exponent).toInt()
-        }
-
-        fun calculateBitmapMemory(w: Int, h: Int): Int {
-            val pixels = w * h
-            return pixels * 4
-        }
-
         fun isStoryValid(existing: Int, original: Int): Boolean {
-            if (original <= 0) {
-                return false
-            }
+            if (original <= 0) return false
             val ratio = existing.toDouble() / original
             return ratio >= 0.3
         }

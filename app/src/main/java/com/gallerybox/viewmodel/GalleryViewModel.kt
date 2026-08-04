@@ -60,6 +60,8 @@ const val ID_SCREENSHOTS = "virtual_screenshots"
 const val ID_DOWNLOADS = "virtual_downloads"
 const val ID_WHATSAPP = "virtual_whatsapp"
 const val ID_INSTAGRAM = "virtual_instagram"
+const val ID_VIDEOS = "virtual_videos"
+const val ID_HIDDEN = "virtual_hidden"
 
 fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
     val (height: Int, width: Int) = options.outHeight to options.outWidth
@@ -116,7 +118,7 @@ enum class MergeMode { MOVE, COPY, MOVE_AND_DELETE }
 
 data class ExportAdvanced(val bitrate: Int = 10000000, val fps: Int = 30, val codec: String = "video/avc")
 data class MediaIndexes(val all: List<MediaItem> = emptyList(), val photos: List<MediaItem> = emptyList(), val videos: List<MediaItem> = emptyList(), val gifs: List<MediaItem> = emptyList(), val recent: List<MediaItem> = emptyList())
-private data class FilterState(val f: MediaTypeFilter, val q: String, val s: List<Long>, val t: List<TrashEntity>)
+private data class FilterState(val f: MediaTypeFilter, val q: String, val s: List<Long>, val t: List<TrashEntity>, val h: Set<String>)
 
 data class VideoPlaybackState(
     val uri: String? = null,
@@ -275,6 +277,12 @@ class GalleryViewModel @Inject constructor(
         _playbackState.value = VideoPlaybackState(uri, position, speed, playWhenReady)
     }
 
+    fun setVideoPlaylist(playlist: List<String>) {
+        if (_videoPlaylist.value != playlist) {
+            _videoPlaylist.value = playlist
+        }
+    }
+
     fun openVideo(uri: String) {
         _currentVideo.value = uri
         _currentVideoIndex.value = _videoPlaylist.value.indexOf(uri).takeIf { it >= 0 } ?: 0
@@ -285,6 +293,22 @@ class GalleryViewModel @Inject constructor(
                 speed = 1f,
                 playWhenReady = true
             )
+        }
+    }
+
+    fun playNextVideo(repeatMode: Int = Player.REPEAT_MODE_OFF) {
+        val current = _currentVideo.value ?: return
+        val nextUri = if (repeatMode == Player.REPEAT_MODE_ALL) getNextGlobalVideoRepeat(current) else getNextGlobalVideo(current)
+        if (nextUri != null) {
+            openVideo(nextUri)
+        }
+    }
+
+    fun playPreviousVideo(repeatMode: Int = Player.REPEAT_MODE_OFF) {
+        val current = _currentVideo.value ?: return
+        val prevUri = if (repeatMode == Player.REPEAT_MODE_ALL) getPreviousGlobalVideoRepeat(current) else getPreviousGlobalVideo(current)
+        if (prevUri != null) {
+            openVideo(prevUri)
         }
     }
 
@@ -338,14 +362,14 @@ class GalleryViewModel @Inject constructor(
         result
     }.distinctUntilChanged().flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val pagedMedia: Flow<PagingData<GalleryGridItem>> = combine(_activeFilter, _searchQuery, secureIds, trashBin) { f, q, sec, trash ->
-        FilterState(f, q, sec, trash)
+    val pagedMedia: Flow<PagingData<GalleryGridItem>> = combine(_activeFilter, _searchQuery, secureIds, trashBin, _hiddenAlbums) { f, q, sec, trash, hidden ->
+        FilterState(f, q, sec, trash, hidden)
     }.distinctUntilChanged().flatMapLatest { state ->
         val pageSize = currentPageSize
         val prefetch = maxOf(20, (pageSize * 0.25 * getThermalFactor()).toInt())
         activePagingSources.removeAll { it.invalid }
         Pager(PagingConfig(pageSize = pageSize, prefetchDistance = prefetch, enablePlaceholders = false, initialLoadSize = pageSize, maxSize = pageSize * 4)) {
-            MediaPagingSource(getApplication<Application>().contentResolver, state.f, state.q).also { activePagingSources.add(it) }
+            MediaPagingSource(getApplication<Application>().contentResolver, state.f, state.q, null, state.h).also { activePagingSources.add(it) }
         }.flow.map { pd ->
             val secSet = state.s.toHashSet()
             val trashSet = state.t.map { it.contentUri }.toHashSet()
@@ -580,6 +604,7 @@ class GalleryViewModel @Inject constructor(
 
     fun toggleHiddenAlbum(albumId: String) {
         _hiddenAlbums.update { if (it.contains(albumId)) it - albumId else it + albumId }
+        invalidatePagingSources()
     }
 
     fun clearDuplicates() { _duplicates.value = emptyList() }
@@ -960,10 +985,22 @@ class GalleryViewModel @Inject constructor(
             _events.trySend(GalleryEvent.ShowToast("Cannot delete virtual albums"))
             return
         }
-
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val mediaToTrash = _rawMedia.value.filter { it.bucketId == albumId }
+                val mediaToTrash = _rawMedia.value.filter { item ->
+                    when (albumId) {
+                        ID_FAVORITES -> favoriteIds.value.contains(item.id)
+                        ID_VIDEOS -> item.isVideo
+                        ID_SCREENSHOTS -> item.path.contains("Screenshot", true) || item.path.contains("Screenshots", true)
+                        ID_DOWNLOADS -> item.path.contains("Download", true)
+                        ID_WHATSAPP -> item.path.contains("WhatsApp", true)
+                        ID_INSTAGRAM -> item.path.contains("Instagram", true)
+                        ID_RECENT -> true
+                        ID_CAMERA -> item.bucketName.contains("Camera", true) || item.bucketName.contains("DCIM", true)
+                        else -> item.bucketId == albumId
+                    }
+                }
+
                 if (mediaToTrash.isNotEmpty()) {
                     moveToTrashInternal(mediaToTrash)
                 } else {
@@ -1057,20 +1094,25 @@ class GalleryViewModel @Inject constructor(
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
-            val targetAlbum = TargetAlbum(
-                name = newAlbumName.trim(),
-                relativePath = "Pictures/${newAlbumName.trim()}/",
-                bucketId = ""
-            )
-            val createResult = mediaOpEngine.createAlbum(targetAlbum)
-            if (createResult is MediaOpResult.Success) {
-                performMediaOperation(ids, targetAlbum, isMove = true)
-            } else {
-                if (createResult is MediaOpResult.Failed) {
-                    _events.send(GalleryEvent.ShowToast(createResult.reason))
-                }
-                endFileOperation()
+            val name = newAlbumName.trim()
+            val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+            val albumDir = File(root, name)
+            if (!albumDir.exists()) {
+                albumDir.mkdirs()
             }
+            val bucketId = albumDir.absolutePath.lowercase(Locale.ROOT).hashCode().toString()
+
+            val targetAlbum = TargetAlbum(
+                id = bucketId,
+                name = name,
+                relativePath = "Pictures/$name/",
+                bucketId = bucketId,
+                volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.VOLUME_EXTERNAL_PRIMARY else null
+            )
+
+            try { dao.insertManualAlbum(ManualAlbumEntity(id = bucketId, name = name, hasBeenUsed = true)) } catch (_: Exception) {}
+
+            performMediaOperation(ids, targetAlbum, isMove = true)
         }
     }
 
@@ -1080,20 +1122,25 @@ class GalleryViewModel @Inject constructor(
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
-            val targetAlbum = TargetAlbum(
-                name = newAlbumName.trim(),
-                relativePath = "Pictures/${newAlbumName.trim()}/",
-                bucketId = ""
-            )
-            val createResult = mediaOpEngine.createAlbum(targetAlbum)
-            if (createResult is MediaOpResult.Success) {
-                performMediaOperation(ids, targetAlbum, isMove = false)
-            } else {
-                if (createResult is MediaOpResult.Failed) {
-                    _events.send(GalleryEvent.ShowToast(createResult.reason))
-                }
-                endFileOperation()
+            val name = newAlbumName.trim()
+            val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+            val albumDir = File(root, name)
+            if (!albumDir.exists()) {
+                albumDir.mkdirs()
             }
+            val bucketId = albumDir.absolutePath.lowercase(Locale.ROOT).hashCode().toString()
+
+            val targetAlbum = TargetAlbum(
+                id = bucketId,
+                name = name,
+                relativePath = "Pictures/$name/",
+                bucketId = bucketId,
+                volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.VOLUME_EXTERNAL_PRIMARY else null
+            )
+
+            try { dao.insertManualAlbum(ManualAlbumEntity(id = bucketId, name = name, hasBeenUsed = true)) } catch (_: Exception) {}
+
+            performMediaOperation(ids, targetAlbum, isMove = false)
         }
     }
 
@@ -1437,7 +1484,8 @@ class MediaPagingSource(
     private val contentResolver: ContentResolver,
     private val filter: MediaTypeFilter,
     private val query: String,
-    private val albumId: String? = null
+    private val albumId: String? = null,
+    private val hiddenAlbums: Set<String> = emptySet()
 ) : PagingSource<Int, MediaItem>() {
 
     override fun getRefreshKey(state: PagingState<Int, MediaItem>): Int? = state.anchorPosition?.let {
@@ -1471,6 +1519,12 @@ class MediaPagingSource(
                 val safeQuery = "%$query%"
                 selectionArgsList.add(safeQuery)
                 selectionArgsList.add(safeQuery)
+            }
+
+            if (hiddenAlbums.isNotEmpty()) {
+                val placeholders = hiddenAlbums.joinToString(",") { "?" }
+                selection += " AND ${MediaStore.Files.FileColumns.BUCKET_ID} NOT IN ($placeholders)"
+                selectionArgsList.addAll(hiddenAlbums)
             }
 
             val selArgsArray = if (selectionArgsList.isNotEmpty()) selectionArgsList.toTypedArray() else null

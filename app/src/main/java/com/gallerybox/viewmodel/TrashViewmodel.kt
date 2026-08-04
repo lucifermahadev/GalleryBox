@@ -39,6 +39,8 @@ class TrashViewModel @Inject constructor(
     val operationProgress = _operationProgress.asStateFlow()
 
     @Volatile private var pendingTrashEntities: List<TrashEntity> = emptyList()
+    @Volatile private var pendingDeleteEntities: List<TrashEntity> = emptyList()
+    @Volatile private var pendingDeleteAction: (() -> Unit)? = null
 
     var onRefreshGallery: (suspend () -> Unit)? = null
     var onRefreshMusic: (suspend () -> Unit)? = null
@@ -52,59 +54,97 @@ class TrashViewModel @Inject constructor(
 
     fun confirmPendingAlbumTrash(albums: List<Album>, allMedia: List<MediaItem>) {
         val albumIds = albums.map { it.id }
-        val itemsToTrash = allMedia.filter { it.bucketId in albumIds }
+
+        // Properly match contents for both physical folders AND virtual albums
+        val itemsToTrash = allMedia.filter { item ->
+            albumIds.any { albumId ->
+                when (albumId) {
+                    "virtual_favorites" -> item.isFavorite
+                    "virtual_videos" -> item.isVideo
+                    "virtual_screenshots" -> item.path.contains("Screenshot", true) || item.path.contains("Screenshots", true)
+                    "virtual_downloads" -> item.path.contains("Download", true)
+                    "virtual_whatsapp" -> item.path.contains("WhatsApp", true)
+                    "virtual_instagram" -> item.path.contains("Instagram", true)
+                    "virtual_recent" -> true // Recent includes all media
+                    "virtual_camera" -> item.bucketName.contains("Camera", true) || item.bucketName.contains("DCIM", true)
+                    else -> item.bucketId == albumId
+                }
+            }
+        }
+
         if (itemsToTrash.isNotEmpty()) {
             confirmPendingGalleryTrash(itemsToTrash)
         }
     }
 
     fun onPermissionResultGlobal(granted: Boolean) = viewModelScope.launch(Dispatchers.IO) {
-        if (granted && pendingTrashEntities.isNotEmpty()) {
-
-            val verifiedEntities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                pendingTrashEntities.filter { entity ->
-                    try {
-                        val cursor = resolver.query(
-                            Uri.parse(entity.contentUri),
-                            arrayOf(MediaStore.MediaColumns.IS_TRASHED),
-                            null,
-                            null,
-                            null
-                        )
-                        var isTrashed = false
-                        cursor?.use {
-                            if (it.moveToFirst()) {
-                                isTrashed = it.getInt(0) == 1
+        if (granted) {
+            if (pendingTrashEntities.isNotEmpty()) {
+                val verifiedEntities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    pendingTrashEntities.filter { entity ->
+                        try {
+                            val cursor = resolver.query(
+                                Uri.parse(entity.contentUri),
+                                arrayOf(MediaStore.MediaColumns.IS_TRASHED),
+                                null,
+                                null,
+                                null
+                            )
+                            var isTrashed = false
+                            cursor?.use {
+                                if (it.moveToFirst()) {
+                                    isTrashed = it.getInt(0) == 1
+                                }
                             }
+                            isTrashed
+                        } catch (e: Exception) {
+                            false
                         }
-                        isTrashed
-                    } catch (e: Exception) {
-                        false
+                    }
+                } else {
+                    pendingTrashEntities
+                }
+
+                if (verifiedEntities.isNotEmpty()) {
+                    galleryDao.insertTrashItemsBulk(verifiedEntities)
+                }
+
+                withContext(Dispatchers.Main) {
+                    onRefreshGallery?.invoke()
+                    onRefreshMusic?.invoke()
+                    onRefreshDocuments?.invoke()
+
+                    if (verifiedEntities.size == pendingTrashEntities.size) {
+                        _events.send(GalleryEvent.OperationSuccess)
+                    } else if (verifiedEntities.isNotEmpty()) {
+                        _events.send(GalleryEvent.ShowToast("Operation partially completed. Some items failed to trash."))
+                    } else {
+                        _events.send(GalleryEvent.ShowToast("System rejected the trash request."))
                     }
                 }
-            } else {
-                pendingTrashEntities
-            }
+            } else if (pendingDeleteEntities.isNotEmpty()) {
+                // If permission is granted, the MediaStore system has successfully deleted the items
+                galleryDao.deleteTrashItems(pendingDeleteEntities.map { it.id })
 
-            if (verifiedEntities.isNotEmpty()) {
-                galleryDao.insertTrashItemsBulk(verifiedEntities)
-            }
-
-            withContext(Dispatchers.Main) {
-                onRefreshGallery?.invoke()
-                onRefreshMusic?.invoke()
-                onRefreshDocuments?.invoke()
-
-                if (verifiedEntities.size == pendingTrashEntities.size) {
+                withContext(Dispatchers.Main) {
+                    onRefreshGallery?.invoke()
+                    onRefreshMusic?.invoke()
+                    onRefreshDocuments?.invoke()
+                    pendingDeleteAction?.invoke()
                     _events.send(GalleryEvent.OperationSuccess)
-                } else if (verifiedEntities.isNotEmpty()) {
-                    _events.send(GalleryEvent.ShowToast("Operation partially completed. Some items failed to trash."))
-                } else {
-                    _events.send(GalleryEvent.ShowToast("System rejected the trash request."))
+                }
+            }
+        } else {
+            if (pendingDeleteEntities.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    _events.send(GalleryEvent.ShowToast("Delete permission denied"))
                 }
             }
         }
+
         pendingTrashEntities = emptyList()
+        pendingDeleteEntities = emptyList()
+        pendingDeleteAction = null
     }
 
     fun moveStoriesToTrash(stories: List<UiStory>) = viewModelScope.launch(Dispatchers.IO) {
@@ -209,34 +249,46 @@ class TrashViewModel @Inject constructor(
     fun permanentlyDeleteTrash(items: List<TrashEntity>) = viewModelScope.launch(Dispatchers.IO) {
         if (items.isEmpty()) return@launch
 
-        _operationProgress.value = 0f
-        val successfulDeletes = mutableListOf<Long>()
-        val total = items.size.toFloat()
+        val stories = items.filter { it.mediaType == "story" }
+        val mediaItems = items.filter { it.mediaType != "story" }
 
-        try {
-            items.chunked(100).forEachIndexed { chunkIndex, chunk ->
-                chunk.forEach { item ->
-                    var success = false
+        // Stories are virtual, delete them immediately from Room
+        if (stories.isNotEmpty()) {
+            galleryDao.deleteTrashItems(stories.map { it.id })
+        }
 
-                    if (item.mediaType == "story") {
-                        success = true
-                    } else {
-                        try {
-                            val deletedRows = resolver.delete(Uri.parse(item.contentUri), null, null)
-                            if (deletedRows > 0) {
-                                success = true
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Delete failed for ${item.contentUri}", e)
-                        }
-                    }
+        if (mediaItems.isEmpty()) {
+            withContext(Dispatchers.Main) {
+                onRefreshGallery?.invoke()
+                _events.send(GalleryEvent.OperationSuccess)
+            }
+            return@launch
+        }
 
-                    if (success) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val uris = mediaItems.map { Uri.parse(it.contentUri) }
+                val intentSender = MediaStore.createDeleteRequest(resolver, uris).intentSender
+                pendingDeleteEntities = mediaItems
+                _events.send(GalleryEvent.RequestPermission(intentSender))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create delete request", e)
+                _events.send(GalleryEvent.ShowToast("Failed to initiate delete request: ${e.javaClass.simpleName}"))
+            }
+        } else {
+            // Android 10 and below fallback
+            var successCount = 0
+            val successfulDeletes = mutableListOf<Long>()
+            mediaItems.forEach { item ->
+                try {
+                    val deletedRows = resolver.delete(Uri.parse(item.contentUri), null, null)
+                    if (deletedRows > 0) {
+                        successCount++
                         successfulDeletes.add(item.id)
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Delete failed for ${item.contentUri}", e)
                 }
-
-                _operationProgress.value = ((chunkIndex * 100) + chunk.size) / total
             }
 
             if (successfulDeletes.isNotEmpty()) {
@@ -245,16 +297,12 @@ class TrashViewModel @Inject constructor(
 
             withContext(Dispatchers.Main) {
                 onRefreshGallery?.invoke()
-                if (successfulDeletes.size == items.size) {
+                if (successCount == mediaItems.size) {
                     _events.send(GalleryEvent.OperationSuccess)
                 } else {
-                    _events.send(GalleryEvent.ShowToast("Deleted ${successfulDeletes.size} out of ${items.size} items"))
+                    _events.send(GalleryEvent.ShowToast("Deleted $successCount out of ${mediaItems.size} items"))
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Delete bulk operation failed", e)
-        } finally {
-            _operationProgress.value = null
         }
     }
 
@@ -377,25 +425,40 @@ class TrashViewModel @Inject constructor(
     }
 
     fun permanentlyDeleteSongs(items: List<TrashEntity>, onComplete: (() -> Unit)? = null) = viewModelScope.launch(Dispatchers.IO) {
-        val successfulDeletes = mutableListOf<Long>()
+        if (items.isEmpty()) return@launch
 
-        items.forEach { item ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
-                val deleted = resolver.delete(Uri.parse(item.contentUri), null, null)
-                if (deleted > 0) successfulDeletes.add(item.id)
-            } catch (_: Exception) {}
-        }
+                val uris = items.map { Uri.parse(it.contentUri) }
+                val intentSender = MediaStore.createDeleteRequest(resolver, uris).intentSender
+                pendingDeleteEntities = items
+                pendingDeleteAction = onComplete
+                _events.send(GalleryEvent.RequestPermission(intentSender))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create delete request for music", e)
+                withContext(Dispatchers.Main) { onComplete?.invoke() }
+            }
+        } else {
+            val successfulDeletes = mutableListOf<Long>()
+            items.forEach { item ->
+                try {
+                    val deleted = resolver.delete(Uri.parse(item.contentUri), null, null)
+                    if (deleted > 0) successfulDeletes.add(item.id)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Delete failed for music", e)
+                }
+            }
 
-        if (successfulDeletes.isNotEmpty()) {
-            galleryDao.deleteTrashItems(successfulDeletes)
-        }
+            if (successfulDeletes.isNotEmpty()) {
+                galleryDao.deleteTrashItems(successfulDeletes)
+            }
 
-        withContext(Dispatchers.Main) {
-            onRefreshMusic?.invoke()
-            onComplete?.invoke()
+            withContext(Dispatchers.Main) {
+                onRefreshMusic?.invoke()
+                onComplete?.invoke()
+            }
         }
     }
-
 
     private suspend fun urisFallbackDelete(uris: List<Uri>, entities: List<TrashEntity>, onExecuted: suspend () -> Unit) {
         val successfulUris = mutableListOf<Uri>()

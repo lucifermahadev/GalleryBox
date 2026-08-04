@@ -1,4 +1,4 @@
-@file:Suppress("unused", "UnsafeOptInUsageError")
+@file:Suppress("unused", "UnsafeOptInUsageError", "DEPRECATION")
 
 package com.gallerybox.ui.screens.music
 
@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.*
@@ -31,6 +32,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.*
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.gallerybox.viewmodel.MusicViewModel
@@ -38,33 +40,61 @@ import com.gallerybox.viewmodel.Preset
 import kotlinx.coroutines.launch
 import kotlin.math.*
 
-@OptIn(ExperimentalFoundationApi::class)
+private val WarningAmberColor = Color(0xFFFFA000)
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun EqualizerScreen(viewModel: MusicViewModel = hiltViewModel(), onBack: () -> Unit) {
     var showSaveDialog by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
+
     val enabled by viewModel.eqEnabled.collectAsState()
-    val bgAlpha by animateFloatAsState(if (enabled) 1f else 0.96f, label = "bgAlpha")
     val pagerState = rememberPagerState(pageCount = { 2 })
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
 
-    Surface(Modifier.fillMaxSize(), color = colors.background.copy(alpha = bgAlpha)) {
-        Column(Modifier.fillMaxSize().statusBarsPadding()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = colors.onBackground) }
-                Spacer(Modifier.weight(1f))
-                Row(Modifier.background(colors.surfaceContainerHigh, CircleShape).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TabPill("EQUALIZER", pagerState.currentPage == 0) { scope.launch { pagerState.animateScrollToPage(0) } }
-                    TabPill("EFFECTS", pagerState.currentPage == 1) { scope.launch { pagerState.animateScrollToPage(1) } }
+    Scaffold(
+        containerColor = Color.Transparent,
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text("Equalizer", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = colors.onSurface) },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = colors.onSurface) } },
+                actions = {
+                    Box {
+                        IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More", tint = colors.onSurface) }
+                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.background(colors.surface).clip(RoundedCornerShape(12.dp))) {
+                            DropdownMenuItem(
+                                text = { Text("Save Preset", color = colors.onSurface) },
+                                leadingIcon = { Icon(Icons.Default.Save, null, tint = colors.onSurface) },
+                                onClick = { showMenu = false; showSaveDialog = true }
+                            )
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent)
+            )
+        }
+    ) { paddingValues ->
+        Box(Modifier.fillMaxSize().background(colors.background)) {
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(colors.primary.copy(alpha = 0.05f), colors.background))))
+
+            Column(Modifier.fillMaxSize().padding(paddingValues)) {
+                Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                    Surface(shape = RoundedCornerShape(20.dp), color = colors.surfaceContainerHigh) {
+                        Row(Modifier.height(40.dp).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            TabPill("Equalizer", pagerState.currentPage == 0) { scope.launch { pagerState.animateScrollToPage(0) } }
+                            TabPill("Effects", pagerState.currentPage == 1) { scope.launch { pagerState.animateScrollToPage(1) } }
+                        }
+                    }
                 }
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = { showSaveDialog = true }) { Icon(Icons.Default.Save, "Save", tint = colors.onBackground) }
-            }
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-                if (page == 0) EqTab(viewModel, enabled) else VolTab(viewModel)
+
+                HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+                    if (page == 0) EqTab(viewModel, enabled) else VolTab(viewModel)
+                }
             }
         }
     }
+
     if (showSaveDialog) {
         SavePresetDialog(
             onDismiss = { showSaveDialog = false },
@@ -80,15 +110,17 @@ fun SavePresetDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
     val colors = MaterialTheme.colorScheme
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(28.dp),
         containerColor = colors.surfaceContainerHigh,
-        title = { Text("Save Custom Preset", color = colors.onSurface) },
+        onDismissRequest = onDismiss,
+        title = { Text("Save Custom Preset", color = colors.onSurface, fontWeight = FontWeight.Bold) },
         text = {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
                 label = { Text("Preset Name", color = colors.onSurfaceVariant) },
                 singleLine = true,
+                shape = RoundedCornerShape(16.dp),
                 colors = TextFieldDefaults.colors(
                     focusedTextColor = colors.onSurface,
                     unfocusedTextColor = colors.onSurface,
@@ -107,14 +139,15 @@ fun SavePresetDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
                         onSave(name)
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = colors.primary)
+                colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
+                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp)
             ) {
-                Text("Save", color = colors.onPrimary)
+                Text("Save", color = colors.onPrimary, fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancel", color = colors.onSurfaceVariant)
+                Text("Cancel", color = colors.onSurfaceVariant, fontWeight = FontWeight.Bold)
             }
         }
     )
@@ -125,15 +158,16 @@ fun TabPill(text: String, isSelected: Boolean, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     Box(
         Modifier
-            .clip(CircleShape)
-            .background(if (isSelected) Brush.horizontalGradient(listOf(colors.primaryContainer, colors.secondaryContainer)) else SolidColor(Color.Transparent))
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (isSelected) colors.primary else Color.Transparent)
             .clickable(onClick = onClick)
-            .padding(horizontal = 24.dp, vertical = 8.dp),
+            .padding(horizontal = 24.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = text,
-            color = if (isSelected) colors.onPrimaryContainer else colors.onSurfaceVariant,
+            color = if (isSelected) colors.onPrimary else colors.onSurfaceVariant,
             fontWeight = FontWeight.Bold,
             fontSize = 14.sp
         )
@@ -161,47 +195,90 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
         }
     }
     val colors = MaterialTheme.colorScheme
+    val currentPreset by viewModel.currentPreset.collectAsState(initial = Preset.NORMAL)
 
-    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Enable EQ", color = colors.onBackground, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.width(12.dp))
-                Switch(
-                    checked = enabled,
-                    onCheckedChange = { viewModel.toggleEq(it) },
-                    colors = SwitchDefaults.colors(checkedTrackColor = colors.primary, uncheckedTrackColor = colors.onSurfaceVariant.copy(alpha = 0.3f))
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { viewModel.applyPreset(Preset.NORMAL) }, enabled = enabled) {
-                    Text("Reset", color = if (enabled) colors.primary else colors.onSurfaceVariant, fontWeight = FontWeight.Bold)
+    var expandedPresetMenu by remember { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp).padding(bottom = 48.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Surface(
+                modifier = Modifier.weight(1f).height(80.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = colors.surfaceContainerHigh,
+                shadowElevation = 2.dp
+            ) {
+                Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column {
+                        Text("Equalizer", color = colors.onSurface, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("Improve sound quality", color = colors.onSurfaceVariant, fontSize = 13.sp)
+                    }
+                    Switch(
+                        checked = enabled,
+                        onCheckedChange = { viewModel.toggleEq(it) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = colors.primary, uncheckedTrackColor = colors.onSurfaceVariant.copy(alpha = 0.3f))
+                    )
                 }
-                PresetSelector(viewModel)
+            }
+
+            Surface(
+                modifier = Modifier.weight(0.6f).height(80.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = colors.surfaceContainerHigh,
+                shadowElevation = 2.dp
+            ) {
+                Box {
+                    Column(
+                        Modifier.fillMaxSize().clickable { expandedPresetMenu = true }.padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text("Preset", color = colors.onSurfaceVariant, fontSize = 13.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(currentPreset.name, color = colors.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Icon(Icons.Default.ArrowDropDown, null, tint = colors.primary)
+                        }
+                    }
+                    DropdownMenu(expanded = expandedPresetMenu, onDismissRequest = { expandedPresetMenu = false }, modifier = Modifier.background(colors.surfaceContainerHigh).clip(RoundedCornerShape(12.dp))) {
+                        Preset.entries.forEach { p ->
+                            DropdownMenuItem(
+                                text = { Text(p.name, color = colors.onSurface) },
+                                onClick = {
+                                    viewModel.applyPreset(p)
+                                    expandedPresetMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
             }
         }
-        Spacer(Modifier.height(16.dp))
-        EqCurveGraph(bands = bands, enabled = enabled, labels = freqs)
 
-        AnimatedVisibility(visible = isDistorting && enabled, enter = expandVertically(), exit = shrinkVertically()) {
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = 12.dp).background(colors.errorContainer, RoundedCornerShape(20.dp)).padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Icon(Icons.Rounded.WarningAmber, "Warning", tint = colors.onErrorContainer, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("High gain may cause audio clipping", color = colors.onErrorContainer, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(24.dp))
+
+        Box(contentAlignment = Alignment.Center) {
+            EqCurveGraph(bands = bands, enabled = enabled, labels = freqs)
+
+            this@Column.AnimatedVisibility(visible = isDistorting && enabled, enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
+                Surface(
+                    shape = CircleShape,
+                    color = WarningAmberColor.copy(alpha = 0.15f),
+                    modifier = Modifier.padding(bottom = 16.dp)
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.WarningAmber, "Warning", tint = WarningAmberColor, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("High gain may cause audio clipping", color = WarningAmberColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
 
         Spacer(Modifier.height(24.dp))
 
         Row(Modifier.weight(1f).fillMaxWidth().alpha(if (enabled) 1f else 0.4f)) {
-            Column(Modifier.fillMaxHeight().padding(end = 12.dp, bottom = 28.dp, top = 22.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.End) {
-                Text("+15", fontSize = 10.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Bold)
-                Text(" 0", fontSize = 10.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Bold)
-                Text("-15", fontSize = 10.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Bold)
+            Column(Modifier.fillMaxHeight().padding(end = 12.dp, bottom = 24.dp, top = 14.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.End) {
+                Text("+15", fontSize = 11.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Medium)
+                Text("0", fontSize = 11.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Medium)
+                Text("-15", fontSize = 11.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Medium)
             }
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceBetween) {
                 for (i in 0 until bandsSize) {
@@ -216,11 +293,33 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
             }
         }
 
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(24.dp))
 
-        Row(Modifier.fillMaxWidth().padding(bottom = 32.dp).alpha(if (enabled) 1f else 0.4f), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            RotaryKnob("BASS BOOST", enabled, viewModel.bassBoost) { viewModel.updateBass(it) }
-            RotaryKnob("SURROUND", enabled, viewModel.virtualizer) { viewModel.updateVirtualizer(it) }
+        Row(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            KnobCard("Bass Boost", viewModel.bassBoost, enabled) { viewModel.updateBass(it) }
+            Spacer(Modifier.width(16.dp))
+            KnobCard("Surround", viewModel.virtualizer, enabled) { viewModel.updateVirtualizer(it) }
+        }
+    }
+}
+
+@Composable
+fun KnobCard(title: String, valueFlow: kotlinx.coroutines.flow.StateFlow<Float>, enabled: Boolean, onValueChange: (Float) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val value by valueFlow.collectAsState()
+
+    Surface(
+        modifier = Modifier.width(140.dp),
+        shape = RoundedCornerShape(20.dp),
+        color = colors.surfaceContainerHigh,
+        shadowElevation = 2.dp
+    ) {
+        Column(Modifier.padding(vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            RotaryKnob(enabled = enabled, value = value, onValueChange = onValueChange)
+            Spacer(Modifier.height(16.dp))
+            Text(title, color = if (enabled) colors.onSurface else colors.onSurfaceVariant, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text("${(value * 100).toInt()}%", color = colors.primary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -232,64 +331,87 @@ fun VolTab(viewModel: MusicViewModel) {
     val currentReverb by viewModel.reverbPreset.collectAsState()
     val reverbNames = listOf("Off", "Small Room", "Med Room", "Large Room", "Med Hall", "Large Hall", "Plate")
     val reverbMap = remember { listOf(PresetReverb.PRESET_NONE, PresetReverb.PRESET_SMALLROOM, PresetReverb.PRESET_MEDIUMROOM, PresetReverb.PRESET_LARGEROOM, PresetReverb.PRESET_MEDIUMHALL, PresetReverb.PRESET_LARGEHALL, PresetReverb.PRESET_PLATE) }
+    val colors = MaterialTheme.colorScheme
 
-    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp).verticalScroll(rememberScrollState())) {
-        Spacer(Modifier.height(16.dp))
-        EqSectionHeader("MASTER VOLUME")
-        Spacer(Modifier.height(16.dp))
+    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 8.dp).verticalScroll(rememberScrollState())) {
 
-        CustomSlider(vol) { viewModel.updateVolume(it) }
-
-        Spacer(Modifier.height(48.dp))
-        EqSectionHeader("ENVIRONMENT (REVERB)")
-        Spacer(Modifier.height(16.dp))
-
-        FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = 3, horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            reverbNames.forEachIndexed { i, name ->
-                val presetConst = reverbMap.getOrElse(i) { PresetReverb.PRESET_NONE }
-                ReverbBtn(name, currentReverb == presetConst) { viewModel.setReverb(presetConst) }
+        Surface(shape = RoundedCornerShape(20.dp), color = colors.surfaceContainerHigh, shadowElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(24.dp)) {
+                Text("Master Volume", color = colors.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(24.dp))
+                CustomSlider(vol) { viewModel.updateVolume(it) }
             }
         }
+
+        Spacer(Modifier.height(24.dp))
+
+        Surface(shape = RoundedCornerShape(20.dp), color = colors.surfaceContainerHigh, shadowElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(24.dp)) {
+                Text("Environment (Reverb)", color = colors.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(24.dp))
+                FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = 3, horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    reverbNames.forEachIndexed { i, name ->
+                        val presetConst = reverbMap.getOrElse(i) { PresetReverb.PRESET_NONE }
+                        ReverbChip(name, currentReverb == presetConst) { viewModel.setReverb(presetConst) }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(48.dp))
     }
 }
 
 @Composable
 fun EqCurveGraph(bands: List<Float>, enabled: Boolean, labels: List<String>) {
     val colors = MaterialTheme.colorScheme
-    val grad = Brush.horizontalGradient(listOf(colors.primary, colors.secondary))
+    val grad = Brush.verticalGradient(listOf(colors.primary.copy(alpha = 0.6f), Color.Transparent))
 
     Column {
-        Canvas(Modifier.fillMaxWidth().height(100.dp).alpha(if (enabled) 1f else 0.4f).clip(RoundedCornerShape(20.dp))) {
-            drawRoundRect(color = colors.surfaceContainerHigh, cornerRadius = CornerRadius(20.dp.toPx()))
-            if (bands.size < 2) return@Canvas
+        Box(Modifier.fillMaxWidth().height(140.dp).alpha(if (enabled) 1f else 0.4f).clip(RoundedCornerShape(20.dp))) {
+            Canvas(Modifier.fillMaxSize()) {
+                drawRoundRect(color = colors.surfaceContainerHigh, cornerRadius = CornerRadius(20.dp.toPx()))
+                if (bands.size < 2) return@Canvas
 
-            val path = Path()
-            val spacing = size.width / (bands.size - 1).coerceAtLeast(1)
+                val path = Path()
+                val spacing = size.width / (bands.size - 1).coerceAtLeast(1)
 
-            bands.forEachIndexed { i, lvl ->
-                val x = i * spacing
-                val y = size.height - (lvl * size.height)
-                if (i == 0) path.moveTo(x, y)
-                else {
-                    val pX = (i - 1) * spacing
-                    val pY = size.height - (bands[i - 1] * size.height)
-                    val cX = pX + spacing / 2
-                    path.cubicTo(cX, pY, cX, y, x, y)
+                bands.forEachIndexed { i, lvl ->
+                    val x = i * spacing
+                    val y = size.height - (lvl * size.height)
+                    if (i == 0) path.moveTo(x, y)
+                    else {
+                        val pX = (i - 1) * spacing
+                        val pY = size.height - (bands[i - 1] * size.height)
+                        val cX = pX + spacing / 2
+                        path.cubicTo(cX, pY, cX, y, x, y)
+                    }
                 }
+
+                val dash = PathEffect.dashPathEffect(floatArrayOf(10f, 10f))
+                val lineCol = colors.onSurfaceVariant.copy(alpha = 0.2f)
+
+                drawLine(lineCol, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), 1.dp.toPx(), pathEffect = dash)
+                drawLine(lineCol, Offset(0f, size.height / 4), Offset(size.width, size.height / 4), 1.dp.toPx(), pathEffect = dash)
+                drawLine(lineCol, Offset(0f, size.height - size.height / 4), Offset(size.width, size.height - size.height / 4), 1.dp.toPx(), pathEffect = dash)
+
+                // Soft fill under the curve
+                val fillPath = Path().apply {
+                    addPath(path)
+                    lineTo(size.width, size.height)
+                    lineTo(0f, size.height)
+                    close()
+                }
+                drawPath(fillPath, grad)
+
+                // Main line stroke
+                drawPath(path, color = colors.primary, style = Stroke(4.dp.toPx(), cap = StrokeCap.Round))
             }
-
-            val dash = PathEffect.dashPathEffect(floatArrayOf(10f, 10f))
-            val lineCol = colors.onSurfaceVariant.copy(alpha = 0.2f)
-
-            drawLine(lineCol, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), 1.dp.toPx(), pathEffect = dash)
-            drawLine(lineCol, Offset(0f, size.height / 4), Offset(size.width, size.height / 4), 1.dp.toPx(), pathEffect = dash)
-            drawLine(lineCol, Offset(0f, size.height - size.height / 4), Offset(size.width, size.height - size.height / 4), 1.dp.toPx(), pathEffect = dash)
-            drawPath(path, grad, style = Stroke(4.dp.toPx(), cap = StrokeCap.Round))
         }
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(labels.firstOrNull() ?: "", fontSize = 10.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Bold)
-            Text(labels.getOrNull(labels.size / 2) ?: "", fontSize = 10.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Bold)
-            Text(labels.lastOrNull() ?: "", fontSize = 10.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            labels.forEach { label ->
+                Text(label, fontSize = 11.sp, color = colors.onSurfaceVariant, fontWeight = FontWeight.Medium)
+            }
         }
     }
 }
@@ -307,7 +429,6 @@ fun VerticalEqSlider(modifier: Modifier, levelProvider: () -> Float, enabled: Bo
     var dragLevel by remember { mutableFloatStateOf(rawLevel) }
     var lastSent by remember { mutableFloatStateOf(rawLevel) }
 
-    // Sync external changes when not actively dragging
     LaunchedEffect(rawLevel) {
         if (!isDragging) {
             dragLevel = rawLevel
@@ -315,7 +436,6 @@ fun VerticalEqSlider(modifier: Modifier, levelProvider: () -> Float, enabled: Bo
         }
     }
 
-    // OPTIMIZATION: Snap instantly during drag to prevent input latency. Animate only on external preset changes.
     val displayLevel by animateFloatAsState(
         targetValue = if (isDragging) dragLevel else rawLevel,
         animationSpec = if (isDragging) snap() else tween(300, easing = FastOutSlowInEasing),
@@ -326,14 +446,6 @@ fun VerticalEqSlider(modifier: Modifier, levelProvider: () -> Float, enabled: Bo
     val isBoosted = abs(dbValue) > 10
 
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier) {
-        Text(
-            text = if (dbValue > 0) "+$dbValue" else "$dbValue",
-            color = if (dbValue == 0) colors.onSurfaceVariant else colors.onBackground,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(Modifier.height(8.dp))
-
         Box(
             Modifier
                 .weight(1f)
@@ -388,43 +500,26 @@ fun VerticalEqSlider(modifier: Modifier, levelProvider: () -> Float, enabled: Bo
                 drawLine(colors.onSurfaceVariant.copy(alpha = 0.4f), Offset(cX - 12f, size.height / 2), Offset(cX + 12f, size.height / 2), 3f)
 
                 if (enabled) {
-                    if (isBoosted) {
-                        drawRoundRect(colors.errorContainer.copy(alpha = 0.5f), Offset(cX - tW, size.height * (1f - displayLevel)), Size(tW * 2, size.height * displayLevel), CornerRadius(10f))
-                    }
                     drawRoundRect(grad, Offset(cX - tW / 2, size.height * (1f - displayLevel)), Size(tW, size.height * displayLevel), CornerRadius(10f))
                 }
             }
 
-            val handleH = 24.dp
+            val handleH = 28.dp
             val handleY = if (height > 0) (height - with(density) { handleH.toPx() }) * (1f - displayLevel) else 0f
 
-            // OPTIMIZATION: Reduced max shadow to 4.dp to prevent GPU rendering lag
             Box(
                 Modifier
                     .offset { IntOffset(0, handleY.toInt()) }
-                    .size(36.dp, handleH)
-                    .shadow(if (isDragging) 4.dp else 2.dp, RoundedCornerShape(12.dp))
-                    .background(colors.surface, RoundedCornerShape(12.dp))
-                    .border(1.dp, colors.outlineVariant, RoundedCornerShape(12.dp))
-            ) {
-                Box(
-                    Modifier
-                        .align(Alignment.Center)
-                        .height(3.dp)
-                        .fillMaxWidth(0.5f)
-                        .background(if (enabled) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.5f), CircleShape)
-                )
-            }
+                    .size(28.dp, handleH)
+                    .background(colors.primary, CircleShape)
+                    .border(2.dp, colors.surface, CircleShape)
+            )
         }
-
-        Spacer(Modifier.height(12.dp))
-        Text(label, color = colors.onSurfaceVariant, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
 }
 
 @Composable
-fun RotaryKnob(label: String, enabled: Boolean = true, valueFlow: kotlinx.coroutines.flow.StateFlow<Float>, onValueChange: (Float) -> Unit) {
-    val value by valueFlow.collectAsState()
+fun RotaryKnob(enabled: Boolean = true, value: Float, onValueChange: (Float) -> Unit) {
     val view = LocalView.current
     val density = LocalDensity.current
     val colors = MaterialTheme.colorScheme
@@ -441,112 +536,68 @@ fun RotaryKnob(label: String, enabled: Boolean = true, valueFlow: kotlinx.corout
         }
     }
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(
-            Modifier
-                .size(100.dp)
-                .pointerInput(enabled) {
-                    if (!enabled) return@pointerInput
-                    detectVerticalDragGestures(
-                        onDragStart = { isDragging = true },
-                        onDragEnd = {
-                            isDragging = false
-                            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                        },
-                        onDragCancel = { isDragging = false }
-                    ) { c, d ->
-                        c.consume()
-                        val n = (internalValue - d / scale).coerceIn(0f, 1f)
-                        internalValue = n
-                        if (abs(n - lastSent) > 0.02f) {
-                            lastSent = n
-                            onValueChange(n)
-                        }
-                    }
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Canvas(Modifier.fillMaxSize()) {
-                val r = size.minDimension / 2.5f
-                val a = internalValue * 270f
-
-                for (i in 0..15) {
-                    val dA = (135f + i * (270f / 15)) * (PI / 180f)
-                    val act = (i / 15f) <= internalValue && enabled
-                    drawCircle(if (act) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.3f), 4f, Offset(center.x + (r + 20f) * cos(dA).toFloat(), center.y + (r + 20f) * sin(dA).toFloat()))
-                }
-
-                drawCircle(colors.surfaceContainerHigh, r)
-                drawCircle(colors.primaryContainer, r, style = Stroke(3f))
-
-                val iA = (135f + a) * (PI / 180f)
-                drawCircle(if (enabled) colors.primary else colors.onSurfaceVariant, 6f, Offset(center.x + (r * 0.7f) * cos(iA).toFloat(), center.y + (r * 0.7f) * sin(iA).toFloat()))
-            }
-        }
-
-        Spacer(Modifier.height(12.dp))
-        Text(label, color = if (enabled) colors.onBackground else colors.onSurfaceVariant, fontSize = 11.sp, fontWeight = FontWeight.Black)
-        Text("${(internalValue * 100).toInt()}%", color = colors.onSurfaceVariant, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-fun PresetSelector(viewModel: MusicViewModel) {
-    var expanded by remember { mutableStateOf(false) }
-    val current by viewModel.currentPreset.collectAsState(initial = Preset.NORMAL)
-    val colors = MaterialTheme.colorScheme
-
-    Box {
-        Row(
-            Modifier
-                .background(Brush.horizontalGradient(listOf(colors.primaryContainer, colors.secondaryContainer)), RoundedCornerShape(20.dp))
-                .clip(RoundedCornerShape(20.dp))
-                .clickable { expanded = true }
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(current.name, color = colors.onPrimaryContainer, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            Icon(Icons.Default.ArrowDropDown, null, tint = colors.onPrimaryContainer)
-        }
-
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.background(colors.surfaceContainerHigh)) {
-            Preset.entries.forEach { p ->
-                DropdownMenuItem(
-                    text = { Text(p.name, color = colors.onSurface) },
-                    onClick = {
-                        viewModel.applyPreset(p)
-                        expanded = false
-                    }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun ReverbBtn(text: String, active: Boolean, onClick: () -> Unit) {
-    val view = LocalView.current
-    val colors = MaterialTheme.colorScheme
-
     Box(
         Modifier
-            .height(48.dp)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(if (active) Brush.horizontalGradient(listOf(colors.primaryContainer, colors.secondaryContainer)) else SolidColor(colors.surfaceContainerHigh))
-            .clickable {
-                onClick()
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            .size(72.dp)
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectVerticalDragGestures(
+                    onDragStart = { isDragging = true },
+                    onDragEnd = {
+                        isDragging = false
+                        view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    },
+                    onDragCancel = { isDragging = false }
+                ) { c, d ->
+                    c.consume()
+                    val n = (internalValue - d / scale).coerceIn(0f, 1f)
+                    internalValue = n
+                    if (abs(n - lastSent) > 0.02f) {
+                        lastSent = n
+                        onValueChange(n)
+                    }
+                }
             },
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = text,
-            color = if (active) colors.onPrimaryContainer else colors.onSurfaceVariant,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(4.dp)
-        )
+        val animatedRotation by animateFloatAsState(targetValue = internalValue * 270f, label = "knobRotation")
+
+        Canvas(Modifier.fillMaxSize()) {
+            val r = size.minDimension / 2.5f
+
+            for (i in 0..15) {
+                val dA = (135f + i * (270f / 15)) * (PI / 180f)
+                val act = (i / 15f) <= internalValue && enabled
+                drawCircle(if (act) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.3f), 4f, Offset(center.x + (r + 14f) * cos(dA).toFloat(), center.y + (r + 14f) * sin(dA).toFloat()))
+            }
+
+            drawCircle(colors.surfaceContainerHighest, r)
+            drawCircle(colors.primaryContainer, r, style = Stroke(3f))
+
+            val iA = (135f + animatedRotation) * (PI / 180f)
+            drawCircle(if (enabled) colors.primary else colors.onSurfaceVariant, 6f, Offset(center.x + (r * 0.7f) * cos(iA).toFloat(), center.y + (r * 0.7f) * sin(iA).toFloat()))
+        }
+    }
+}
+
+@Composable
+fun ReverbChip(text: String, active: Boolean, onClick: () -> Unit) {
+    val view = LocalView.current
+    val colors = MaterialTheme.colorScheme
+
+    Surface(
+        onClick = {
+            onClick()
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        },
+        shape = CircleShape,
+        color = if (active) colors.primary else colors.surfaceContainerHighest,
+        contentColor = if (active) colors.onPrimary else colors.onSurface,
+        modifier = Modifier.height(36.dp)
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 16.dp)) {
+            Text(text = text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -556,7 +607,7 @@ fun CustomSlider(value: Float, onValueChange: (Float) -> Unit) {
     val colors = MaterialTheme.colorScheme
 
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.AutoMirrored.Rounded.VolumeUp, "Volume", tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp))
+        Icon(Icons.AutoMirrored.Rounded.VolumeUp, "Volume", tint = colors.onSurfaceVariant, modifier = Modifier.size(24.dp))
         Spacer(Modifier.width(16.dp))
 
         Slider(
@@ -568,17 +619,6 @@ fun CustomSlider(value: Float, onValueChange: (Float) -> Unit) {
         )
 
         Spacer(Modifier.width(16.dp))
-        Text("${(temp * 100).toInt()}%", color = colors.onBackground, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(40.dp))
+        Text("${(temp * 100).toInt()}%", color = colors.onBackground, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(48.dp))
     }
-}
-
-@Composable
-private fun EqSectionHeader(text: String) {
-    Text(
-        text = text,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.Black,
-        letterSpacing = 1.5.sp
-    )
 }

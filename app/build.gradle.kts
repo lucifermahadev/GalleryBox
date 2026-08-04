@@ -23,7 +23,7 @@ android {
         applicationId = "com.gallerybox"
         minSdk = 31
         targetSdk = 35
-        versionCode = 84
+        versionCode = 83
 
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -166,7 +166,7 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.foundation:foundation-layout")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation(libs.androidx.compose.material.icons)
 
     // Compose Animation & Lottie
     implementation("androidx.compose.animation:animation")
