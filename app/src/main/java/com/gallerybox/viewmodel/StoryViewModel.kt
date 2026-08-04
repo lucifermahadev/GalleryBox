@@ -25,6 +25,7 @@ import java.util.Locale
 import java.util.UUID
 import javax.inject.Inject
 import kotlin.math.*
+import kotlin.random.Random
 
 @HiltViewModel
 class StoryViewModel @Inject constructor(
@@ -104,25 +105,10 @@ class StoryViewModel @Inject constructor(
         } catch (e: Exception) {}
     }
 
-    fun deleteGeneratedMemories() = viewModelScope.launch(Dispatchers.IO) {
-        try {
-            val allStories = dao.getStoriesSync()
-            val generated = allStories.filter { it.storyType != "MANUAL" }
-            generated.forEach { dao.deleteStory(it.id) }
-            _events.trySend(GalleryEvent.ShowToast("All generated memories deleted"))
-        } catch (e: Exception) {}
-    }
-
     fun refreshMemories() = viewModelScope.launch(Dispatchers.IO) {
         try {
-            val allStories = dao.getStoriesSync()
-            val generated = allStories.filter { it.storyType != "MANUAL" }
-            generated.forEach { dao.deleteStory(it.id) }
-
             val prefs = getApplication<Application>().getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE)
             prefs.edit().putLong("last_memory_scan_time", 0L).apply()
-            prefs.edit().putInt("last_memory_hash", 0).apply()
-
             triggerOfflineStoryGeneration(_mediaMap.value.values.toList(), force = true)
         } catch (e: Exception) {}
     }
@@ -134,12 +120,9 @@ class StoryViewModel @Inject constructor(
             try {
                 val prefs = getApplication<Application>().getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE)
                 val lastScanned = prefs.getLong("last_memory_scan_time", 0L)
-                val lastHash = prefs.getInt("last_memory_hash", 0)
 
-                val currentHash = mediaList.hashCode()
-                val hasNewItems = mediaList.any { (it.dateAdded * 1000L) > lastScanned }
-
-                if (!force && currentHash == lastHash && !hasNewItems) {
+                // Only generate once every 24 hours unless forced
+                if (!force && (System.currentTimeMillis() - lastScanned < 24 * 60 * 60 * 1000L)) {
                     return@launch
                 }
 
@@ -371,18 +354,36 @@ class StoryViewModel @Inject constructor(
 
                 yield()
 
-                val existingIds = dao.getStoriesSync().map { it.id }.toSet()
+                // Final Selection Logic: Score, Sort, Take Top 60, Select Random 10-30
+                val candidatesWithScore = generatedStories.map { entity ->
+                    val ids = try {
+                        entity.mediaIdsJson.removePrefix("[").removeSuffix("]").split(",").mapNotNull { it.trim().toLongOrNull() }
+                    } catch (e: Exception) { emptyList() }
 
-                if (generatedStories.isNotEmpty()) {
-                    generatedStories.forEach { entity ->
-                        if (!existingIds.contains(entity.id)) {
-                            try { dao.insertStory(entity) } catch (_: Exception) {}
-                        }
-                    }
+                    val items = ids.mapNotNull { _mediaMap.value[it] }
+                    val photos = items.count { !it.isVideo }
+                    val videos = items.count { it.isVideo }
+                    val days = items.map { it.dateAdded / 86400 }.distinct().size
+                    val favs = items.count { it.isFavorite }
+
+                    val score = calculateStoryScore(photos, videos, days, favs)
+                    Pair(entity, score)
+                }
+
+                val top60 = candidatesWithScore.sortedByDescending { it.second }.take(60).map { it.first }
+                val countToPick = Random.nextInt(10, 31)
+                val selectedStories = top60.shuffled().take(countToPick)
+
+                // Delete old generated memories
+                val existing = dao.getStoriesSync()
+                existing.filter { it.storyType != "MANUAL" }.forEach { dao.deleteStory(it.id) }
+
+                // Insert newly selected memories
+                selectedStories.forEach { entity ->
+                    try { dao.insertStory(entity) } catch (_: Exception) {}
                 }
 
                 prefs.edit().putLong("last_memory_scan_time", System.currentTimeMillis()).apply()
-                prefs.edit().putInt("last_memory_hash", currentHash).apply()
 
             } catch (e: Exception) {
                 e.printStackTrace()

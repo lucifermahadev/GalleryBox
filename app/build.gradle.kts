@@ -198,7 +198,7 @@ dependencies {
     implementation("androidx.tracing:tracing:1.2.0")
     implementation("androidx.graphics:graphics-core:1.0.0")
     implementation("androidx.media:media:1.7.0")
-
+    implementation("androidx.compose.material:material-icons-extended")
     // Media3
     val media3Version = "1.8.0"
     implementation("androidx.media3:media3-exoplayer:$media3Version")

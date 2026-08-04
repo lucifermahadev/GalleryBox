@@ -191,7 +191,7 @@ fun PictureScreen(
     }
 
     LaunchedEffect(trashViewModel) {
-        trashViewModel.onRefreshGallery = { scope.launch { viewModel.forceSync() } }
+        trashViewModel.onRefreshGallery = { viewModel.refreshAfterFileOperation() }
         trashViewModel.events.collect { event ->
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
@@ -243,6 +243,8 @@ fun PictureScreen(
                         ModernTopBar(title = "Photos", scrollBehavior = scrollBehavior, onSearchClick = { isSearchActive = true }, onMenuAction = { action ->
                             when (action) {
                                 "select_all" -> { val mediaItems = pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>(); selectedIds = mediaItems.map { it.item.id }.take(5000).toSet(); isSelectionMode = true }
+                                "camera" -> onNavigateToCamera()
+                                "scan" -> onNavigateToScan()
                                 "grid" -> activeDialog = PictureUiDialog.GridSize
                                 "sort" -> activeDialog = PictureUiDialog.Sort
                                 "slideshow" -> onNavigateToSlideshow()
@@ -315,7 +317,11 @@ fun PictureScreen(
         if (activeDialog != PictureUiDialog.None) DialogsHost(dialog = activeDialog, mediaMap = mediaMap, trashViewModel = trashViewModel, viewModel = viewModel, activeSort = activeSort, columnCount = columnCount, prefs = prefs, onDismiss = { activeDialog = PictureUiDialog.None }, onNavigateToEditor = onNavigateToEditor, onNavigateToMoveCopy = onNavigateToMoveCopy, onNavigateToWallpaper = onNavigateToWallpaper, onUpdateColumns = { cols -> columnCount = cols; prefs.edit().putInt("picture_grid_columns", cols).apply(); activeDialog = PictureUiDialog.None })
 
         if (viewerState is GalleryViewerState.Open && currentItem != null) {
-            val stableMediaList = remember(pagedMedia.itemCount) { pagedMedia.itemSnapshotList.items.filterIsInstance<GalleryGridItem.Media>().map { mediaMap[it.item.id] ?: it.item } }
+            val stableMediaList = remember(pagedMedia.itemCount, mediaMap) {
+                pagedMedia.itemSnapshotList.items
+                    .filterIsInstance<GalleryGridItem.Media>()
+                    .map { mediaMap[it.item.id] ?: it.item }
+            }
             val stableStartIndex = remember(currentItem.id, stableMediaList) { stableMediaList.indexOfFirst { it.id == currentItem.id }.coerceAtLeast(0) }
             FullscreenMediaPager(
                 initialIndex = stableStartIndex, mediaList = stableMediaList, mediaMap = mediaMap, favoriteIds = favoriteIds, sharedPlayer = viewModel.getPlayer(),
@@ -364,7 +370,7 @@ fun PictureScreen(
                             BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showMoreMenu = true }
                             DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }) {
                                 DropdownMenuItem(
-                                    text = { Text("Move to Album") },
+                                    text = { Text("Move to Album", color = MaterialTheme.colorScheme.onSurface) },
                                     onClick = {
                                         showMoreMenu = false
                                         onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), null)
@@ -372,7 +378,7 @@ fun PictureScreen(
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Copy to Album") },
+                                    text = { Text("Copy to Album", color = MaterialTheme.colorScheme.onSurface) },
                                     onClick = {
                                         showMoreMenu = false
                                         onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), null)
@@ -756,13 +762,13 @@ fun FullscreenMediaPager(
                             Box {
                                 PremiumViewerAction(icon = Icons.Default.MoreVert, label = "More") { showMoreMenu = true }
                                 DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }, modifier = Modifier.clip(RoundedCornerShape(12.dp))) {
-                                    DropdownMenuItem(text = { Text("Details") }, onClick = { showMetadataSheet = true; showMoreMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.Info, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                    DropdownMenuItem(text = { Text("Move to Album") }, onClick = { showMoreMenu = false; onMove(currentItem) }, leadingIcon = { Icon(imageVector = Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                    DropdownMenuItem(text = { Text("Copy to Album") }, onClick = { showMoreMenu = false; onCopy(currentItem) }, leadingIcon = { Icon(imageVector = Icons.Outlined.FileCopy, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                    DropdownMenuItem(text = { Text("Details", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMetadataSheet = true; showMoreMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.Info, contentDescription = null) })
+                                    DropdownMenuItem(text = { Text("Move to Album", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMoreMenu = false; onMove(currentItem) }, leadingIcon = { Icon(imageVector = Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = null) })
+                                    DropdownMenuItem(text = { Text("Copy to Album", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMoreMenu = false; onCopy(currentItem) }, leadingIcon = { Icon(imageVector = Icons.Outlined.FileCopy, contentDescription = null) })
                                     if (currentItem.isVideo) {
-                                        DropdownMenuItem(text = { Text("Open In") }, onClick = { showMoreMenu = false; context.startActivity(Intent(Intent.ACTION_VIEW).apply { setDataAndType(currentItem.uri, "video/*"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }) }, leadingIcon = { Icon(imageVector = Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                        DropdownMenuItem(text = { Text("Open In", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMoreMenu = false; context.startActivity(Intent(Intent.ACTION_VIEW).apply { setDataAndType(currentItem.uri, "video/*"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }) }, leadingIcon = { Icon(imageVector = Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null) })
                                     }
-                                    DropdownMenuItem(text = { Text("Set as Wallpaper") }, onClick = { showMoreMenu = false; onWallpaper(currentItem) }, leadingIcon = { Icon(imageVector = Icons.Outlined.Wallpaper, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                    DropdownMenuItem(text = { Text("Set as Wallpaper", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMoreMenu = false; onWallpaper(currentItem) }, leadingIcon = { Icon(imageVector = Icons.Outlined.Wallpaper, contentDescription = null) })
                                 }
                             }
                         }
@@ -970,12 +976,14 @@ fun ModernTopBar(title: String, scrollBehavior: TopAppBarScrollBehavior, onSearc
             Box {
                 IconButton(onClick = { showMenu = true }) { Icon(imageVector = Icons.Rounded.MoreVert, contentDescription = "More", tint = MaterialTheme.colorScheme.onSurface) }
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(12.dp))) {
-                    DropdownMenuItem(text = { Text("Select All") }, onClick = { onMenuAction("select_all"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.SelectAll, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                    DropdownMenuItem(text = { Text("Start Slideshow") }, onClick = { onMenuAction("slideshow"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.Slideshow, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                    DropdownMenuItem(text = { Text("View Duplicates") }, onClick = { onMenuAction("duplicates"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.ContentCopy, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                    DropdownMenuItem(text = { Text("Grid Size") }, onClick = { onMenuAction("grid"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Rounded.GridView, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                    DropdownMenuItem(text = { Text("Sort") }, onClick = { onMenuAction("sort"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                    DropdownMenuItem(text = { Text("Trash") }, onClick = { onMenuAction("trash"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.Delete, contentDescription = null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                    DropdownMenuItem(text = { Text("Select All", color = MaterialTheme.colorScheme.onSurface) }, onClick = { onMenuAction("select_all"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.SelectAll, contentDescription = null) })
+                    DropdownMenuItem(text = { Text("Launch Camera", color = MaterialTheme.colorScheme.onSurface) }, onClick = { onMenuAction("camera"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.PhotoCamera, contentDescription = null) })
+                    DropdownMenuItem(text = { Text("Scan Library", color = MaterialTheme.colorScheme.onSurface) }, onClick = { onMenuAction("scan"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.ImageSearch, contentDescription = null) })
+                    DropdownMenuItem(text = { Text("Start Slideshow", color = MaterialTheme.colorScheme.onSurface) }, onClick = { onMenuAction("slideshow"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.Slideshow, contentDescription = null) })
+                    DropdownMenuItem(text = { Text("View Duplicates", color = MaterialTheme.colorScheme.onSurface) }, onClick = { onMenuAction("duplicates"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.ContentCopy, contentDescription = null) })
+                    DropdownMenuItem(text = { Text("Grid Size", color = MaterialTheme.colorScheme.onSurface) }, onClick = { onMenuAction("grid"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Rounded.GridView, contentDescription = null) })
+                    DropdownMenuItem(text = { Text("Sort", color = MaterialTheme.colorScheme.onSurface) }, onClick = { onMenuAction("sort"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null) })
+                    DropdownMenuItem(text = { Text("Trash", color = MaterialTheme.colorScheme.onSurface) }, onClick = { onMenuAction("trash"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.Delete, contentDescription = null) })
                 }
             }
         },

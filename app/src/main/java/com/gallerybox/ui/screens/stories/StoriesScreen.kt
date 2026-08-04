@@ -4,11 +4,11 @@
 package com.gallerybox.ui.screens.stories
 
 import android.app.Activity
-import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -19,18 +19,16 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.*
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
-import androidx.compose.material.icons.automirrored.rounded.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
+import androidx.compose.material3.SegmentedButtonDefaults.Icon
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
@@ -39,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -49,7 +48,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -62,6 +60,7 @@ import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.CommandButton
 import androidx.media3.ui.PlayerView
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
@@ -79,7 +78,8 @@ import com.gallerybox.viewmodel.StoryViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.util.Locale
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,7 +103,7 @@ fun StoriesScreen(
         }
     }
 
-    val stories by storyViewModel.stories.collectAsState()
+    val displayStories by storyViewModel.stories.collectAsState()
     val isGenerating by storyViewModel.isGenerating.collectAsState()
     val generationProgress by storyViewModel.generationProgress.collectAsState()
     val generationTotal by storyViewModel.generationTotal.collectAsState()
@@ -115,13 +115,6 @@ fun StoriesScreen(
     var activeStoryIndex by remember { mutableStateOf<Int?>(null) }
     var showNameDialog by remember { mutableStateOf(false) }
     var newStoryTitle by remember { mutableStateOf("") }
-
-    var showDisplayLimitSheet by remember { mutableStateOf(false) }
-    var showSortSheet by remember { mutableStateOf(false) }
-
-    val prefs = remember { context.getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE) }
-    var displayLimit by remember { mutableIntStateOf(prefs.getInt("memory_display_limit", 100)) }
-    var sortOrder by remember { mutableStateOf(prefs.getString("memory_sort_order", "Highest Rated") ?: "Highest Rated") }
 
     val gridState = rememberLazyGridState()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
@@ -136,26 +129,6 @@ fun StoriesScreen(
 
     DisposableEffect(sharedExoPlayer) {
         onDispose { sharedExoPlayer.release() }
-    }
-
-    val sortedAndLimitedStories = remember(stories, displayLimit, sortOrder) {
-        val scored = stories.map { story ->
-            val photos = story.items.count { !it.isVideo }
-            val videos = story.items.count { it.isVideo }
-            val days = story.items.map { it.dateAdded / 86400 }.distinct().size
-            val favs = story.items.count { it.isFavorite }
-            val score = StoryViewModel.calculateStoryScore(photos, videos, days, favs)
-            Pair(story, score)
-        }
-
-        val sorted = when (sortOrder) {
-            "Newest" -> scored.sortedByDescending { it.first.items.firstOrNull()?.dateAdded ?: 0L }
-            "Oldest" -> scored.sortedBy { it.first.items.lastOrNull()?.dateAdded ?: Long.MAX_VALUE }
-            "Random" -> scored.shuffled()
-            else -> scored.sortedByDescending { it.second }
-        }.map { it.first }
-
-        if (displayLimit == -1) sorted else sorted.take(displayLimit)
     }
 
     BackHandler(enabled = activeStoryIndex != null) {
@@ -193,23 +166,16 @@ fun StoriesScreen(
                         } else {
                             Surface(shadowElevation = 2.dp, color = MaterialTheme.colorScheme.surface) {
                                 CenterAlignedTopAppBar(
-                                    title = {
-                                        val totalCount = stories.size
-                                        val titleText = if (displayLimit == -1) "$totalCount Memories" else "Memories ${sortedAndLimitedStories.size} / $totalCount"
-                                        Text(titleText, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                    title = { Text("Memories", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) },
+                                    navigationIcon = {
+                                        val onBackPressedDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+                                        IconButton(onClick = { onBackPressedDispatcher?.onBackPressed() }) {
+                                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                                        }
                                     },
                                     actions = {
-                                        var showMenu by remember { mutableStateOf(false) }
-                                        IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
-                                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(12.dp))) {
-                                            DropdownMenuItem(text = { Text("Create Memory") }, leadingIcon = { Icon(Icons.Rounded.Add, null) }, onClick = { showMenu = false; isSelectionMode = true })
-                                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                                            DropdownMenuItem(text = { Text("Memories to Show") }, leadingIcon = { Icon(Icons.Rounded.FilterList, null) }, onClick = { showMenu = false; showDisplayLimitSheet = true })
-                                            DropdownMenuItem(text = { Text("Sort") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) }, onClick = { showMenu = false; showSortSheet = true })
-                                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                                            DropdownMenuItem(text = { Text("Refresh Memories") }, leadingIcon = { Icon(Icons.Rounded.Refresh, null) }, onClick = { showMenu = false; storyViewModel.refreshMemories() })
-                                            DropdownMenuItem(text = { Text("Delete Generated Memories", color = MaterialTheme.colorScheme.error) }, leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) }, onClick = { showMenu = false; storyViewModel.deleteGeneratedMemories() })
-                                            DropdownMenuItem(text = { Text("About Memories") }, leadingIcon = { Icon(Icons.Rounded.Info, null) }, onClick = { showMenu = false; Toast.makeText(context, "Memories are generated automatically on your device based on time, location, and content.", Toast.LENGTH_LONG).show() })
+                                        IconButton(onClick = { isSelectionMode = true }) {
+                                            Icon(Icons.Rounded.Add, contentDescription = "Create Manual Memory")
                                         }
                                     },
                                     scrollBehavior = scrollBehavior,
@@ -225,7 +191,7 @@ fun StoriesScreen(
                             isRefreshing = true
                             scope.launch {
                                 storyViewModel.refreshMemories()
-                                delay(1000)
+                                delay(1.seconds)
                                 isRefreshing = false
                             }
                         },
@@ -237,10 +203,10 @@ fun StoriesScreen(
                                 MediaSelectorGrid(
                                     pagedMedia = pagedMedia,
                                     selectedIds = selectedIds,
-                                    onToggle = { id -> selectedIds = if (selectedIds.contains(id)) selectedIds - id else selectedIds + id },
+                                    onToggle = { id: Long -> selectedIds = if (selectedIds.contains(id)) selectedIds - id else selectedIds + id },
                                     contentPadding = PaddingValues(0.dp)
                                 )
-                            } else if (stories.isEmpty() && !isGenerating) {
+                            } else if (displayStories.isEmpty() && !isGenerating) {
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
                                         Box(modifier = Modifier.size(100.dp).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), CircleShape), contentAlignment = Alignment.Center) {
@@ -252,7 +218,7 @@ fun StoriesScreen(
                                         Text("Your best moments will appear here automatically.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                                     }
                                 }
-                            } else if (isGenerating && stories.isEmpty()) {
+                            } else if (isGenerating && displayStories.isEmpty()) {
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
@@ -271,8 +237,8 @@ fun StoriesScreen(
                                     verticalArrangement = Arrangement.spacedBy(12.dp),
                                     modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)
                                 ) {
-                                    items(sortedAndLimitedStories.size, key = { index -> sortedAndLimitedStories[index].id }, contentType = { "story" }) { index ->
-                                        val story = sortedAndLimitedStories[index]
+                                    items(displayStories.size, key = { index -> displayStories[index].id }, contentType = { "story" }) { index ->
+                                        val story = displayStories[index]
                                         StoryCard(
                                             story = story,
                                             sharedTransitionScope = this@SharedTransitionLayout,
@@ -288,7 +254,7 @@ fun StoriesScreen(
                     }
                 }
             } else {
-                sortedAndLimitedStories.getOrNull(currentIndex)?.let { activeStory ->
+                displayStories.getOrNull(currentIndex)?.let { activeStory ->
                     StoryPlayer(
                         story = activeStory,
                         sharedExoPlayer = sharedExoPlayer,
@@ -296,10 +262,10 @@ fun StoriesScreen(
                         animatedVisibilityScope = this@AnimatedContent,
                         onClose = { activeStoryIndex = null },
                         onNextStoryGroup = {
-                            if (currentIndex < sortedAndLimitedStories.lastIndex) activeStoryIndex = currentIndex + 1 else activeStoryIndex = null
+                            activeStoryIndex = if (currentIndex < displayStories.lastIndex) currentIndex + 1 else null
                         },
                         onPrevStoryGroup = {
-                            if (currentIndex > 0) activeStoryIndex = currentIndex - 1 else activeStoryIndex = null
+                            activeStoryIndex = if (currentIndex > 0) currentIndex - 1 else null
                         }
                     )
                 }
@@ -346,55 +312,6 @@ fun StoriesScreen(
             }
         )
     }
-
-    if (showDisplayLimitSheet) {
-        val limits = listOf(10, 25, 50, 100, 250, 500, 1000, -1)
-        ModalBottomSheet(onDismissRequest = { showDisplayLimitSheet = false }, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
-            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 34.dp)) {
-                Row(modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Rounded.FilterList, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp)) }
-                    Spacer(Modifier.width(16.dp))
-                    Column { Text(text = "Memories to Show", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Adjust the display limit", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                }
-                Spacer(Modifier.height(16.dp))
-                LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f, fill = false), contentPadding = PaddingValues(bottom = 12.dp)) {
-                    items(limits) { limit ->
-                        val isSelected = displayLimit == limit
-                        val label = if (limit == -1) "Unlimited" else limit.toString()
-                        Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).clip(RoundedCornerShape(20.dp)).clickable { displayLimit = limit; prefs.edit().putInt("memory_display_limit", limit).apply(); showDisplayLimitSheet = false }, shape = RoundedCornerShape(20.dp), color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = if (isSelected) 2.dp else 0.dp) {
-                            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(28.dp).clip(CircleShape).background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) { Icon(imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Rounded.RadioButtonUnchecked, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)) }
-                                Spacer(Modifier.width(16.dp)); Text(text = label, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface); Spacer(Modifier.weight(1f)); if (isSelected) { Icon(imageVector = Icons.Rounded.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (showSortSheet) {
-        val sorts = listOf("Newest", "Oldest", "Random", "Highest Rated")
-        ModalBottomSheet(onDismissRequest = { showSortSheet = false }, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
-            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 34.dp)) {
-                Row(modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp)) }
-                    Spacer(Modifier.width(16.dp))
-                    Column { Text(text = "Sort Memories", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Arrange your highlights", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                }
-                Spacer(Modifier.height(16.dp))
-                sorts.forEach { option ->
-                    val isSelected = sortOrder == option
-                    Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).clip(RoundedCornerShape(20.dp)).clickable { sortOrder = option; prefs.edit().putString("memory_sort_order", option).apply(); showSortSheet = false }, shape = RoundedCornerShape(20.dp), color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = if (isSelected) 2.dp else 0.dp) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Box(modifier = Modifier.size(28.dp).clip(CircleShape).background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) { Icon(imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Rounded.RadioButtonUnchecked, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)) }
-                            Spacer(Modifier.width(16.dp)); Text(text = option, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface); Spacer(Modifier.weight(1f)); if (isSelected) { Icon(imageVector = Icons.Rounded.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -427,7 +344,7 @@ fun StoryCard(
                 .sharedBounds(
                     sharedContentState = rememberSharedContentState("story_bounds_${story.id}"),
                     animatedVisibilityScope = animatedVisibilityScope,
-                    boundsTransform = { _, _ -> spring(dampingRatio = 0.8f, stiffness = 300f) }
+                    boundsTransform = { _, _ -> spring<Rect>(dampingRatio = 0.8f, stiffness = 300f) }
                 )
                 .pointerInput(Unit) {
                     detectTapGestures(
@@ -468,8 +385,8 @@ fun StoryCard(
                     onDismissRequest = { showMenu = false },
                     modifier = Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)).clip(RoundedCornerShape(12.dp))
                 ) {
-                    DropdownMenuItem(text = { Text("Save to Device") }, leadingIcon = { Icon(Icons.Rounded.SaveAlt, null) }, onClick = { showMenu = false; onSave() }, colors = MenuDefaults.itemColors(Color.Transparent))
-                    DropdownMenuItem(text = { Text("Move to Trash", color = MaterialTheme.colorScheme.error) }, leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) }, onClick = { showMenu = false; onDelete() }, colors = MenuDefaults.itemColors(Color.Transparent))
+                    DropdownMenuItem(text = { Text("Save to Device") }, leadingIcon = { Icon(Icons.Rounded.SaveAlt, null) }, onClick = { showMenu = false; onSave() })
+                    DropdownMenuItem(text = { Text("Move to Trash", color = MaterialTheme.colorScheme.error) }, leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) }, onClick = { showMenu = false; onDelete() })
                 }
             }
         }
@@ -547,7 +464,7 @@ fun StoryPlayer(
                         .sharedBounds(
                             sharedContentState = rememberSharedContentState(key = "story_bounds_${story.id}"),
                             animatedVisibilityScope = animatedVisibilityScope,
-                            boundsTransform = { _, _ -> spring(dampingRatio = 0.8f, stiffness = 300f) }
+                            boundsTransform = { _, _ -> spring<Rect>(dampingRatio = 0.8f, stiffness = 300f) }
                         )
                 ) {
                     if (currentItem.isVideo) {
@@ -717,11 +634,22 @@ fun MediaSelectorGrid(pagedMedia: LazyPagingItems<GalleryGridItem>, selectedIds:
                             Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.25f)))
                             Icon(Icons.Filled.CheckCircle, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.align(Alignment.TopStart).padding(8.dp).shadow(4.dp, CircleShape).background(Color.White, CircleShape).size(24.dp))
                         } else {
-                            Icon(Icons.Outlined.RadioButtonUnchecked, null, tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.align(Alignment.TopStart).padding(8.dp).shadow(2.dp, CircleShape).size(24.dp))
+                            Icon(
+                                imageVector = Icons.Outlined.Circle,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.9f),
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(8.dp)
+                                    .shadow(2.dp, CircleShape)
+                                    .size(24.dp)
+                            )
                         }
                     }
                 }
-                null -> Box(Modifier.aspectRatio(1f).clip(RoundedCornerShape(4.dp)).background(MaterialTheme.colorScheme.surfaceVariant))
+                null -> {
+                    Box(Modifier.aspectRatio(1f).clip(RoundedCornerShape(4.dp)).background(MaterialTheme.colorScheme.surfaceVariant))
+                }
             }
         }
     }
@@ -758,7 +686,7 @@ fun SimpleImageItem(uri: Uri, isPaused: Boolean, durationMs: Long, progressState
     )
 }
 
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun LifecycleAwareVideoPlayer(exoPlayer: ExoPlayer, uri: Uri, isStoryPaused: Boolean, progressState: MutableState<Float>, onComplete: () -> Unit) {
     val context = LocalContext.current
@@ -781,7 +709,7 @@ fun LifecycleAwareVideoPlayer(exoPlayer: ExoPlayer, uri: Uri, isStoryPaused: Boo
                 if (exoPlayer.playbackState == Player.STATE_READY && exoPlayer.duration > 0) {
                     progressState.value = exoPlayer.currentPosition.toFloat() / exoPlayer.duration.toFloat()
                 }
-                delay(100)
+                delay(100.milliseconds)
             }
         }
     }

@@ -379,7 +379,7 @@ fun AlbumScreen(
 
     LaunchedEffect(displayAlbums) {
         if (!isDragging) {
-            if (dynamicList.map { it.id } != displayAlbums.map { it.id }) {
+            if (dynamicList.toList() != displayAlbums) {
                 dynamicList.clear()
                 dynamicList.addAll(displayAlbums)
             }
@@ -398,7 +398,7 @@ fun AlbumScreen(
     }
 
     LaunchedEffect(trashViewModel) {
-        trashViewModel.onRefreshGallery = { viewModel.forceSync() }
+        trashViewModel.onRefreshGallery = { viewModel.refreshAfterFileOperation() }
         trashViewModel.events.collect { event ->
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
@@ -490,9 +490,9 @@ fun AlbumScreen(
                                 BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showSelectionMenu = true }
                                 DropdownMenu(expanded = showSelectionMenu, onDismissRequest = { showSelectionMenu = false }) {
                                     val allPinned = dynamicList.filter { selectedIds.contains(it.id) }.all { it.isPinned }
-                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Rename") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Rename(it) } }, leadingIcon = { Icon(Icons.Outlined.Edit, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                    DropdownMenuItem(text = { Text(if (allPinned) "Unpin" else "Pin") }, onClick = { showSelectionMenu = false; dynamicList.filter { selectedIds.contains(it.id) }.forEach { viewModel.toggleAlbumPin(it) }; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }, leadingIcon = { Icon(if (allPinned) Icons.Outlined.PushPin else Icons.Filled.PushPin, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Info") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Info(it) } }, leadingIcon = { Icon(Icons.Outlined.Info, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Rename") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Rename(it) } }, leadingIcon = { Icon(Icons.Outlined.Edit, null) })
+                                    DropdownMenuItem(text = { Text(if (allPinned) "Unpin" else "Pin") }, onClick = { showSelectionMenu = false; dynamicList.filter { selectedIds.contains(it.id) }.forEach { viewModel.toggleAlbumPin(it) }; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }, leadingIcon = { Icon(if (allPinned) Icons.Outlined.PushPin else Icons.Filled.PushPin, null) })
+                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Info") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Info(it) } }, leadingIcon = { Icon(Icons.Outlined.Info, null) })
                                     DropdownMenuItem(text = { Text("Hide Album") }, onClick = {
                                         showSelectionMenu = false
                                         val currentHidden = enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
@@ -502,7 +502,7 @@ fun AlbumScreen(
                                         isSelectionMode = false
                                         selectedIds = persistentListOf<String>().toImmutableSet()
                                         Toast.makeText(context, "Albums hidden", Toast.LENGTH_SHORT).show()
-                                    }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                    }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
                                 }
                             }
                         }
@@ -581,7 +581,7 @@ fun AlbumScreen(
                             ListItem(headlineContent = { Text(targetAlbum.name, fontWeight = FontWeight.Medium) }, leadingContent = { Icon(Icons.Outlined.Folder, null) }, modifier = Modifier.clickable {
                                 if (dialog.isMove) optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
                                 viewModel.mergeAlbums(sourceAlbumIds = dialog.albums.map { id -> id.id }, targetAlbumId = targetAlbum.id, mergeMode = if (dialog.isMove) MergeMode.MOVE_AND_DELETE else MergeMode.COPY)
-                                viewModel.forceSync()
+                                viewModel.refreshAfterFileOperation()
                                 activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
                             }, colors = ListItemDefaults.colors(containerColor = Color.Transparent))
                         }
@@ -595,15 +595,15 @@ fun AlbumScreen(
                 val mediaIds = allMedia.filter { item -> dialog.albums.any { album -> album.id == item.bucketId } }.map { it.id }
                 if (dialog.isMove) viewModel.createAndMove(mediaIds, newName) else viewModel.createAndCopy(mediaIds, newName)
                 if (dialog.isMove) optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
-                viewModel.forceSync()
+                viewModel.refreshAfterFileOperation()
                 activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
             })
         }
-        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String -> viewModel.renameAlbum(dialog.album, newName); viewModel.forceSync(); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
+        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String -> viewModel.renameAlbum(dialog.album, newName); viewModel.refreshAfterFileOperation(); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
         is AlbumUiDialog.Delete -> ModernMoveToTrashSheet(count = dialog.albums.size, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = {
             optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { it.id })
             trashViewModel.confirmPendingAlbumTrash(dialog.albums, allMedia.toList())
-            viewModel.forceSync()
+            viewModel.refreshAfterFileOperation()
             activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
         })
         is AlbumUiDialog.CreateAlbum -> ModernCreateAlbumSheet(onDismiss = { activeDialog = AlbumUiDialog.None }, onCreate = { name: String, sd: Boolean -> viewModel.createAlbum(name, sd); activeDialog = AlbumUiDialog.None })
@@ -702,7 +702,7 @@ fun AlbumDetailScreen(
     }
 
     LaunchedEffect(trashViewModel) {
-        trashViewModel.onRefreshGallery = { viewModel.forceSync() }
+        trashViewModel.onRefreshGallery = { viewModel.refreshAfterFileOperation() }
         trashViewModel.events.collect { event ->
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
@@ -823,10 +823,10 @@ fun AlbumDetailScreen(
                                 Box {
                                     IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
                                     DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(12.dp))) {
-                                        DropdownMenuItem(text = { Text("Select items") }, onClick = { isSelectionMode = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Checklist, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                        if (!isVirtual) DropdownMenuItem(text = { Text("Add Photos") }, onClick = { actions.onAddMediaToAlbum?.invoke(albumId); showMenu = false }, leadingIcon = { Icon(Icons.Rounded.AddPhotoAlternate, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                        DropdownMenuItem(text = { Text("Sort Media") }, onClick = { activeDialog = DetailUiDialog.Sort; showMenu = false }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                        DropdownMenuItem(text = { Text("Grid Size") }, onClick = { activeDialog = DetailUiDialog.GridSize; showMenu = false }, leadingIcon = { Icon(Icons.Default.Grid4x4, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                        DropdownMenuItem(text = { Text("Select items") }, onClick = { isSelectionMode = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Checklist, null) })
+                                        if (!isVirtual) DropdownMenuItem(text = { Text("Add Photos") }, onClick = { actions.onAddMediaToAlbum?.invoke(albumId); showMenu = false }, leadingIcon = { Icon(Icons.Rounded.AddPhotoAlternate, null) })
+                                        DropdownMenuItem(text = { Text("Sort Media") }, onClick = { activeDialog = DetailUiDialog.Sort; showMenu = false }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) })
+                                        DropdownMenuItem(text = { Text("Grid Size") }, onClick = { activeDialog = DetailUiDialog.GridSize; showMenu = false }, leadingIcon = { Icon(Icons.Default.Grid4x4, null) })
                                         if (!isVirtual && album != null) {
                                             DropdownMenuItem(text = { Text("Hide Album") }, onClick = {
                                                 viewModel.toggleHiddenAlbum(album.id)
@@ -835,12 +835,12 @@ fun AlbumDetailScreen(
                                                 Toast.makeText(context, "Album Hidden", Toast.LENGTH_SHORT).show()
                                                 showMenu = false
                                                 actions.onBack()
-                                            }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                            DropdownMenuItem(text = { Text(if (album.isPinned) "Unpin Album" else "Pin Album") }, onClick = { viewModel.toggleAlbumPin(album); showMenu = false }, leadingIcon = { Icon(if (album.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                            DropdownMenuItem(text = { Text("Rename") }, onClick = { showRenameSheet = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Edit, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
-                                            DropdownMenuItem(text = { Text("Delete Album", color = MaterialTheme.colorScheme.error) }, onClick = { activeDialog = DetailUiDialog.DeleteAlbum; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                            }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
+                                            DropdownMenuItem(text = { Text(if (album.isPinned) "Unpin Album" else "Pin Album") }, onClick = { viewModel.toggleAlbumPin(album); showMenu = false }, leadingIcon = { Icon(if (album.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, null) })
+                                            DropdownMenuItem(text = { Text("Rename") }, onClick = { showRenameSheet = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Edit, null) })
+                                            DropdownMenuItem(text = { Text("Delete Album", color = MaterialTheme.colorScheme.error) }, onClick = { activeDialog = DetailUiDialog.DeleteAlbum; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) })
                                         }
-                                        DropdownMenuItem(text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") }, onClick = { showMenu = false; toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it } }, leadingIcon = { Icon(if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                        DropdownMenuItem(text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") }, onClick = { showMenu = false; toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it } }, leadingIcon = { Icon(if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, null) })
                                     }
                                 }
                             },
@@ -870,11 +870,11 @@ fun AlbumDetailScreen(
                             Box {
                                 BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showMediaSelectionMenu = true }
                                 DropdownMenu(expanded = showMediaSelectionMenu, onDismissRequest = { showMediaSelectionMenu = false }) {
-                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Details") }, onClick = { showMediaSelectionMenu = false; metadataItemToShow = mediaMap[selectedIds.first()] }, leadingIcon = { Icon(Icons.Outlined.Info, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Details") }, onClick = { showMediaSelectionMenu = false; metadataItemToShow = mediaMap[selectedIds.first()] }, leadingIcon = { Icon(Icons.Outlined.Info, null) })
                                     if (albumId == ID_HIDDEN) {
-                                        DropdownMenuItem(text = { Text("Unhide") }, onClick = { showMediaSelectionMenu = false; viewModel.unhideMedia(selectedIds.toList()); Toast.makeText(context, "Items restored", Toast.LENGTH_SHORT).show(); isSelectionMode = false }, leadingIcon = { Icon(Icons.Outlined.Visibility, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                        DropdownMenuItem(text = { Text("Unhide") }, onClick = { showMediaSelectionMenu = false; viewModel.unhideMedia(selectedIds.toList()); Toast.makeText(context, "Items restored", Toast.LENGTH_SHORT).show(); isSelectionMode = false }, leadingIcon = { Icon(Icons.Outlined.Visibility, null) })
                                     } else {
-                                        DropdownMenuItem(text = { Text("Hide") }, onClick = { showMediaSelectionMenu = false; viewModel.hideItems(selectedIds.toList()); Toast.makeText(context, "${selectedIds.size} items hidden", Toast.LENGTH_SHORT).show(); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(selectedIds); viewModel.forceSync(); isSelectionMode = false }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) }, colors = MenuDefaults.itemColors(Color.Transparent))
+                                        DropdownMenuItem(text = { Text("Hide") }, onClick = { showMediaSelectionMenu = false; viewModel.hideItems(selectedIds.toList()); Toast.makeText(context, "${selectedIds.size} items hidden", Toast.LENGTH_SHORT).show(); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(selectedIds); viewModel.refreshAfterFileOperation(); isSelectionMode = false }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
                                     }
                                 }
                             }
@@ -970,7 +970,7 @@ fun AlbumDetailScreen(
 
     when (val dialog = activeDialog) {
         is DetailUiDialog.DeleteAlbum -> AlertDialog(onDismissRequest = { activeDialog = DetailUiDialog.None }, icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Delete Album?") }, text = { Text("This will delete the manual album placeholder. Any physical media stored within this folder on your device will remain intact.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { actions.onDeleteAlbum?.invoke(albumId); activeDialog = DetailUiDialog.None; actions.onBack() }) { Text("Delete") } }, dismissButton = { TextButton(onClick = { activeDialog = DetailUiDialog.None }) { Text("Cancel") } })
-        is DetailUiDialog.Delete -> ModernMoveToTrashSheet(count = dialog.mediaIds.size, onDismiss = { activeDialog = DetailUiDialog.None }, onConfirm = { val itemsToTrash = allMedia.filter { dialog.mediaIds.contains(it.id) }; if (itemsToTrash.isNotEmpty()) { trashViewModel.confirmPendingGalleryTrash(itemsToTrash); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(dialog.mediaIds) }; viewModel.forceSync(); activeDialog = DetailUiDialog.None; isSelectionMode = false; viewModel.closeViewer() })
+        is DetailUiDialog.Delete -> ModernMoveToTrashSheet(count = dialog.mediaIds.size, onDismiss = { activeDialog = DetailUiDialog.None }, onConfirm = { val itemsToTrash = allMedia.filter { dialog.mediaIds.contains(it.id) }; if (itemsToTrash.isNotEmpty()) { trashViewModel.confirmPendingGalleryTrash(itemsToTrash); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(dialog.mediaIds) }; viewModel.refreshAfterFileOperation(); activeDialog = DetailUiDialog.None; isSelectionMode = false; viewModel.closeViewer() })
         is DetailUiDialog.GridSize -> ModernGridSheet(currentColumns = detailColumns, max = 8, onDismiss = { activeDialog = DetailUiDialog.None }, onUpdate = { cols: Int -> detailColumns = cols; prefs.edit().putInt("gallery_media_grid_columns", cols).apply(); activeDialog = DetailUiDialog.None })
         is DetailUiDialog.Sort -> ModernMediaSortSheet(activeSort = currentPhotoSort, onDismiss = { activeDialog = DetailUiDialog.None }, onSortSelected = { sort: PhotoSort -> currentPhotoSort = sort; activeDialog = DetailUiDialog.None })
         else -> {}

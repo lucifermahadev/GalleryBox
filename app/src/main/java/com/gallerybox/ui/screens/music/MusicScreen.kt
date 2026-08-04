@@ -26,7 +26,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
-import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
@@ -180,7 +179,6 @@ fun MusicScreen(
                         DropdownMenuItem(text = { Text("New Playlist") }, leadingIcon = { Icon(Icons.Rounded.Add, null) }, onClick = { showTopMenu = false; showCreatePlaylistDialog = true })
                     } else {
                         DropdownMenuItem(text = { Text("Equalizer") }, leadingIcon = { Icon(Icons.Rounded.GraphicEq, null) }, onClick = { showTopMenu = false; onNavigateToEqualizer() })
-                        DropdownMenuItem(text = { Text("Help") }, leadingIcon = { Icon(Icons.AutoMirrored.Rounded.HelpOutline, null) }, onClick = { showTopMenu = false })
                     }
                 }
             }

@@ -77,7 +77,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.common.*
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -177,14 +176,14 @@ class PlayerProgressState {
     var durationMs by mutableLongStateOf(0L)
 }
 
-class PlayerGestureEngine(private val context: Context, private val activity: Activity?, private val player: Player, private val totalDuration: () -> Long) {
+class PlayerGestureEngine(private val context: Context, private val activity: Activity?, private val totalDuration: () -> Long) {
     private var accumulatedX = 0f
     private var accumulatedY = 0f
     private val touchSlop = 26f
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat()
 
-    fun onStart(state: PlayerGestureState) {
+    fun onStart(state: PlayerGestureState, currentPosition: Long) {
         state.mode = GestureMode.NONE
         accumulatedX = 0f
         accumulatedY = 0f
@@ -197,7 +196,7 @@ class PlayerGestureEngine(private val context: Context, private val activity: Ac
         }
     }
 
-    fun onDrag(state: PlayerGestureState, change: PointerInputChange, dragAmount: Offset, width: Float, height: Float) {
+    fun onDrag(state: PlayerGestureState, change: PointerInputChange, dragAmount: Offset, width: Float, height: Float, currentPosition: Long) {
         if (width <= 0f || height <= 0f) return
         accumulatedX += dragAmount.x
         accumulatedY += dragAmount.y
@@ -212,7 +211,7 @@ class PlayerGestureEngine(private val context: Context, private val activity: Ac
             }
             if (state.mode == GestureMode.SCRUB) {
                 state.isSeeking = true
-                state.seekPosition = player.currentPosition.toFloat()
+                state.seekPosition = currentPosition.toFloat()
             }
         }
 
@@ -249,10 +248,6 @@ class PlayerGestureEngine(private val context: Context, private val activity: Ac
     }
 
     fun onEnd(state: PlayerGestureState) {
-        if (state.mode == GestureMode.SCRUB) {
-            player.seekTo(state.seekPosition.toLong())
-            state.isSeeking = false
-        }
         state.mode = GestureMode.NONE
         state.showVolume = false
         state.showBrightness = false
@@ -290,7 +285,6 @@ fun VideoPlayerScreen(
     onBackPress: () -> Unit,
     onLockApp: () -> Unit = {}
 ) {
-    val player = remember(viewModel) { viewModel.getPlayer() }
     var lastOpenedUrl by remember { mutableStateOf("") }
 
     LaunchedEffect(initialVideoUrl) {
@@ -300,12 +294,7 @@ fun VideoPlayerScreen(
         }
     }
 
-    val playlistUrls by viewModel.videoPlaylist.collectAsState()
-
     VideoPlayerContent(
-        player = player,
-        initialVideoUrl = initialVideoUrl,
-        playlistUrls = playlistUrls,
         viewModel = viewModel,
         onBackPress = onBackPress,
         onLockApp = onLockApp
@@ -315,9 +304,6 @@ fun VideoPlayerScreen(
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun VideoPlayerContent(
-    player: Player,
-    initialVideoUrl: String,
-    playlistUrls: List<String>,
     viewModel: GalleryViewModel,
     onBackPress: () -> Unit,
     onLockApp: () -> Unit
@@ -327,12 +313,34 @@ fun VideoPlayerContent(
     val view = LocalView.current
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
-    val prefs = remember { context.getSharedPreferences("media3_prefs", Context.MODE_PRIVATE) }
     val lifecycleOwner = LocalLifecycleOwner.current
     val insetsController = remember { activity?.window?.let { WindowCompat.getInsetsController(it, view) } }
 
+    val player = remember(viewModel) { viewModel.getPlayer() }
+    val currentVideoUri by viewModel.currentVideoUri.collectAsState()
+    val isPlaying by viewModel.isPlaying.collectAsState()
+    val playbackState by viewModel.playbackState.collectAsState()
+    val currentPosition by viewModel.currentPosition.collectAsState()
+    val duration by viewModel.duration.collectAsState()
+    val bufferedPosition by viewModel.bufferedPosition.collectAsState()
+    val playbackSpeed by viewModel.playbackSpeed.collectAsState()
+    val videoFormat by viewModel.videoFormat.collectAsState()
+    val backgroundPlay by viewModel.backgroundPlay.collectAsState()
+    val autoPlayNext by viewModel.autoPlayNext.collectAsState()
+    val repeatMode by viewModel.repeatMode.collectAsState()
+    val sleepTimerMs by viewModel.sleepTimerMs.collectAsState()
+    val audioDelayMs by viewModel.audioDelayMs.collectAsState()
+
+    val progress = remember(currentPosition, bufferedPosition, duration) {
+        PlayerProgressState().apply {
+            this.currentMs = currentPosition
+            this.bufferedMs = bufferedPosition
+            this.durationMs = duration
+        }
+    }
+
     val gestureState = remember { PlayerGestureState() }
-    val gestureEngine = remember(player) { PlayerGestureEngine(context, activity, player) { player.duration.coerceAtLeast(1L) } }
+    val gestureEngine = remember(player) { PlayerGestureEngine(context, activity) { duration.coerceAtLeast(1L) } }
     val frameLoader = remember { VideoFrameLoader(context) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
@@ -340,7 +348,6 @@ fun VideoPlayerContent(
     var manualRotateOverride by remember { mutableStateOf(false) }
     var originalBrightness by remember { mutableFloatStateOf(-1f) }
 
-    var currentVideoUri by remember { mutableStateOf(initialVideoUrl) }
     var videoSize by remember { mutableStateOf(VideoSize.UNKNOWN) }
 
     DisposableEffect(activity) {
@@ -359,7 +366,14 @@ fun VideoPlayerContent(
     }
 
     DisposableEffect(Unit) {
+        val sizeListener = object : Player.Listener {
+            override fun onVideoSizeChanged(newSize: VideoSize) {
+                videoSize = newSize
+            }
+        }
+        player.addListener(sizeListener)
         onDispose {
+            player.removeListener(sizeListener)
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             frameLoader.release()
             previewBitmap = null
@@ -367,38 +381,22 @@ fun VideoPlayerContent(
         }
     }
 
-    var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
-    var isPlaying by remember { mutableStateOf(player.isPlaying) }
-
     LaunchedEffect(gestureState) {
         snapshotFlow { gestureState.isSeeking to gestureState.seekPosition }
             .debounce(100)
             .collect { (isSeeking, pos) ->
                 if (isSeeking) {
-                    previewBitmap = frameLoader.getFrame(pos.toLong(), player.duration)
+                    previewBitmap = frameLoader.getFrame(pos.toLong(), duration)
                 } else {
                     previewBitmap = null
                 }
             }
     }
 
-    val progress = remember { PlayerProgressState() }
-
     var isLongPressing by remember { mutableStateOf(false) }
     var resizeMode by remember { mutableStateOf(PremiumResizeMode.FIT) }
     var resizeModeToast by remember { mutableStateOf("") }
     var isMirrored by remember { mutableStateOf(false) }
-    var currentSpeed by remember { mutableFloatStateOf(prefs.getFloat("speed", 1f)) }
-    var currentPitch by remember { mutableFloatStateOf(prefs.getFloat("pitch", 1f)) }
-
-    var sleepTimerMs by remember { mutableStateOf<Long?>(null) }
-    var videoFormat by remember { mutableStateOf<Format?>(null) }
-
-    var audioDelayMs by remember { mutableFloatStateOf(0f) }
-
-    var autoPlayNext by remember { mutableStateOf(prefs.getBoolean("autoPlayNext", true)) }
-    var autoRepeat by remember { mutableStateOf(PremiumRepeatMode.entries[prefs.getInt("autoRepeat", 0)]) }
-    var backgroundPlay by remember { mutableStateOf(prefs.getBoolean("backgroundPlay", false)) }
 
     var showControls by remember { mutableStateOf(true) }
     var isLocked by remember { mutableStateOf(false) }
@@ -416,15 +414,6 @@ fun VideoPlayerContent(
             delay(1500)
             resizeModeToast = ""
         }
-    }
-
-    LaunchedEffect(autoRepeat) {
-        player.repeatMode = when (autoRepeat) {
-            PremiumRepeatMode.OFF -> Player.REPEAT_MODE_OFF
-            PremiumRepeatMode.ONE -> Player.REPEAT_MODE_ONE
-            PremiumRepeatMode.ALL -> Player.REPEAT_MODE_ALL
-        }
-        prefs.edit().putInt("autoRepeat", autoRepeat.ordinal).apply()
     }
 
     DisposableEffect(activity) {
@@ -470,7 +459,7 @@ fun VideoPlayerContent(
         hideJob?.cancel()
         hideJob = scope.launch {
             delay(3000)
-            if (player.isPlaying && !isLocked && !isInPiPMode) {
+            if (isPlaying && !isLocked && !isInPiPMode) {
                 showControls = false
             }
         }
@@ -482,123 +471,10 @@ fun VideoPlayerContent(
         }
     }
 
-    val updateSpeedAndPitch: (Float, Float) -> Unit = { speed, pitch ->
-        player.playbackParameters = PlaybackParameters(speed, pitch)
-    }
-
-    var hasInitializedPlaylist by remember { mutableStateOf(false) }
-
-    LaunchedEffect(initialVideoUrl, playlistUrls) {
-        if (hasInitializedPlaylist) return@LaunchedEffect
-        if (playlistUrls.isNotEmpty() || playlistUrls.isEmpty()) {
-            withContext(Dispatchers.Default) {
-                val absoluteIndex = playlistUrls.indexOfFirst { it == initialVideoUrl || Uri.parse(it) == Uri.parse(initialVideoUrl) }
-                val items: List<MediaItem>
-                val relativeIndex: Int
-
-                if (absoluteIndex != -1) {
-                    val fromIndex = maxOf(0, absoluteIndex - 20)
-                    val toIndex = minOf(playlistUrls.size, absoluteIndex + 40)
-                    items = playlistUrls.subList(fromIndex, toIndex).map { MediaItem.fromUri(Uri.parse(it)) }
-                    relativeIndex = absoluteIndex - fromIndex
-                    hasInitializedPlaylist = true
-                } else {
-                    items = listOf(MediaItem.fromUri(Uri.parse(initialVideoUrl)))
-                    relativeIndex = 0
-                }
-
-                val savedPos = prefs.getLong(initialVideoUrl, 0L)
-
-                withContext(Dispatchers.Main) {
-                    try {
-                        (player as? ExoPlayer)?.let { exo ->
-                            exo.setAudioAttributes(
-                                AudioAttributes.Builder()
-                                    .setUsage(C.USAGE_MEDIA)
-                                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                                    .build(),
-                                true
-                            )
-                            exo.setHandleAudioBecomingNoisy(true)
-                            exo.volume = 1f
-                        }
-                        updateSpeedAndPitch(currentSpeed, currentPitch)
-                        player.setMediaItems(items)
-                        player.prepare()
-                        player.seekTo(relativeIndex, savedPos)
-                        player.playWhenReady = true
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }
-            }
-        }
-    }
-
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(playing: Boolean) {
-                isPlaying = playing
-            }
-            override fun onVideoSizeChanged(newSize: VideoSize) {
-                videoSize = newSize
-            }
-            override fun onPlaybackStateChanged(state: Int) {
-                playbackState = state
-                isPlaying = player.isPlaying
-                if (state == Player.STATE_READY) {
-                    progress.durationMs = player.duration.coerceAtLeast(0L)
-                }
-                if (state == Player.STATE_ENDED && player.repeatMode == Player.REPEAT_MODE_OFF && autoPlayNext && player.hasNextMediaItem()) {
-                    player.seekToNextMediaItem()
-                    player.playWhenReady = true
-                }
-            }
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                currentVideoUri = mediaItem?.localConfiguration?.uri?.toString() ?: ""
-            }
-            override fun onTracksChanged(tracks: Tracks) {
-                val selectedVideoFormat = tracks.groups
-                    .firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.isSelected }
-                    ?.let { group ->
-                        (0 until group.length)
-                            .firstOrNull { group.isTrackSelected(it) }
-                            ?.let { trackIndex -> group.getTrackFormat(trackIndex) }
-                    }
-                if (selectedVideoFormat != null) {
-                    videoFormat = selectedVideoFormat
-                }
-            }
-        }
-        player.addListener(listener)
-        onDispose { player.removeListener(listener) }
-    }
-
-    LaunchedEffect(player, lifecycleOwner.lifecycle) {
-        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (isActive) {
-                if (!gestureState.isSeeking) {
-                    progress.currentMs = player.currentPosition
-                    progress.bufferedMs = player.bufferedPosition
-
-                    if (sleepTimerMs != null) {
-                        if (System.currentTimeMillis() >= sleepTimerMs!!) {
-                            player.pause()
-                            sleepTimerMs = null
-                            Toast.makeText(context, "Sleep timer ended", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-                delay(if (player.isPlaying) 200L else 500L)
-            }
-        }
-    }
-
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE) {
-                viewModel.updatePlaybackState(currentVideoUri, player.currentPosition, currentSpeed, player.playWhenReady)
-                prefs.edit().putLong(currentVideoUri, progress.currentMs).apply()
+                viewModel.savePlaybackPosition()
             }
             if (event == Lifecycle.Event.ON_STOP && !backgroundPlay && !isInPiPMode) {
                 player.pause()
@@ -672,14 +548,14 @@ fun VideoPlayerContent(
                             val job = scope.launch {
                                 delay(400)
                                 isLongPressing = true
-                                player.playbackParameters = PlaybackParameters((currentSpeed * 2f).coerceAtMost(8f), currentPitch)
+                                player.playbackParameters = PlaybackParameters((playbackSpeed * 2f).coerceAtMost(8f), viewModel.playbackPitch.value)
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             }
                             tryAwaitRelease()
                             job.cancel()
                             if (isLongPressing) {
                                 isLongPressing = false
-                                player.playbackParameters = PlaybackParameters(currentSpeed, currentPitch)
+                                viewModel.resetSpeed()
                             }
                         },
                         onTap = {
@@ -692,15 +568,14 @@ fun VideoPlayerContent(
                         },
                         onDoubleTap = { offset ->
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            val duration = progress.durationMs
                             val dynamicSeekMs = maxOf(10000L, (duration * 0.01).toLong())
                             if (offset.x < size.width / 2f) {
-                                player.seekTo((player.currentPosition - dynamicSeekMs).coerceAtLeast(0))
+                                viewModel.seekBackward(dynamicSeekMs)
                                 showDoubleTapText = "-${dynamicSeekMs / 1000}s"
                                 doubleTapForward = false
                                 doubleTapAlignment = Alignment.CenterStart
                             } else {
-                                player.seekTo((player.currentPosition + dynamicSeekMs).coerceAtMost(duration))
+                                viewModel.seekForward(dynamicSeekMs)
                                 showDoubleTapText = "+${dynamicSeekMs / 1000}s"
                                 doubleTapForward = true
                                 doubleTapAlignment = Alignment.CenterEnd
@@ -714,16 +589,24 @@ fun VideoPlayerContent(
                     if (isLocked) return@pointerInput
                     detectDragGestures(
                         onDragStart = {
-                            gestureEngine.onStart(gestureState)
-                            scope.launch(Dispatchers.IO) { frameLoader.setSource(Uri.parse(currentVideoUri)) }
+                            gestureEngine.onStart(gestureState, currentPosition)
+                            scope.launch(Dispatchers.IO) {
+                                currentVideoUri?.let { uri -> frameLoader.setSource(Uri.parse(uri)) }
+                            }
                         },
-                        onDragEnd = { gestureEngine.onEnd(gestureState) },
+                        onDragEnd = {
+                            if (gestureState.mode == GestureMode.SCRUB) {
+                                viewModel.seekTo(gestureState.seekPosition.toLong())
+                                gestureState.isSeeking = false
+                            }
+                            gestureEngine.onEnd(gestureState)
+                        },
                         onDragCancel = {
                             gestureState.mode = GestureMode.NONE
                             gestureState.isSeeking = false
                         }
                     ) { change, dragAmount ->
-                        gestureEngine.onDrag(gestureState, change, dragAmount, size.width.toFloat(), size.height.toFloat())
+                        gestureEngine.onDrag(gestureState, change, dragAmount, size.width.toFloat(), size.height.toFloat(), currentPosition)
                     }
                 }
         )
@@ -777,7 +660,7 @@ fun VideoPlayerContent(
         }
 
         if (!isInPiPMode) {
-            val currentTitle = player.currentMediaItem?.mediaMetadata?.displayTitle?.toString() ?: player.currentMediaItem?.mediaMetadata?.title?.toString() ?: currentVideoUri.substringAfterLast("/")
+            val currentTitle = player.currentMediaItem?.mediaMetadata?.displayTitle?.toString() ?: player.currentMediaItem?.mediaMetadata?.title?.toString() ?: currentVideoUri?.substringAfterLast("/") ?: "Video"
 
             AnimatedVisibility(visible = showControls && !isLocked, enter = fadeIn(), exit = fadeOut()) {
                 VideoTopBar(
@@ -797,34 +680,20 @@ fun VideoPlayerContent(
                     previewBitmap = previewBitmap,
                     seekPosition = gestureState.seekPosition,
                     gestureText = gestureState.gestureText,
-                    hasNext = player.hasNextMediaItem(),
-                    hasPrev = player.hasPreviousMediaItem() || player.currentPosition > 3000L,
+                    hasNext = viewModel.hasNextVideo(),
+                    hasPrev = viewModel.hasPreviousVideo() || currentPosition > 3000L,
                     isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE,
                     onTogglePlay = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        if (playbackState == Player.STATE_ENDED) {
-                            player.seekTo(0)
-                            player.play()
-                        } else if (isPlaying) {
-                            player.pause()
-                        } else {
-                            player.play()
-                        }
+                        viewModel.togglePlayPause()
                         resetControlsTimer()
                     },
                     onNext = {
-                        if (player.hasNextMediaItem()) {
-                            player.seekToNextMediaItem()
-                            player.playWhenReady = true
-                        }
+                        viewModel.playNextVideo()
                         resetControlsTimer()
                     },
                     onPrev = {
-                        if (player.currentPosition > 3000) {
-                            player.seekTo(0)
-                        } else if (player.hasPreviousMediaItem()) {
-                            player.seekToPreviousMediaItem()
-                        }
+                        viewModel.playPreviousVideo()
                         resetControlsTimer()
                     },
                     onSeek = {
@@ -833,7 +702,7 @@ fun VideoPlayerContent(
                         resetControlsTimer()
                     },
                     onSeekFinished = {
-                        player.seekTo(gestureState.seekPosition.toLong())
+                        viewModel.seekTo(gestureState.seekPosition.toLong())
                         gestureState.isSeeking = false
                         resetControlsTimer()
                     },
@@ -871,9 +740,9 @@ fun VideoPlayerContent(
 
     if (showMenuSheet) {
         PlaybackMenuSheet(
-            currentSpeed = currentSpeed,
+            currentSpeed = playbackSpeed,
             autoPlayNext = autoPlayNext,
-            autoRepeat = autoRepeat,
+            autoRepeat = repeatMode,
             backgroundPlay = backgroundPlay,
             sleepTimerActive = sleepTimerMs != null,
             audioDelayMs = audioDelayMs,
@@ -881,49 +750,22 @@ fun VideoPlayerContent(
                 showMenuSheet = false
                 resetControlsTimer()
             },
-            onSpeedChange = {
-                currentSpeed = it
-                updateSpeedAndPitch(currentSpeed, currentPitch)
-                prefs.edit().putFloat("speed", currentSpeed).apply()
-            },
-            onToggleAutoPlay = {
-                autoPlayNext = it
-                prefs.edit().putBoolean("autoPlayNext", it).apply()
-                if (it) {
-                    autoRepeat = PremiumRepeatMode.OFF
-                    prefs.edit().putInt("autoRepeat", PremiumRepeatMode.OFF.ordinal).apply()
-                    player.repeatMode = Player.REPEAT_MODE_OFF
-                }
-            },
-            onToggleAutoRepeat = {
-                autoRepeat = it
-                prefs.edit().putInt("autoRepeat", it.ordinal).apply()
-                player.repeatMode = when(it) {
-                    PremiumRepeatMode.OFF -> Player.REPEAT_MODE_OFF
-                    PremiumRepeatMode.ONE -> Player.REPEAT_MODE_ONE
-                    PremiumRepeatMode.ALL -> Player.REPEAT_MODE_ALL
-                }
-                if (it != PremiumRepeatMode.OFF) {
-                    autoPlayNext = false
-                    prefs.edit().putBoolean("autoPlayNext", false).apply()
-                }
-            },
-            onToggleBackgroundPlay = {
-                backgroundPlay = it
-                prefs.edit().putBoolean("backgroundPlay", it).apply()
-            },
+            onSpeedChange = { viewModel.setPlaybackSpeed(it) },
+            onToggleAutoPlay = { viewModel.setAutoPlayNext(it) },
+            onToggleAutoRepeat = { viewModel.cycleRepeatMode(it) },
+            onToggleBackgroundPlay = { viewModel.setBackgroundPlay(it) },
             onSetSleepTimer = { minutes ->
-                sleepTimerMs = System.currentTimeMillis() + (minutes * 60 * 1000L)
+                viewModel.startSleepTimer(minutes)
                 Toast.makeText(context, "Timer set for $minutes min", Toast.LENGTH_SHORT).show()
                 showMenuSheet = false
                 resetControlsTimer()
             },
             onCancelSleepTimer = {
-                sleepTimerMs = null
+                viewModel.cancelSleepTimer()
                 Toast.makeText(context, "Timer canceled", Toast.LENGTH_SHORT).show()
             },
             onSetAudioDelay = { delayOffset ->
-                audioDelayMs = delayOffset
+                viewModel.setAudioDelay(delayOffset)
                 Toast.makeText(context, "Audio Delay: ${delayOffset.toInt()} ms", Toast.LENGTH_SHORT).show()
             }
         )

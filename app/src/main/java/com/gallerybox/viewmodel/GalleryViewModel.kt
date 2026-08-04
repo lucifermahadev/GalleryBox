@@ -28,7 +28,12 @@ import com.gallerybox.data.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem as Media3Item
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.common.Format
+import androidx.media3.common.AudioAttributes
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.paging.*
@@ -36,6 +41,7 @@ import androidx.work.*
 import com.gallerybox.engine.*
 import com.gallerybox.ui.screens.picture.GalleryGridItem
 import com.gallerybox.ui.screens.trash.TrashCleanupWorker
+import com.gallerybox.ui.screens.videoplayer.PremiumRepeatMode
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -175,6 +181,95 @@ class GalleryViewModel @Inject constructor(
     private val activePagingSources = CopyOnWriteArrayList<MediaPagingSource>()
 
     private var sharedPlayer: ExoPlayer? = null
+    private val prefs = application.getSharedPreferences("media3_prefs", Context.MODE_PRIVATE)
+
+    private val _videoPlaylist = MutableStateFlow<List<String>>(emptyList())
+    val videoPlaylist = _videoPlaylist.asStateFlow()
+
+    private val _currentVideoIndex = MutableStateFlow(0)
+    val currentVideoIndex = _currentVideoIndex.asStateFlow()
+
+    private val _currentVideoUri = MutableStateFlow<String?>(null)
+    val currentVideoUri = _currentVideoUri.asStateFlow()
+
+    private val _isPlaying = MutableStateFlow(false)
+    val isPlaying = _isPlaying.asStateFlow()
+
+    private val _playbackState = MutableStateFlow(Player.STATE_IDLE)
+    val playbackState = _playbackState.asStateFlow()
+
+    private val _currentPosition = MutableStateFlow(0L)
+    val currentPosition = _currentPosition.asStateFlow()
+
+    private val _duration = MutableStateFlow(0L)
+    val duration = _duration.asStateFlow()
+
+    private val _bufferedPosition = MutableStateFlow(0L)
+    val bufferedPosition = _bufferedPosition.asStateFlow()
+
+    private val _playbackSpeed = MutableStateFlow(prefs.getFloat("speed", 1f))
+    val playbackSpeed = _playbackSpeed.asStateFlow()
+
+    private val _playbackPitch = MutableStateFlow(prefs.getFloat("pitch", 1f))
+    val playbackPitch = _playbackPitch.asStateFlow()
+
+    private val _autoPlayNext = MutableStateFlow(prefs.getBoolean("autoPlayNext", true))
+    val autoPlayNext = _autoPlayNext.asStateFlow()
+
+    private val _repeatMode = MutableStateFlow(PremiumRepeatMode.entries[prefs.getInt("autoRepeat", 0)])
+    val repeatMode = _repeatMode.asStateFlow()
+
+    private val _backgroundPlay = MutableStateFlow(prefs.getBoolean("backgroundPlay", false))
+    val backgroundPlay = _backgroundPlay.asStateFlow()
+
+    private val _audioDelayMs = MutableStateFlow(0f)
+    val audioDelayMs = _audioDelayMs.asStateFlow()
+
+    private val _sleepTimerMs = MutableStateFlow<Long?>(null)
+    val sleepTimerMs = _sleepTimerMs.asStateFlow()
+
+    private val _videoFormat = MutableStateFlow<Format?>(null)
+    val videoFormat = _videoFormat.asStateFlow()
+
+    private val playerListener = object : Player.Listener {
+        override fun onIsPlayingChanged(playing: Boolean) {
+            _isPlaying.value = playing
+        }
+
+        override fun onPlaybackStateChanged(state: Int) {
+            _playbackState.value = state
+            _isPlaying.value = sharedPlayer?.isPlaying == true
+            if (state == Player.STATE_READY) {
+                _duration.value = sharedPlayer?.duration?.coerceAtLeast(0L) ?: 0L
+            }
+            if (state == Player.STATE_ENDED && _repeatMode.value == PremiumRepeatMode.OFF && _autoPlayNext.value && hasNextVideo()) {
+                playNextVideo()
+            }
+        }
+
+        override fun onMediaItemTransition(mediaItem: Media3Item?, reason: Int) {
+            val newUri = mediaItem?.localConfiguration?.uri?.toString()
+            if (newUri != null) {
+                _currentVideoUri.value = newUri
+                _currentVideoIndex.value = _videoPlaylist.value.indexOf(newUri).coerceAtLeast(0)
+            }
+        }
+
+        override fun onTracksChanged(tracks: Tracks) {
+            val selectedVideoFormat = tracks.groups
+                .firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.isSelected }
+                ?.let { group ->
+                    (0 until group.length)
+                        .firstOrNull { group.isTrackSelected(it) }
+                        ?.let { trackIndex -> group.getTrackFormat(trackIndex) }
+                }
+            if (selectedVideoFormat != null) {
+                _videoFormat.value = selectedVideoFormat
+            }
+        }
+    }
+
+    private var positionUpdateJob: Job? = null
 
     private fun tryBeginFileOperation(): Boolean {
         return fileOpMutex.tryLock()
@@ -195,10 +290,42 @@ class GalleryViewModel @Inject constructor(
                 .apply {
                     repeatMode = Player.REPEAT_MODE_OFF
                     playWhenReady = true
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(C.USAGE_MEDIA)
+                            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                            .build(),
+                        true
+                    )
                     setHandleAudioBecomingNoisy(true)
+                    volume = 1f
+                    addListener(playerListener)
+                    playbackParameters = PlaybackParameters(_playbackSpeed.value, _playbackPitch.value)
                 }
+            startPositionUpdates()
         }
         return sharedPlayer!!
+    }
+
+    private fun startPositionUpdates() {
+        positionUpdateJob?.cancel()
+        positionUpdateJob = viewModelScope.launch {
+            while (isActive) {
+                sharedPlayer?.let { p ->
+                    _currentPosition.value = p.currentPosition
+                    _bufferedPosition.value = p.bufferedPosition
+
+                    _sleepTimerMs.value?.let { sleepTime ->
+                        if (System.currentTimeMillis() >= sleepTime) {
+                            p.pause()
+                            _sleepTimerMs.value = null
+                            _events.send(GalleryEvent.ShowToast("Sleep timer ended"))
+                        }
+                    }
+                }
+                delay(if (_isPlaying.value) 200L else 500L)
+            }
+        }
     }
 
     fun resetPlayer(player: ExoPlayer) {
@@ -261,20 +388,10 @@ class GalleryViewModel @Inject constructor(
 
     val media: StateFlow<List<MediaItem>> = _mediaIndexes.map { it.all }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private val _videoPlaylist = MutableStateFlow<List<String>>(emptyList())
-    val videoPlaylist = _videoPlaylist.asStateFlow()
-
-    private val _currentVideo = MutableStateFlow<String?>(null)
-    val currentVideo = _currentVideo.asStateFlow()
-
-    private val _currentVideoIndex = MutableStateFlow(0)
-    val currentVideoIndex = _currentVideoIndex.asStateFlow()
-
-    private val _playbackState = MutableStateFlow(VideoPlaybackState())
-    val playbackState = _playbackState.asStateFlow()
-
-    fun updatePlaybackState(uri: String, position: Long, speed: Float, playWhenReady: Boolean) {
-        _playbackState.value = VideoPlaybackState(uri, position, speed, playWhenReady)
+    fun updatePlaybackState(uri: String?, position: Long, speed: Float, playWhenReady: Boolean) {
+        if (uri != null) {
+            prefs.edit().putLong(uri, position).apply()
+        }
     }
 
     fun setVideoPlaylist(playlist: List<String>) {
@@ -284,32 +401,179 @@ class GalleryViewModel @Inject constructor(
     }
 
     fun openVideo(uri: String) {
-        _currentVideo.value = uri
-        _currentVideoIndex.value = _videoPlaylist.value.indexOf(uri).takeIf { it >= 0 } ?: 0
-        if (_playbackState.value.uri != uri) {
-            _playbackState.value = VideoPlaybackState(
-                uri = uri,
-                position = 0L,
-                speed = 1f,
-                playWhenReady = true
-            )
+        val player = getPlayer()
+        _currentVideoUri.value = uri
+
+        val playlist = _videoPlaylist.value
+        if (playlist.isEmpty()) {
+            _videoPlaylist.value = listOf(uri)
+            _currentVideoIndex.value = 0
+        } else {
+            val absoluteIndex = playlist.indexOfFirst { it == uri || Uri.parse(it) == Uri.parse(uri) }
+            if (absoluteIndex != -1) {
+                _currentVideoIndex.value = absoluteIndex
+            } else {
+                _videoPlaylist.value = listOf(uri) + playlist
+                _currentVideoIndex.value = 0
+            }
+        }
+
+        viewModelScope.launch(Dispatchers.Default) {
+            val absoluteIndex = _currentVideoIndex.value
+            val currentList = _videoPlaylist.value
+
+            val fromIndex = maxOf(0, absoluteIndex - 20)
+            val toIndex = minOf(currentList.size, absoluteIndex + 40)
+            val itemsToLoad = currentList.subList(fromIndex, toIndex).map { Media3Item.fromUri(Uri.parse(it)) }
+            val relativeIndex = absoluteIndex - fromIndex
+
+            val savedPos = prefs.getLong(uri, 0L)
+
+            withContext(Dispatchers.Main) {
+                try {
+                    player.setMediaItems(itemsToLoad)
+                    player.prepare()
+                    player.seekTo(relativeIndex, savedPos)
+                    player.playWhenReady = true
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to load media items", e)
+                }
+            }
         }
     }
 
-    fun playNextVideo(repeatMode: Int = Player.REPEAT_MODE_OFF) {
-        val current = _currentVideo.value ?: return
-        val nextUri = if (repeatMode == Player.REPEAT_MODE_ALL) getNextGlobalVideoRepeat(current) else getNextGlobalVideo(current)
-        if (nextUri != null) {
-            openVideo(nextUri)
+    fun togglePlayPause() {
+        val p = sharedPlayer ?: return
+        if (_playbackState.value == Player.STATE_ENDED) {
+            p.seekTo(0)
+            p.play()
+        } else if (p.isPlaying) {
+            p.pause()
+        } else {
+            p.play()
         }
     }
 
-    fun playPreviousVideo(repeatMode: Int = Player.REPEAT_MODE_OFF) {
-        val current = _currentVideo.value ?: return
-        val prevUri = if (repeatMode == Player.REPEAT_MODE_ALL) getPreviousGlobalVideoRepeat(current) else getPreviousGlobalVideo(current)
-        if (prevUri != null) {
-            openVideo(prevUri)
+    fun seekTo(positionMs: Long) {
+        sharedPlayer?.seekTo(positionMs)
+    }
+
+    fun seekForward(dynamicSeekMs: Long = 10000L) {
+        val p = sharedPlayer ?: return
+        p.seekTo((p.currentPosition + dynamicSeekMs).coerceAtMost(_duration.value))
+    }
+
+    fun seekBackward(dynamicSeekMs: Long = 10000L) {
+        val p = sharedPlayer ?: return
+        p.seekTo((p.currentPosition - dynamicSeekMs).coerceAtLeast(0L))
+    }
+
+    fun hasNextVideo(): Boolean {
+        return sharedPlayer?.hasNextMediaItem() == true
+    }
+
+    fun hasPreviousVideo(): Boolean {
+        return sharedPlayer?.hasPreviousMediaItem() == true
+    }
+
+    fun playNextVideo() {
+        if (hasNextVideo()) {
+            sharedPlayer?.seekToNextMediaItem()
+            sharedPlayer?.playWhenReady = true
+        } else if (_repeatMode.value == PremiumRepeatMode.ALL && _videoPlaylist.value.isNotEmpty()) {
+            sharedPlayer?.seekToDefaultPosition(0)
+            sharedPlayer?.playWhenReady = true
         }
+    }
+
+    fun playPreviousVideo() {
+        val p = sharedPlayer ?: return
+        if (p.currentPosition > 3000L) {
+            p.seekTo(0L)
+        } else if (hasPreviousVideo()) {
+            p.seekToPreviousMediaItem()
+            p.playWhenReady = true
+        } else if (_repeatMode.value == PremiumRepeatMode.ALL && _videoPlaylist.value.isNotEmpty()) {
+            sharedPlayer?.seekToDefaultPosition(_videoPlaylist.value.lastIndex.coerceAtMost(sharedPlayer?.mediaItemCount?.minus(1) ?: 0))
+            sharedPlayer?.playWhenReady = true
+        }
+    }
+
+    fun setPlaybackSpeed(speed: Float) {
+        _playbackSpeed.value = speed
+        sharedPlayer?.playbackParameters = PlaybackParameters(speed, _playbackPitch.value)
+        prefs.edit().putFloat("speed", speed).apply()
+    }
+
+    fun increaseSpeed() {
+        setPlaybackSpeed((_playbackSpeed.value * 2f).coerceAtMost(8f))
+    }
+
+    fun resetSpeed() {
+        val savedSpeed = prefs.getFloat("speed", 1f)
+        _playbackSpeed.value = savedSpeed
+        sharedPlayer?.playbackParameters = PlaybackParameters(savedSpeed, _playbackPitch.value)
+    }
+
+    fun setPitch(pitch: Float) {
+        _playbackPitch.value = pitch
+        sharedPlayer?.playbackParameters = PlaybackParameters(_playbackSpeed.value, pitch)
+        prefs.edit().putFloat("pitch", pitch).apply()
+    }
+
+    fun setAutoPlayNext(enabled: Boolean) {
+        _autoPlayNext.value = enabled
+        prefs.edit().putBoolean("autoPlayNext", enabled).apply()
+        if (enabled) {
+            cycleRepeatMode(PremiumRepeatMode.OFF)
+        }
+    }
+
+    fun cycleRepeatMode(mode: PremiumRepeatMode? = null) {
+        val newMode = mode ?: PremiumRepeatMode.entries[(_repeatMode.value.ordinal + 1) % PremiumRepeatMode.entries.size]
+        _repeatMode.value = newMode
+        prefs.edit().putInt("autoRepeat", newMode.ordinal).apply()
+        sharedPlayer?.repeatMode = when (newMode) {
+            PremiumRepeatMode.OFF -> Player.REPEAT_MODE_OFF
+            PremiumRepeatMode.ONE -> Player.REPEAT_MODE_ONE
+            PremiumRepeatMode.ALL -> Player.REPEAT_MODE_ALL
+        }
+        if (newMode != PremiumRepeatMode.OFF) {
+            setAutoPlayNext(false)
+        }
+    }
+
+    fun setBackgroundPlay(enabled: Boolean) {
+        _backgroundPlay.value = enabled
+        prefs.edit().putBoolean("backgroundPlay", enabled).apply()
+    }
+
+    fun startSleepTimer(minutes: Int) {
+        _sleepTimerMs.value = System.currentTimeMillis() + (minutes * 60 * 1000L)
+    }
+
+    fun cancelSleepTimer() {
+        _sleepTimerMs.value = null
+    }
+
+    fun remainingSleepTime(): Long? {
+        return _sleepTimerMs.value?.let { maxOf(0L, it - System.currentTimeMillis()) }
+    }
+
+    fun setAudioDelay(delayMs: Float) {
+        _audioDelayMs.value = delayMs
+    }
+
+    fun savePlaybackPosition() {
+        val uri = _currentVideoUri.value ?: return
+        val position = sharedPlayer?.currentPosition ?: return
+        prefs.edit().putLong(uri, position).apply()
+    }
+
+    fun restorePlaybackPosition() {
+        val uri = _currentVideoUri.value ?: return
+        val position = prefs.getLong(uri, 0L)
+        sharedPlayer?.seekTo(position)
     }
 
     private fun getThermalFactor(): Double { return when (_thermalState.value) { PowerManager.THERMAL_STATUS_NONE -> 1.0; PowerManager.THERMAL_STATUS_LIGHT -> 0.9; PowerManager.THERMAL_STATUS_MODERATE -> 0.75; PowerManager.THERMAL_STATUS_SEVERE -> 0.5; PowerManager.THERMAL_STATUS_CRITICAL -> 0.25; PowerManager.THERMAL_STATUS_EMERGENCY, PowerManager.THERMAL_STATUS_SHUTDOWN -> 0.1; else -> 1.0 } }
@@ -453,6 +717,17 @@ class GalleryViewModel @Inject constructor(
 
     fun forceSync() {
         viewModelScope.launch { safeLoadLibrary(forceRefresh = true) }
+    }
+
+    fun refreshAfterFileOperation() {
+        viewModelScope.launch {
+            delay(500)
+            safeLoadLibrary(forceRefresh = true)
+            delay(700)
+            safeLoadLibrary(forceRefresh = true)
+            delay(1000)
+            safeLoadLibrary(forceRefresh = true)
+        }
     }
 
     fun refreshData() = forceSync()
@@ -691,7 +966,7 @@ class GalleryViewModel @Inject constructor(
             if (originalMediaId != null) {
                 _mediaMap.value[originalMediaId]?.let { originalItem -> moveToTrashInternal(listOf(originalItem)) }
             } else {
-                forceSync()
+                refreshAfterFileOperation()
             }
         }
     }
@@ -729,6 +1004,7 @@ class GalleryViewModel @Inject constructor(
         clearTempVaultCache()
         sharedPlayer?.release()
         sharedPlayer = null
+        positionUpdateJob?.cancel()
     }
 
     private fun invalidatePagingSources() {
@@ -912,7 +1188,7 @@ class GalleryViewModel @Inject constructor(
                 clearPendingOperationStates()
                 _isBusy.value = false
                 endFileOperation()
-                forceSync()
+                refreshAfterFileOperation()
                 _events.send(GalleryEvent.ShowToast("Operation cancelled safely"))
             }
         }
@@ -1185,7 +1461,7 @@ class GalleryViewModel @Inject constructor(
                         if (isMove) {
                             removeMediaLocally(validItems.map { it.id }.toSet())
                         }
-                        forceSync()
+                        refreshAfterFileOperation()
                         invalidatePagingSources()
 
                         _events.send(GalleryEvent.ShowToast(msg.ifEmpty { "Operation successful" }))
@@ -1267,7 +1543,7 @@ class GalleryViewModel @Inject constructor(
                     return@launch
                 } else if (pendingMoveOperation && pendingAutoDeleteHandledByOs) {
                     removeMediaLocally(pendingMoveIds)
-                    forceSync()
+                    refreshAfterFileOperation()
                     invalidatePagingSources()
                     _events.trySend(GalleryEvent.OperationSuccess)
                     _events.trySend(GalleryEvent.ShowToast("Operation completed successfully"))
@@ -1277,7 +1553,7 @@ class GalleryViewModel @Inject constructor(
                     when (result) {
                         is MediaOpResult.Success -> {
                             removeMediaLocally(pendingMoveIds)
-                            forceSync()
+                            refreshAfterFileOperation()
                             invalidatePagingSources()
                             _events.trySend(GalleryEvent.OperationSuccess)
                             _events.trySend(GalleryEvent.ShowToast("Operation completed successfully"))
@@ -1285,14 +1561,14 @@ class GalleryViewModel @Inject constructor(
                         }
                         is MediaOpResult.Failed -> {
                             mediaOpEngine.rollback(pendingRollbackUris)
-                            forceSync()
+                            refreshAfterFileOperation()
                             _events.trySend(GalleryEvent.ShowToast(result.reason))
                             onComplete?.invoke(result)
                         }
                         else -> {}
                     }
                 } else {
-                    forceSync()
+                    refreshAfterFileOperation()
                     invalidatePagingSources()
                     _events.trySend(GalleryEvent.OperationSuccess)
                     _events.trySend(GalleryEvent.ShowToast("Operation completed successfully"))
@@ -1302,7 +1578,7 @@ class GalleryViewModel @Inject constructor(
                 if (pendingRollbackUris.isNotEmpty()) {
                     mediaOpEngine.rollback(pendingRollbackUris)
                 }
-                forceSync()
+                refreshAfterFileOperation()
                 _events.trySend(GalleryEvent.ShowToast("Permission denied. Rollback complete."))
                 onComplete?.invoke(MediaOpResult.Cancelled)
             }
@@ -1369,11 +1645,11 @@ class GalleryViewModel @Inject constructor(
     }.let { Unit }
 
     fun hideAlbums(albumIds: List<String>) = viewModelScope.launch(Dispatchers.IO) {
-        try { engine.hideAlbums(albumIds) } finally { forceSync() }
+        try { engine.hideAlbums(albumIds) } finally { refreshAfterFileOperation() }
     }.let { Unit }
 
     fun unhideMedia(ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {
-        try { ids.forEach { dao.removeFromSecure(it) } } finally { forceSync() }
+        try { ids.forEach { dao.removeFromSecure(it) } } finally { refreshAfterFileOperation() }
     }.let { Unit }
 
     fun deleteSecureMedia(ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {
@@ -1450,34 +1726,6 @@ class GalleryViewModel @Inject constructor(
         if (nextIndex in 1..processedMedia.value.lastIndex) preloadCallback(processedMedia.value[nextIndex].uri)
     }
 
-    fun getGlobalVideoPlaylist(): List<String> = videoPlaylist.value
-    fun getGlobalVideoIndex(videoUri: String): Int = videoPlaylist.value.indexOf(videoUri)
-    fun getNextGlobalVideo(videoUri: String): String? {
-        val playlist = videoPlaylist.value
-        val currentIndex = playlist.indexOf(videoUri)
-        if (currentIndex == -1) return null
-        return playlist.getOrNull(currentIndex + 1)
-    }
-    fun getPreviousGlobalVideo(videoUri: String): String? {
-        val playlist = videoPlaylist.value
-        val currentIndex = playlist.indexOf(videoUri)
-        if (currentIndex == -1) return null
-        return playlist.getOrNull(currentIndex - 1)
-    }
-    fun getNextGlobalVideoRepeat(videoUri: String): String? {
-        val playlist = videoPlaylist.value
-        if (playlist.isEmpty()) return null
-        val currentIndex = playlist.indexOf(videoUri)
-        if (currentIndex == -1) return playlist.first()
-        return playlist[(currentIndex + 1) % playlist.size]
-    }
-    fun getPreviousGlobalVideoRepeat(videoUri: String): String? {
-        val playlist = videoPlaylist.value
-        if (playlist.isEmpty()) return null
-        val currentIndex = playlist.indexOf(videoUri)
-        if (currentIndex == -1) return playlist.first()
-        return if (currentIndex == 0) playlist.last() else playlist[currentIndex - 1]
-    }
 }
 
 class MediaPagingSource(
