@@ -28,7 +28,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
-import androidx.compose.material3.SegmentedButtonDefaults.Icon
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
@@ -60,7 +59,6 @@ import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.session.CommandButton
 import androidx.media3.ui.PlayerView
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
@@ -239,13 +237,20 @@ fun StoriesScreen(
                                 ) {
                                     items(displayStories.size, key = { index -> displayStories[index].id }, contentType = { "story" }) { index ->
                                         val story = displayStories[index]
+                                        val displayTitle = if (story.id.startsWith("manual")) {
+                                            story.title
+                                        } else {
+                                            "Memory ${index + 1}"
+                                        }
+
                                         StoryCard(
                                             story = story,
+                                            displayTitle = displayTitle,
                                             sharedTransitionScope = this@SharedTransitionLayout,
                                             animatedVisibilityScope = this@AnimatedContent,
                                             onClick = { activeStoryIndex = index },
                                             onDelete = { storyViewModel.deleteStory(story.id) },
-                                            onSave = { Toast.makeText(context, "Exporting '${story.title}' to Gallery...", Toast.LENGTH_SHORT).show() }
+                                            onSave = { Toast.makeText(context, "Exporting '$displayTitle' to Gallery...", Toast.LENGTH_SHORT).show() }
                                         )
                                     }
                                 }
@@ -255,8 +260,15 @@ fun StoriesScreen(
                 }
             } else {
                 displayStories.getOrNull(currentIndex)?.let { activeStory ->
+                    val displayTitle = if (activeStory.id.startsWith("manual")) {
+                        activeStory.title
+                    } else {
+                        "Memory ${currentIndex + 1}"
+                    }
+
                     StoryPlayer(
                         story = activeStory,
+                        displayTitle = displayTitle,
                         sharedExoPlayer = sharedExoPlayer,
                         sharedTransitionScope = this@SharedTransitionLayout,
                         animatedVisibilityScope = this@AnimatedContent,
@@ -317,6 +329,7 @@ fun StoriesScreen(
 @Composable
 fun StoryCard(
     story: UiStory,
+    displayTitle: String,
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
     onClick: () -> Unit,
@@ -375,7 +388,7 @@ fun StoryCard(
                 }
 
                 Column(modifier = Modifier.align(Alignment.BottomStart).padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
-                    Text(story.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(displayTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(4.dp))
                     Text("${story.items.size} Items • ${if (videoCount > 0) "$videoCount Videos • " else ""}$timeStr", color = Color.White.copy(alpha = 0.9f), style = MaterialTheme.typography.labelSmall)
                 }
@@ -396,6 +409,7 @@ fun StoryCard(
 @Composable
 fun StoryPlayer(
     story: UiStory,
+    displayTitle: String,
     sharedExoPlayer: ExoPlayer,
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
@@ -519,7 +533,13 @@ fun StoryPlayer(
                         }
                     )
 
-                    StoryHeaderOverlay(story = story, currentIndex = currentIndex, currentItemProgress = currentItemProgress, onClose = onClose)
+                    StoryHeaderOverlay(
+                        story = story,
+                        displayTitle = displayTitle,
+                        currentIndex = currentIndex,
+                        currentItemProgress = currentItemProgress,
+                        onClose = onClose
+                    )
                 }
             }
         }
@@ -527,7 +547,7 @@ fun StoryPlayer(
 }
 
 @Composable
-fun StoryHeaderOverlay(story: UiStory, currentIndex: Int, currentItemProgress: State<Float>, onClose: () -> Unit) {
+fun StoryHeaderOverlay(story: UiStory, displayTitle: String, currentIndex: Int, currentItemProgress: State<Float>, onClose: () -> Unit) {
     Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).padding(top = 16.dp, start = 8.dp, end = 8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             for (index in story.items.indices) {
@@ -539,7 +559,7 @@ fun StoryHeaderOverlay(story: UiStory, currentIndex: Int, currentItemProgress: S
             AsyncImage(model = story.coverUri, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(32.dp).clip(CircleShape).border(1.dp, Color.White.copy(0.2f), CircleShape))
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(story.title, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+                Text(displayTitle, color = Color.White, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
                 if (story.subtitle.isNotEmpty()) {
                     Text(story.subtitle, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
                 }
