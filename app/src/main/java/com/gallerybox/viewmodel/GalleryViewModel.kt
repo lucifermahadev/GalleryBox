@@ -1608,32 +1608,103 @@ class GalleryViewModel @Inject constructor(
         }
     }
 
-    fun renameAlbum(album: Album, newName: String) = if (newName.isNotBlank()) viewModelScope.launch(Dispatchers.IO) {
-        dao.insertAlbumMeta((dao.getAlbumMetaSync(album.id) ?: AlbumEntity(id = album.id)).copy(customName = newName))
-        _events.trySend(GalleryEvent.ShowToast("Album renamed"))
-    } else Unit
-
-    fun toggleAlbumPin(album: Album) = viewModelScope.launch(Dispatchers.IO) {
-        try {
-            if (album.isPinned) dao.removePinnedAlbum(album.id) else dao.addPinnedAlbum(AlbumEntity(id = album.id, isPinned = true))
-        } catch (e: Exception) {}
-    }
-
     fun createAlbum(name: String, sdCard: Boolean) {
         if (name.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                val trimmed = name.trim()
                 val newAlbumId = "manual_${System.currentTimeMillis()}"
-                dao.insertManualAlbum(ManualAlbumEntity(id = newAlbumId, name = name.trim(), hasBeenUsed = false))
-                val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                val albumDir = File(root, name.trim())
-                if (!albumDir.exists()) { albumDir.mkdirs() }
-                _events.trySend(GalleryEvent.ShowToast("Album '${name.trim()}' created!"))
+
+                val volumeName = if (sdCard) resolveSdCardVolumeName() else
+                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.VOLUME_EXTERNAL_PRIMARY else null)
+
+                if (sdCard && volumeName == null) {
+                    _events.trySend(GalleryEvent.ShowToast("No SD card detected"))
+                    return@launch
+                }
+
+                dao.insertManualAlbum(ManualAlbumEntity(id = newAlbumId, name = trimmed, hasBeenUsed = false))
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val resolver = getApplication<Application>().contentResolver
+                    val collection = MediaStore.Files.getContentUri(volumeName!!)
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, ".nomedia")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/$trimmed/")
+                        put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                    }
+                    // Inserting then deleting a placeholder row forces MediaStore/FUSE to
+                    // materialize the folder on the requested volume (works for SD cards too).
+                    resolver.insert(collection, values)?.let { resolver.delete(it, null, null) }
+                } else if (!sdCard) {
+                    val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                    File(root, trimmed).mkdirs()
+                }
+
+                _events.trySend(GalleryEvent.ShowToast("Album '$trimmed' created!"))
             } catch (e: Exception) {
                 Log.e("ALBUM_DEBUG", "Failed to create album", e)
                 _events.trySend(GalleryEvent.ShowToast("Failed to create album: ${e.message}"))
             }
         }
+    }
+
+    private fun resolveSdCardVolumeName(): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        return MediaStore.getExternalVolumeNames(getApplication())
+            .firstOrNull { it != MediaStore.VOLUME_EXTERNAL_PRIMARY }
+    }
+
+    fun renameAlbum(album: Album, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank() || trimmed == album.name) return
+
+        val itemsInAlbum = _rawMedia.value.filter { it.bucketId == album.id }
+
+        if (itemsInAlbum.isEmpty()) {
+            // Empty/unused manual album — just rename the folder (if it exists) and the DB row.
+            viewModelScope.launch(Dispatchers.IO) {
+                val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                val oldDir = File(root, album.name)
+                if (oldDir.exists()) oldDir.renameTo(File(root, trimmed))
+                dao.insertManualAlbum(ManualAlbumEntity(id = album.id, name = trimmed, hasBeenUsed = false))
+                _events.trySend(GalleryEvent.ShowToast("Album renamed"))
+            }
+            return
+        }
+
+        if (!tryBeginFileOperation()) {
+            _events.trySend(GalleryEvent.ShowToast("An operation is already in progress"))
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val volumeName = resolveAlbumVolumeName(album.id)
+            val targetAlbum = TargetAlbum(
+                id = album.id,
+                name = trimmed,
+                relativePath = "Pictures/$trimmed/",
+                bucketId = album.id,
+                volumeName = volumeName
+            )
+            // performMediaOperation physically moves every file into the new folder and
+            // already handles the endFileOperation()/permission-request flow for us.
+            performMediaOperation(itemsInAlbum.map { it.id }, targetAlbum, isMove = true) { result ->
+                if (result is MediaOpResult.Success || result is MediaOpResult.AlreadyExists) {
+                    viewModelScope.launch(Dispatchers.IO) {
+                        dao.insertAlbumMeta(
+                            (dao.getAlbumMetaSync(album.id) ?: AlbumEntity(id = album.id)).copy(customName = trimmed)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun toggleAlbumPin(album: Album) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            if (album.isPinned) dao.removePinnedAlbum(album.id) else dao.addPinnedAlbum(AlbumEntity(id = album.id, isPinned = true))
+        } catch (e: Exception) {}
     }
 
     fun hideItems(ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {
