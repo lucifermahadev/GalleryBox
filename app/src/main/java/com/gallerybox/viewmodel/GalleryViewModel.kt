@@ -24,20 +24,20 @@ import android.provider.MediaStore
 import android.util.Log
 import android.util.LruCache
 import androidx.core.net.toUri
-import com.gallerybox.data.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem as Media3Item
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
-import androidx.media3.common.Format
 import androidx.media3.common.AudioAttributes
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.paging.*
 import androidx.work.*
+import com.gallerybox.data.*
 import com.gallerybox.engine.*
 import com.gallerybox.ui.screens.picture.GalleryGridItem
 import com.gallerybox.ui.screens.trash.TrashCleanupWorker
@@ -171,6 +171,9 @@ class GalleryViewModel @Inject constructor(
     private var pendingOperationIsMove: Boolean = false
     private var pendingOperationOnComplete: ((MediaOpResult) -> Unit)? = null
 
+    @Volatile private var pendingInternalTrashEntities: List<TrashEntity> = emptyList()
+    @Volatile private var pendingInternalTrashIds: Set<Long> = emptySet()
+
     private val _thermalState = MutableStateFlow(PowerManager.THERMAL_STATUS_NONE)
     private var lastMediaStoreGeneration = 0L
     @Volatile private var lastSyncTime = 0L
@@ -242,8 +245,12 @@ class GalleryViewModel @Inject constructor(
             if (state == Player.STATE_READY) {
                 _duration.value = sharedPlayer?.duration?.coerceAtLeast(0L) ?: 0L
             }
-            if (state == Player.STATE_ENDED && _repeatMode.value == PremiumRepeatMode.OFF && _autoPlayNext.value && hasNextVideo()) {
-                playNextVideo()
+            if (state == Player.STATE_ENDED) {
+                if (_repeatMode.value == PremiumRepeatMode.ALL) {
+                    playNextVideo()
+                } else if (_repeatMode.value == PremiumRepeatMode.OFF && _autoPlayNext.value) {
+                    playNextVideo()
+                }
             }
         }
 
@@ -402,44 +409,65 @@ class GalleryViewModel @Inject constructor(
 
     fun openVideo(uri: String) {
         val player = getPlayer()
+
+        // Always use current playlist
+        var playlist = _videoPlaylist.value
+
+        // Rebuild playlist if needed
+        if (playlist.isEmpty()) {
+            playlist = _mediaIndexes.value.videos
+                .map { it.uri.toString() }
+
+            _videoPlaylist.value = playlist
+        }
+
+        if (playlist.isEmpty()) {
+            Log.e(TAG, "Video playlist is empty")
+            return
+        }
+
+        // Find clicked video
+        val index = playlist.indexOf(uri)
+
+        if (index == -1) {
+            Log.e(TAG, "Video not found in playlist: $uri")
+            return
+        }
+
+        _currentVideoIndex.value = index
         _currentVideoUri.value = uri
 
-        val playlist = _videoPlaylist.value
-        if (playlist.isEmpty()) {
-            _videoPlaylist.value = listOf(uri)
-            _currentVideoIndex.value = 0
-        } else {
-            val absoluteIndex = playlist.indexOfFirst { it == uri || Uri.parse(it) == Uri.parse(uri) }
-            if (absoluteIndex != -1) {
-                _currentVideoIndex.value = absoluteIndex
-            } else {
-                _videoPlaylist.value = listOf(uri) + playlist
-                _currentVideoIndex.value = 0
-            }
+        val mediaItems = playlist.map {
+            Media3Item.fromUri(Uri.parse(it))
         }
 
-        viewModelScope.launch(Dispatchers.Default) {
-            val absoluteIndex = _currentVideoIndex.value
-            val currentList = _videoPlaylist.value
+        val savedPosition = prefs.getLong(uri, 0L)
 
-            val fromIndex = maxOf(0, absoluteIndex - 20)
-            val toIndex = minOf(currentList.size, absoluteIndex + 40)
-            val itemsToLoad = currentList.subList(fromIndex, toIndex).map { Media3Item.fromUri(Uri.parse(it)) }
-            val relativeIndex = absoluteIndex - fromIndex
+        player.stop()
+        player.clearMediaItems()
 
-            val savedPos = prefs.getLong(uri, 0L)
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build(),
+            true
+        )
 
-            withContext(Dispatchers.Main) {
-                try {
-                    player.setMediaItems(itemsToLoad)
-                    player.prepare()
-                    player.seekTo(relativeIndex, savedPos)
-                    player.playWhenReady = true
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to load media items", e)
-                }
-            }
-        }
+        player.setMediaItems(
+            mediaItems,
+            index,
+            savedPosition
+        )
+
+        player.volume = 1f
+        player.playWhenReady = true
+        player.prepare()
+        player.play()
+
+        Log.d(TAG, "Opened video index=$index")
+        Log.d(TAG, "Playlist size=${playlist.size}")
+        Log.d(TAG, "Current=${playlist[index]}")
     }
 
     fun togglePlayPause() {
@@ -469,34 +497,40 @@ class GalleryViewModel @Inject constructor(
     }
 
     fun hasNextVideo(): Boolean {
-        return sharedPlayer?.hasNextMediaItem() == true
+        return _currentVideoIndex.value + 1 < _videoPlaylist.value.size
     }
 
     fun hasPreviousVideo(): Boolean {
-        return sharedPlayer?.hasPreviousMediaItem() == true
+        return _currentVideoIndex.value > 0
     }
 
     fun playNextVideo() {
-        if (hasNextVideo()) {
-            sharedPlayer?.seekToNextMediaItem()
-            sharedPlayer?.playWhenReady = true
-        } else if (_repeatMode.value == PremiumRepeatMode.ALL && _videoPlaylist.value.isNotEmpty()) {
-            sharedPlayer?.seekToDefaultPosition(0)
-            sharedPlayer?.playWhenReady = true
+        var next = _currentVideoIndex.value + 1
+        if (next >= _videoPlaylist.value.size) {
+            if (_repeatMode.value == PremiumRepeatMode.ALL && _videoPlaylist.value.isNotEmpty()) {
+                next = 0 // Wrap around if Repeat All is enabled
+            } else {
+                return
+            }
         }
+        openVideo(_videoPlaylist.value[next])
     }
 
     fun playPreviousVideo() {
-        val p = sharedPlayer ?: return
-        if (p.currentPosition > 3000L) {
-            p.seekTo(0L)
-        } else if (hasPreviousVideo()) {
-            p.seekToPreviousMediaItem()
-            p.playWhenReady = true
-        } else if (_repeatMode.value == PremiumRepeatMode.ALL && _videoPlaylist.value.isNotEmpty()) {
-            sharedPlayer?.seekToDefaultPosition(_videoPlaylist.value.lastIndex.coerceAtMost(sharedPlayer?.mediaItemCount?.minus(1) ?: 0))
-            sharedPlayer?.playWhenReady = true
+        if ((sharedPlayer?.currentPosition ?: 0) > 3000L) {
+            sharedPlayer?.seekTo(0)
+            return
         }
+
+        var prev = _currentVideoIndex.value - 1
+        if (prev < 0) {
+            if (_repeatMode.value == PremiumRepeatMode.ALL && _videoPlaylist.value.isNotEmpty()) {
+                prev = _videoPlaylist.value.lastIndex // Wrap around if Repeat All is enabled
+            } else {
+                return
+            }
+        }
+        openVideo(_videoPlaylist.value[prev])
     }
 
     fun setPlaybackSpeed(speed: Float) {
@@ -536,7 +570,7 @@ class GalleryViewModel @Inject constructor(
         sharedPlayer?.repeatMode = when (newMode) {
             PremiumRepeatMode.OFF -> Player.REPEAT_MODE_OFF
             PremiumRepeatMode.ONE -> Player.REPEAT_MODE_ONE
-            PremiumRepeatMode.ALL -> Player.REPEAT_MODE_ALL
+            PremiumRepeatMode.ALL -> Player.REPEAT_MODE_OFF // Handled manually in listener instead
         }
         if (newMode != PremiumRepeatMode.OFF) {
             setAutoPlayNext(false)
@@ -691,8 +725,22 @@ class GalleryViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.Default) {
             processedMedia.collect { list ->
                 val newVideoPlaylist = list.filter { it.isVideo }.map { it.uri.toString() }
-                if (_videoPlaylist.value != newVideoPlaylist) {
-                    _videoPlaylist.value = newVideoPlaylist
+
+                // Allow replacing the playlist if the viewer is closed OR if our current playlist
+                // is missing the full list (e.g. cold start fallback populated a 1-item list).
+                if (_viewerState.value !is GalleryViewerState.Open || _videoPlaylist.value.size <= 1) {
+                    if (_videoPlaylist.value != newVideoPlaylist && newVideoPlaylist.isNotEmpty()) {
+                        _videoPlaylist.value = newVideoPlaylist
+
+                        // Resync current index automatically to fix Next/Prev buttons
+                        val currentOpenUri = _currentVideoUri.value
+                        if (currentOpenUri != null) {
+                            val updatedIndex = newVideoPlaylist.indexOfFirst { Uri.parse(it) == Uri.parse(currentOpenUri) }
+                            if (updatedIndex != -1) {
+                                _currentVideoIndex.value = updatedIndex
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -729,6 +777,7 @@ class GalleryViewModel @Inject constructor(
             safeLoadLibrary(forceRefresh = true)
         }
     }
+
 
     fun refreshData() = forceSync()
 
@@ -972,30 +1021,39 @@ class GalleryViewModel @Inject constructor(
     }
 
     internal fun moveToTrashInternal(items: List<MediaItem>) = viewModelScope.launch(Dispatchers.IO) {
-        try {
-            val resolver = getApplication<Application>().contentResolver
-            val trashItems = items.map { media ->
-                try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        resolver.update(media.uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_TRASHED, 1) }, null, null)
-                    }
-                } catch (_: Exception) {}
-
-                TrashEntity(
-                    deletedTimestamp = System.currentTimeMillis(),
-                    originalPath = media.path,
-                    contentUri = media.uri.toString(),
-                    mediaType = when { media.isVideo -> "video"; else -> "image" },
-                    name = media.name,
-                    size = media.size
-                )
-            }
-            dao.insertTrashItemsBulk(trashItems)
-            removeMediaLocally(items.map { it.id }.toSet())
-        } catch (e: Exception) {
-            Log.e("TRASH", "Move failed", e)
+        if (items.isEmpty()) return@launch
+        val resolver = getApplication<Application>().contentResolver
+        val trashItems = items.map { media ->
+            TrashEntity(
+                deletedTimestamp = System.currentTimeMillis(),
+                originalPath = media.path,
+                contentUri = media.uri.toString(),
+                mediaType = if (media.isVideo) "video" else "image",
+                name = media.name,
+                size = media.size
+            )
         }
-    }.let { Unit }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intentSender = MediaStore.createTrashRequest(resolver, items.map { it.uri }, true).intentSender
+                pendingInternalTrashEntities = trashItems
+                pendingInternalTrashIds = items.map { it.id }.toSet()
+                _events.send(GalleryEvent.RequestPermission(intentSender))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create trash request", e)
+                _events.send(GalleryEvent.ShowToast("Failed to move to trash"))
+            }
+        } else {
+            val successfulUris = mutableListOf<Uri>()
+            items.forEach { media ->
+                try { if (resolver.delete(media.uri, null, null) > 0) successfulUris.add(media.uri) } catch (_: Exception) {}
+            }
+            val verified = trashItems.filter { e -> successfulUris.any { it.toString() == e.contentUri } }
+            if (verified.isNotEmpty()) dao.insertTrashItemsBulk(verified)
+            removeMediaLocally(items.filter { m -> successfulUris.any { it.toString() == m.uri.toString() } }.map { it.id }.toSet())
+        }
+    }
 
     override fun onCleared() {
         super.onCleared()
@@ -1518,6 +1576,19 @@ class GalleryViewModel @Inject constructor(
     }
 
     fun onPermissionResult(granted: Boolean) = viewModelScope.launch(Dispatchers.IO) {
+        if (pendingInternalTrashEntities.isNotEmpty()) {
+            if (granted) {
+                dao.insertTrashItemsBulk(pendingInternalTrashEntities)
+                removeMediaLocally(pendingInternalTrashIds)
+                _events.send(GalleryEvent.OperationSuccess)
+            } else {
+                _events.send(GalleryEvent.ShowToast("Trash permission denied"))
+            }
+            pendingInternalTrashEntities = emptyList()
+            pendingInternalTrashIds = emptySet()
+            return@launch
+        }
+
         val onComplete = pendingOperationOnComplete
         try {
             if (granted) {

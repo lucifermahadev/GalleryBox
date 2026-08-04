@@ -14,10 +14,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -36,6 +38,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -264,92 +267,119 @@ fun TrashScreen(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            Column {
-                if (isBusy && operationProgress == null) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.primary)
-                }
-                LargeTopAppBar(
-                    title = {
-                        Column {
-                            Text(
-                                text = if (isEditMode) "${selectedIds.size} selected" else "Trash Bin",
-                                fontWeight = FontWeight.Bold
-                            )
-                            if (!isEditMode && finalTrashItems.isNotEmpty()) {
-                                Text(
-                                    text = "${finalTrashItems.size} items • ${Formatter.formatShortFileSize(context, trashUiItems.sumOf { it.size })}",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    },
-                    navigationIcon = {
-                        IconButton(
-                            onClick = {
+            val elevation by animateDpAsState(
+                targetValue = if (scrollBehavior.state.overlappedFraction > 0.01f) 8.dp else 0.dp,
+                label = "topBarElevation"
+            )
+
+            Surface(
+                shape = RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier.shadow(elevation, RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp))
+            ) {
+                Column {
+                    if (isBusy && operationProgress == null) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.primary)
+                    }
+                    LargeTopAppBar(
+                        title = {
+                            Column {
                                 if (isEditMode) {
-                                    isEditMode = false
-                                    selectedIds = emptySet()
+                                    AnimatedContent(targetState = selectedIds.size, label = "SelectionCount") { count ->
+                                        Text("✓ $count Selected", fontWeight = FontWeight.Bold)
+                                    }
                                 } else {
-                                    onBack()
+                                    Text("Trash Bin", fontWeight = FontWeight.Bold)
+                                }
+                                if (!isEditMode && finalTrashItems.isNotEmpty()) {
+                                    Text(
+                                        text = "${finalTrashItems.size} items • ${Formatter.formatShortFileSize(context, trashUiItems.sumOf { it.size })}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
                             }
-                        ) {
-                            Icon(if (isEditMode) Icons.Default.Close else Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                        }
-                    },
-                    actions = {
-                        if (isEditMode) {
+                        },
+                        navigationIcon = {
                             IconButton(
                                 onClick = {
-                                    val allIds = finalTrashItems.map { it.id }.toSet()
-                                    selectedIds = if (selectedIds.size == allIds.size) emptySet() else allIds
-                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    if (isEditMode) {
+                                        isEditMode = false
+                                        selectedIds = emptySet()
+                                    } else {
+                                        onBack()
+                                    }
                                 }
                             ) {
-                                Icon(Icons.Default.SelectAll, contentDescription = null)
+                                Icon(if (isEditMode) Icons.Default.Close else Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                             }
-                        } else if (finalTrashItems.isNotEmpty()) {
-                            TextButton(onClick = { isEditMode = !isEditMode }) {
-                                Text("Select", fontWeight = FontWeight.Bold)
-                            }
+                        },
+                        actions = {
+                            if (isEditMode) {
+                                val allSelected = remember(selectedIds, finalTrashItems) {
+                                    finalTrashItems.isNotEmpty() && selectedIds.size == finalTrashItems.size
+                                }
+                                IconButton(
+                                    onClick = {
+                                        if (allSelected) {
+                                            selectedIds = emptySet()
+                                        } else {
+                                            selectedIds = finalTrashItems.map { it.id }.toSet()
+                                        }
+                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = if (allSelected) Icons.Default.CheckCircle else Icons.Default.SelectAll,
+                                        contentDescription = null,
+                                        tint = if (allSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            } else if (finalTrashItems.isNotEmpty()) {
+                                TextButton(onClick = { isEditMode = !isEditMode }) {
+                                    Text("Select", fontWeight = FontWeight.Bold)
+                                }
 
-                            Box {
-                                IconButton(onClick = { showSortMenu = true }) {
-                                    Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort")
+                                Box {
+                                    IconButton(onClick = { showSortMenu = true }) {
+                                        Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort")
+                                    }
+                                    DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                                        DropdownMenuItem(
+                                            text = { Text("Newest Deleted") },
+                                            onClick = { currentSort = TrashSort.NewestDeleted; showSortMenu = false }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Oldest Deleted") },
+                                            onClick = { currentSort = TrashSort.OldestDeleted; showSortMenu = false }
+                                        )
+                                    }
                                 }
-                                DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
-                                    DropdownMenuItem(
-                                        text = { Text("Newest Deleted") },
-                                        onClick = { currentSort = TrashSort.NewestDeleted; showSortMenu = false }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Oldest Deleted") },
-                                        onClick = { currentSort = TrashSort.OldestDeleted; showSortMenu = false }
-                                    )
-                                }
-                            }
 
-                            Box {
-                                IconButton(onClick = { showMenu = true }) {
-                                    Icon(Icons.Rounded.MoreVert, contentDescription = "More")
-                                }
-                                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                                    DropdownMenuItem(
-                                        text = { Text("Empty Trash", color = MaterialTheme.colorScheme.error) },
-                                        leadingIcon = { Icon(Icons.Outlined.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                                        onClick = { showEmptySheet = true; showMenu = false }
-                                    )
+                                Box {
+                                    IconButton(onClick = { showMenu = true }) {
+                                        Icon(Icons.Rounded.MoreVert, contentDescription = "More")
+                                    }
+                                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                                        DropdownMenuItem(
+                                            text = { Text("Empty Trash", color = MaterialTheme.colorScheme.error) },
+                                            leadingIcon = { Icon(Icons.Outlined.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                            onClick = { showEmptySheet = true; showMenu = false }
+                                        )
+                                    }
                                 }
                             }
-                        }
-                    },
-                    colors = TopAppBarDefaults.largeTopAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
-                        scrolledContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
-                    ),
-                    scrollBehavior = scrollBehavior
-                )
+                        },
+                        colors = TopAppBarDefaults.largeTopAppBarColors(
+                            containerColor = Color.Transparent,
+                            scrolledContainerColor = Color.Transparent
+                        ),
+                        scrollBehavior = scrollBehavior
+                    )
+                    if (scrollBehavior.state.overlappedFraction > 0.01f) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    }
+                }
             }
         }
     ) { paddingValues ->
@@ -370,14 +400,27 @@ fun TrashScreen(
                     if (!isEditMode) {
                         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(TrashFilter.entries) { filter ->
-                                FilterChip(
-                                    selected = currentFilter == filter,
-                                    onClick = {
-                                        currentFilter = filter
-                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    },
-                                    label = { Text(filter.name) },
-                                    leadingIcon = {
+                                val isSelected = currentFilter == filter
+                                val scale by animateFloatAsState(if (isSelected) 1.05f else 1f, label = "ChipScale")
+                                val bgColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                                val contentColor = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = bgColor,
+                                    modifier = Modifier
+                                        .scale(scale)
+                                        .height(38.dp)
+                                        .clickable {
+                                            currentFilter = filter
+                                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 16.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.Center
+                                    ) {
                                         Icon(
                                             imageVector = when (filter) {
                                                 TrashFilter.All -> Icons.Rounded.AllInclusive
@@ -387,10 +430,18 @@ fun TrashScreen(
                                                 TrashFilter.Stories -> Icons.Rounded.AutoStories
                                             },
                                             contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
+                                            tint = contentColor,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = filter.name,
+                                            color = contentColor,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold
                                         )
                                     }
-                                )
+                                }
                             }
                         }
                     }
@@ -420,12 +471,19 @@ fun TrashScreen(
                             when (item) {
                                 is TrashGridItem.Header -> {
                                     Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 12.dp)) {
-                                        Text(
-                                            text = item.title,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (item.title == "Expiring Soon" || item.title == "Expired") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                            modifier = Modifier.padding(vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = item.title,
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (item.title == "Expiring Soon" || item.title == "Expired") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                            )
+                                        }
                                     }
                                 }
                                 is TrashGridItem.Media -> {
@@ -462,31 +520,38 @@ fun TrashScreen(
                 exit = slideOutVertically(tween(250)) { it } + fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)
             ) {
-                Surface(shape = RoundedCornerShape(24.dp), tonalElevation = 6.dp, shadowElevation = 10.dp, modifier = Modifier.padding(horizontal = 16.dp)) {
-                    Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp).wrapContentWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(
-                            enabled = !isBusy && selectedIds.isNotEmpty(),
-                            onClick = {
-                                val itemsToRestore = trashEntities.filter { selectedIds.contains(it.id) }
-                                if (itemsToRestore.isNotEmpty()) {
-                                    trashViewModel.restoreTrashItems(itemsToRestore)
-                                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = {
+                            val itemsToRestore = trashEntities.filter { selectedIds.contains(it.id) }
+                            if (itemsToRestore.isNotEmpty()) {
+                                trashViewModel.restoreTrashItems(itemsToRestore)
                             }
-                        ) {
-                            Icon(Icons.Filled.RestoreFromTrash, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Restore (${selectedIds.size})", fontWeight = FontWeight.Bold)
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        TextButton(
-                            enabled = !isBusy && selectedIds.isNotEmpty(),
-                            onClick = { showDeleteSheet = true },
-                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Icon(Icons.Filled.DeleteForever, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Permanent Delete (${selectedIds.size})", fontWeight = FontWeight.Bold)
-                        }
+                        },
+                        modifier = Modifier.weight(1f).height(56.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        enabled = !isBusy && selectedIds.isNotEmpty()
+                    ) {
+                        Icon(Icons.Filled.RestoreFromTrash, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Restore", fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = { showDeleteSheet = true },
+                        modifier = Modifier.weight(1f).height(56.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        enabled = !isBusy && selectedIds.isNotEmpty()
+                    ) {
+                        Icon(Icons.Filled.DeleteForever, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Delete Permanently", maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -696,7 +761,8 @@ fun TrashTile(
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
-    val alpha by animateFloatAsState(if (isSelected) 0.35f else 0f, label = "Alpha")
+    val scale by animateFloatAsState(if (isSelected) 0.97f else 1f, label = "Scale")
+    val alpha by animateFloatAsState(if (isSelected) 0.20f else 0f, label = "Alpha")
     val height = remember(item.id) {
         if (item.type == TrashMediaType.Image) {
             listOf(170.dp, 200.dp, 230.dp).random(Random(item.id xor item.originalPath.hashCode().toLong()))
@@ -707,6 +773,7 @@ fun TrashTile(
 
     Box(
         modifier = modifier
+            .scale(scale)
             .height(height)
             .padding(4.dp)
             .shadow(1.dp, RoundedCornerShape(18.dp))
@@ -766,13 +833,28 @@ fun TrashTile(
         }
 
         if (isEditMode || alpha > 0f) {
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha)))
-            if (isEditMode) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha)))
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .background(Color.White, CircleShape)
+                        .padding(1.dp) // Creates a tiny border effect visually
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            } else if (isEditMode) {
                 Icon(
-                    imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                    imageVector = Icons.Default.RadioButtonUnchecked,
                     contentDescription = null,
-                    tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.White,
-                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
+                    tint = Color.White.copy(alpha = 0.8f),
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(22.dp)
                 )
             }
         }
@@ -865,26 +947,34 @@ class TrashCleanupWorker @AssistedInject constructor(
 
 @Composable
 fun EmptyTrashView(currentFilter: TrashFilter) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant.copy(0.4f), modifier = Modifier.size(96.dp)) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary.copy(0.6f))
+    var isVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { isVisible = true }
+
+    AnimatedVisibility(
+        visible = isVisible,
+        enter = fadeIn(tween(800)) + scaleIn(initialScale = 0.95f)
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant.copy(0.3f), modifier = Modifier.size(120.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary.copy(0.6f))
+                    }
                 }
+                Spacer(Modifier.height(24.dp))
+                Text(
+                    text = if (currentFilter == TrashFilter.All) "Trash Bin is Clean" else "No ${currentFilter.name.lowercase()} inside the bin",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Removed files materialize here",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = if (currentFilter == TrashFilter.All) "Trash Bin is Clean" else "No ${currentFilter.name.lowercase()} inside the bin",
-                color = MaterialTheme.colorScheme.onSurface,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "Removed files materialize here",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall
-            )
         }
     }
 }

@@ -135,10 +135,9 @@ object ImageEngine {
             val baseScaleY: Float
 
             when (imageScaleMode) {
-                "Fit" -> { val s = min(scaleX, scaleY); baseScaleX = s; baseScaleY = s }
                 "Fill" -> { baseScaleX = scaleX; baseScaleY = scaleY }
                 "Original" -> { baseScaleX = 1f; baseScaleY = 1f }
-                else -> { val s = max(scaleX, scaleY); baseScaleX = s; baseScaleY = s } // Crop
+                else -> { val s = min(scaleX, scaleY); baseScaleX = s; baseScaleY = s } // Fit
             }
 
             val cx = screenWidth / 2f
@@ -171,15 +170,18 @@ object ImageEngine {
 object StaticEngine {
     suspend fun apply(
         context: Context, item: MediaItem, flags: Int,
-        imageScaleMode: String, scale: Float, offsetX: Float, offsetY: Float, rotation: Float, dimLevel: Float
+        imageScaleMode: String, scale: Float, offsetX: Float, offsetY: Float, rotation: Float, dimLevel: Float,
+        onSuccess: () -> Unit
     ) = withContext(Dispatchers.IO) {
         try {
             val wm = WallpaperManager.getInstance(context)
             val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
             val bounds = windowManager.currentWindowMetrics.bounds
-            val targetWidth = bounds.width()
-            val targetHeight = bounds.height()
+
+            // Use desired dimensions to match the launcher's expected wallpaper canvas size
+            val targetWidth = max(wm.desiredMinimumWidth, bounds.width())
+            val targetHeight = max(wm.desiredMinimumHeight, bounds.height())
 
             wm.suggestDesiredDimensions(targetWidth, targetHeight)
 
@@ -188,25 +190,47 @@ object StaticEngine {
                 scale, offsetX, offsetY, rotation, dimLevel
             ) ?: throw Exception("Failed to create bitmap, possibly OutOfMemory")
 
-            wm.setBitmap(finalBitmap, null, true, flags)
+            // Handle OEM-specific flag splitting for API 24+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                when (flags) {
+                    WallpaperManager.FLAG_SYSTEM -> {
+                        wm.setBitmap(finalBitmap, null, true, WallpaperManager.FLAG_SYSTEM)
+                    }
+                    WallpaperManager.FLAG_LOCK -> {
+                        wm.setBitmap(finalBitmap, null, true, WallpaperManager.FLAG_LOCK)
+                    }
+                    WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK -> {
+                        wm.setBitmap(finalBitmap, null, true, WallpaperManager.FLAG_SYSTEM)
+                        wm.setBitmap(finalBitmap, null, true, WallpaperManager.FLAG_LOCK)
+                    }
+                    else -> {
+                        wm.setBitmap(finalBitmap, null, true, flags)
+                    }
+                }
+            } else {
+                wm.setBitmap(finalBitmap)
+            }
+
             finalBitmap.recycle()
 
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, "Wallpaper Applied Successfully", Toast.LENGTH_SHORT).show()
-                (context as? Activity)?.finish()
+                onSuccess()
             }
-        } catch (e: SecurityException) {
-            Log.e("StaticEngine", "Permission denied", e)
-            withContext(Dispatchers.Main) { Toast.makeText(context, "Missing wallpaper permissions", Toast.LENGTH_SHORT).show() }
         } catch (e: Exception) {
-            Log.e("StaticEngine", "Failed to apply wallpaper", e)
-            withContext(Dispatchers.Main) { Toast.makeText(context, "Failed to apply wallpaper", Toast.LENGTH_SHORT).show() }
+            // Improved exception logging
+            Log.e("StaticEngine", Log.getStackTraceString(e))
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, e.message ?: "Wallpaper failed", Toast.LENGTH_LONG).show()
+            }
         }
     }
 }
 
 object VideoEngine {
-    suspend fun setVideoWallpaper(context: Context, item: MediaItem, playAudio: Boolean, speed: Float, loop: Boolean, scaleMode: String) = withContext(Dispatchers.IO) {
+    suspend fun setVideoWallpaper(
+        context: Context, item: MediaItem, playAudio: Boolean, loop: Boolean, scaleMode: String, onSuccess: () -> Unit
+    ) = withContext(Dispatchers.IO) {
         try {
             val internalFile = File(context.filesDir, "live_wallpaper_video.mp4")
             if (internalFile.exists()) {
@@ -225,7 +249,6 @@ object VideoEngine {
             prefs.edit {
                 putString("wallpaper_video_uri", safeUri)
                 putBoolean("wallpaper_video_audio", playAudio)
-                putFloat("wallpaper_video_speed", speed)
                 putBoolean("wallpaper_video_loop", loop)
                 putString("wallpaper_video_scale_mode", scaleMode)
             }
@@ -236,6 +259,7 @@ object VideoEngine {
                         putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT, ComponentName(context, VideoWallpaperService::class.java))
                     }
                     context.startActivity(intent)
+                    onSuccess()
                 } catch (e: Exception) {
                     Toast.makeText(context, "Live Wallpapers not supported on this device", Toast.LENGTH_SHORT).show()
                 }
@@ -276,11 +300,11 @@ class VideoWallpaperService : WallpaperService() {
 
             exoPlayer?.apply {
                 volume = if (prefs.getBoolean("wallpaper_video_audio", false)) 1f else 0f
-                setPlaybackSpeed(prefs.getFloat("wallpaper_video_speed", 1f))
+                setPlaybackSpeed(1f)
                 repeatMode = if (prefs.getBoolean("wallpaper_video_loop", true)) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
 
-                val scaleModeStr = prefs.getString("wallpaper_video_scale_mode", "Crop")
-                videoScalingMode = if (scaleModeStr == "Fit" || scaleModeStr == "Original") C.VIDEO_SCALING_MODE_SCALE_TO_FIT else C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                val scaleModeStr = prefs.getString("wallpaper_video_scale_mode", "Fit")
+                videoScalingMode = if (scaleModeStr == "Fill") C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING else C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
                 setMediaItem(ExoMediaItem.Builder().setUri(videoUriString.toUri()).setMediaId(videoUriString).build())
 
@@ -316,11 +340,10 @@ class VideoWallpaperService : WallpaperService() {
 
             when (key) {
                 "wallpaper_video_audio" -> exoPlayer?.volume = if (sharedPreferences.getBoolean(key, false)) 1f else 0f
-                "wallpaper_video_speed" -> exoPlayer?.setPlaybackSpeed(sharedPreferences.getFloat(key, 1f))
                 "wallpaper_video_loop" -> exoPlayer?.repeatMode = if (sharedPreferences.getBoolean(key, true)) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
                 "wallpaper_video_scale_mode" -> {
-                    val scaleModeStr = sharedPreferences.getString(key, "Crop")
-                    exoPlayer?.videoScalingMode = if (scaleModeStr == "Fit" || scaleModeStr == "Original") C.VIDEO_SCALING_MODE_SCALE_TO_FIT else C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                    val scaleModeStr = sharedPreferences.getString(key, "Fit")
+                    exoPlayer?.videoScalingMode = if (scaleModeStr == "Fill") C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING else C.VIDEO_SCALING_MODE_SCALE_TO_FIT
                 }
                 "wallpaper_video_uri" -> {
                     val videoUriString = sharedPreferences.getString(key, null)
@@ -413,12 +436,9 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var isAudioEnabled by remember { mutableStateOf(false) }
-    var playbackSpeed by remember { mutableFloatStateOf(1f) }
+    var playAudio by remember { mutableStateOf(false) }
     var loopVideo by remember { mutableStateOf(true) }
-
-    // Scale Mode state unified for both Image and Video
-    var scaleMode by remember { mutableStateOf("Crop") }
+    var scaleMode by remember { mutableStateOf("Fit") }
 
     var showTargetDialog by remember { mutableStateOf(false) }
     var showAdjustments by remember { mutableStateOf(false) }
@@ -552,16 +572,14 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                                 val screenRatioY = hPx / imgH
 
                                 val baseScaleX = when (scaleMode) {
-                                    "Fit" -> min(screenRatioX, screenRatioY)
                                     "Fill" -> screenRatioX
                                     "Original" -> 1f
-                                    else -> max(screenRatioX, screenRatioY) // Crop
+                                    else -> min(screenRatioX, screenRatioY) // Fit
                                 }
                                 val baseScaleY = when (scaleMode) {
-                                    "Fit" -> min(screenRatioX, screenRatioY)
                                     "Fill" -> screenRatioY
                                     "Original" -> 1f
-                                    else -> max(screenRatioX, screenRatioY)
+                                    else -> min(screenRatioX, screenRatioY) // Fit
                                 }
 
                                 val totalScaleX = baseScaleX * gestureScale
@@ -634,16 +652,14 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                                 val screenRatioY = hPx / imgH
 
                                 val baseScaleX = when (scaleMode) {
-                                    "Fit" -> min(screenRatioX, screenRatioY)
                                     "Fill" -> screenRatioX
                                     "Original" -> 1f
-                                    else -> max(screenRatioX, screenRatioY)
+                                    else -> min(screenRatioX, screenRatioY)
                                 }
                                 val baseScaleY = when (scaleMode) {
-                                    "Fit" -> min(screenRatioX, screenRatioY)
                                     "Fill" -> screenRatioY
                                     "Original" -> 1f
-                                    else -> max(screenRatioX, screenRatioY)
+                                    else -> min(screenRatioX, screenRatioY)
                                 }
 
                                 val finalScale = gestureScale.coerceIn(0.5f, 10f)
@@ -688,6 +704,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                     ExoPlayer.Builder(context).build().apply {
                         setMediaItem(ExoMediaItem.fromUri(item.uri))
                         playWhenReady = true
+                        volume = 0f // Preview is muted, sound depends on applied wallpaper config
                         addListener(object : Player.Listener {
                             override fun onPlayerError(error: PlaybackException) {
                                 playerError = true
@@ -697,8 +714,6 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                     }
                 }
 
-                LaunchedEffect(isAudioEnabled) { player.volume = if (isAudioEnabled) 1f else 0f }
-                LaunchedEffect(playbackSpeed) { player.setPlaybackSpeed(playbackSpeed) }
                 LaunchedEffect(loopVideo) { player.repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF }
 
                 DisposableEffect(Unit) { onDispose { player.release() } }
@@ -713,19 +728,17 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                                     useController = false
                                     this.player = player
                                     this.resizeMode = when (scaleMode) {
-                                        "Fit" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                         "Fill" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
                                         "Original" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                        else -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                        else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                     }
                                 }
                             },
                             update = { view ->
                                 view.resizeMode = when (scaleMode) {
-                                    "Fit" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                     "Fill" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
                                     "Original" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                    else -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                    else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                 }
                             },
                             modifier = Modifier.fillMaxSize()
@@ -744,16 +757,14 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                         val screenRatioY = size.height / imgH
 
                         val baseScaleX = when (scaleMode) {
-                            "Fit" -> min(screenRatioX, screenRatioY)
                             "Fill" -> screenRatioX
                             "Original" -> 1f
-                            else -> max(screenRatioX, screenRatioY)
+                            else -> min(screenRatioX, screenRatioY) // Fit
                         }
                         val baseScaleY = when (scaleMode) {
-                            "Fit" -> min(screenRatioX, screenRatioY)
                             "Fill" -> screenRatioY
                             "Original" -> 1f
-                            else -> max(screenRatioX, screenRatioY)
+                            else -> min(screenRatioX, screenRatioY) // Fit
                         }
 
                         val cx = size.width / 2f
@@ -787,7 +798,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Text("Scale Mode", color = androidx.compose.ui.graphics.Color.White, fontWeight = FontWeight.Bold)
                             Row {
-                                listOf("Crop", "Fit", "Fill", "Original").forEach { mode ->
+                                listOf("Fit", "Fill", "Original").forEach { mode ->
                                     TextButton(onClick = { scaleMode = mode; resetTransforms() }) {
                                         Text(mode, color = if (scaleMode == mode) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.White, style = MaterialTheme.typography.bodySmall)
                                     }
@@ -797,22 +808,8 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
 
                         if (item.isVideo) {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Text("Audio", color = androidx.compose.ui.graphics.Color.White, fontWeight = FontWeight.Bold)
-                                Switch(checked = isAudioEnabled, onCheckedChange = { isAudioEnabled = it })
-                            }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                 Text("Loop Video", color = androidx.compose.ui.graphics.Color.White, fontWeight = FontWeight.Bold)
                                 Switch(checked = loopVideo, onCheckedChange = { loopVideo = it })
-                            }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Text("Playback Speed", color = androidx.compose.ui.graphics.Color.White, fontWeight = FontWeight.Bold)
-                                Row {
-                                    listOf(0.5f, 1f, 1.5f, 2f).forEach { speed ->
-                                        TextButton(onClick = { playbackSpeed = speed }) {
-                                            Text("${speed}x", color = if (playbackSpeed == speed) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.White)
-                                        }
-                                    }
-                                }
                             }
                         } else {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -852,7 +849,6 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
 
     if (showTargetDialog) {
         var applyTo by remember { mutableIntStateOf(WallpaperManager.FLAG_SYSTEM) }
-        var videoWithSound by remember { mutableStateOf(isAudioEnabled) }
 
         AlertDialog(
             onDismissRequest = { if (!isApplying) showTargetDialog = false },
@@ -860,15 +856,53 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
             text = {
                 Column {
                     if (item.isVideo) {
-                        Text("Live Wallpapers are handled by the system. The OS will choose to apply it to the Home Screen or Both.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                        Text("Play Sound?", fontWeight = FontWeight.Bold)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { playAudio = true }
+                        ) {
+                            RadioButton(selected = playAudio, onClick = { playAudio = true }, enabled = !isApplying)
+                            Text("Yes")
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { playAudio = false }
+                        ) {
+                            RadioButton(selected = !playAudio, onClick = { playAudio = false }, enabled = !isApplying)
+                            Text("No")
+                        }
                         Spacer(Modifier.height(16.dp))
-                        Text("Playback", fontWeight = FontWeight.Bold)
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { videoWithSound = true }) { RadioButton(selected = videoWithSound, onClick = { videoWithSound = true }, enabled = !isApplying); Text("With Sound") }
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { videoWithSound = false }) { RadioButton(selected = !videoWithSound, onClick = { videoWithSound = false }, enabled = !isApplying); Text("Without Sound") }
+                        Text(
+                            "Note: Live wallpapers are handled by the system picker. Target screens (Home/Lock) will be chosen there.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     } else {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { applyTo = WallpaperManager.FLAG_SYSTEM }) { RadioButton(selected = applyTo == WallpaperManager.FLAG_SYSTEM, onClick = { applyTo = WallpaperManager.FLAG_SYSTEM }, enabled = !isApplying); Text("Home Screen") }
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { applyTo = WallpaperManager.FLAG_LOCK }) { RadioButton(selected = applyTo == WallpaperManager.FLAG_LOCK, onClick = { applyTo = WallpaperManager.FLAG_LOCK }, enabled = !isApplying); Text("Lock Screen") }
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { applyTo = (WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK) }) { RadioButton(selected = applyTo == (WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK), onClick = { applyTo = (WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK) }, enabled = !isApplying); Text("Both Screens") }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { applyTo = WallpaperManager.FLAG_SYSTEM }
+                        ) {
+                            RadioButton(selected = applyTo == WallpaperManager.FLAG_SYSTEM, onClick = { applyTo = WallpaperManager.FLAG_SYSTEM }, enabled = !isApplying)
+                            Text("Home Screen")
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { applyTo = WallpaperManager.FLAG_LOCK }
+                        ) {
+                            RadioButton(selected = applyTo == WallpaperManager.FLAG_LOCK, onClick = { applyTo = WallpaperManager.FLAG_LOCK }, enabled = !isApplying)
+                            Text("Lock Screen")
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) { applyTo = (WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK) }
+                        ) {
+                            RadioButton(
+                                selected = applyTo == (WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK),
+                                onClick = { applyTo = (WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK) },
+                                enabled = !isApplying
+                            )
+                            Text("Both Screens")
+                        }
                     }
                 }
             },
@@ -877,23 +911,20 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                     enabled = !isApplying,
                     onClick = {
                         isApplying = true
-                        if (item.isVideo) {
-                            scope.launch {
-                                try {
-                                    VideoEngine.setVideoWallpaper(context, item, videoWithSound, playbackSpeed, loopVideo, scaleMode)
-                                } finally {
-                                    isApplying = false
-                                    showTargetDialog = false
+                        scope.launch {
+                            try {
+                                if (item.isVideo) {
+                                    VideoEngine.setVideoWallpaper(context, item, playAudio, loopVideo, scaleMode) {
+                                        onBack()
+                                    }
+                                } else {
+                                    StaticEngine.apply(context, item, applyTo, scaleMode, currentScale, currentOffsetX, currentOffsetY, currentRotation, dimLevel) {
+                                        onBack()
+                                    }
                                 }
-                            }
-                        } else {
-                            scope.launch {
-                                try {
-                                    StaticEngine.apply(context, item, applyTo, scaleMode, currentScale, currentOffsetX, currentOffsetY, currentRotation, dimLevel)
-                                } finally {
-                                    isApplying = false
-                                    showTargetDialog = false
-                                }
+                            } finally {
+                                isApplying = false
+                                showTargetDialog = false
                             }
                         }
                     }

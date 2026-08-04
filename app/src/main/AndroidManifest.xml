@@ -24,6 +24,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.SET_WALLPAPER_HINTS"/>
 
     <application
         android:name=".GalleryApp"
@@ -97,7 +98,7 @@
 
             <meta-data
                 android:name="android.service.wallpaper"
-                android:resource="@xml/wallpaper" />
+                android:resource="@xml/video_wallpaper" />
         </service>
 
         <provider
