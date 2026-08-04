@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -76,6 +77,7 @@ import com.gallerybox.viewmodel.StoryViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -433,6 +435,20 @@ fun StoryPlayer(
     val animatedScale = 1f - (dragOffsetY.value / 2500f).coerceIn(0f, 0.4f)
     val dynamicCornerRadius = (dragOffsetY.value / 10f).coerceIn(0f, 48f).dp
 
+    // Gesture State Variables
+    var lastTapTime by remember { mutableLongStateOf(0L) }
+    var isChangingStory by remember { mutableStateOf(false) }
+    var canReceiveTouch by remember { mutableStateOf(true) }
+    var pressTime by remember { mutableLongStateOf(0L) }
+    var pressPosition by remember { mutableStateOf(Offset.Zero) }
+
+    // Fix 4: Pause Touch During Video Transition
+    LaunchedEffect(currentIndex) {
+        canReceiveTouch = false
+        delay(250)
+        canReceiveTouch = true
+    }
+
     LaunchedEffect(story) {
         story.items.take(3).forEach {
             context.imageLoader.enqueue(
@@ -470,6 +486,22 @@ fun StoryPlayer(
         if (currentIndex > 0) currentIndex-- else onPrevStoryGroup()
     }
 
+    // Fix 1, 3, 6: Consolidated Handle Tap Logic
+    val handleTap: (Boolean) -> Unit = { isNext ->
+        val now = System.currentTimeMillis()
+        if (now - lastTapTime >= 250L && canReceiveTouch && !isChangingStory) {
+            lastTapTime = now
+            isChangingStory = true
+
+            if (isNext) onNextState() else onPrevState()
+
+            coroutineScope.launch {
+                delay(300) // Lock Navigation During Animation
+                isChangingStory = false
+            }
+        }
+    }
+
     with(sharedTransitionScope) {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = animatedScale.coerceIn(0f, 1f)))) {
             if (currentItem != null) {
@@ -504,13 +536,30 @@ fun StoryPlayer(
                     Box(Modifier.fillMaxSize()
                         .pointerInput(Unit) {
                             detectTapGestures(
-                                onPress = {
+                                onPress = { offset ->
+                                    pressTime = System.currentTimeMillis()
+                                    pressPosition = offset
                                     isPaused = true
                                     tryAwaitRelease()
                                     isPaused = false
                                 },
                                 onTap = { offset ->
-                                    if (offset.x < size.width * 0.3f) onPrevState() else if (offset.x > size.width * 0.7f) onNextState()
+                                    val holdDuration = System.currentTimeMillis() - pressTime
+                                    val dx = abs(offset.x - pressPosition.x)
+                                    val dy = abs(offset.y - pressPosition.y)
+
+                                    // Fix 2: Ignore Small Finger Movement (Over 20px)
+                                    // Fix 5: Don't Trigger Tap While Holding (>150ms)
+                                    if (dx > 20f || dy > 20f || holdDuration > 150L) {
+                                        return@detectTapGestures
+                                    }
+
+                                    // Fix 7: Better Touch Zones (25% | 50% | 25%)
+                                    if (offset.x < size.width * 0.25f) {
+                                        handleTap(false)
+                                    } else if (offset.x > size.width * 0.75f) {
+                                        handleTap(true)
+                                    }
                                 }
                             )
                         }
