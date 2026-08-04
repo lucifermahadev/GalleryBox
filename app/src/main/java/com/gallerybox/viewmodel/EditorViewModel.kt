@@ -352,8 +352,14 @@ class EditorViewModel @Inject constructor(
         endGesture()
     }
 
-    fun rotateLeft() = updateEditState { it.copy(rotationDegrees = (it.rotationDegrees - 90f) % 360f) }
-    fun rotateRight() = updateEditState { it.copy(rotationDegrees = (it.rotationDegrees + 90f) % 360f) }
+    fun rotateLeft() = updateEditState {
+        it.copy(rotationDegrees = ((it.rotationDegrees - 90f) % 360f + 360f) % 360f)
+    }
+
+    fun rotateRight() = updateEditState {
+        it.copy(rotationDegrees = ((it.rotationDegrees + 90f) % 360f + 360f) % 360f)
+    }
+
     fun toggleFlipHorizontal() = updateEditState { it.copy(flipHorizontal = !it.flipHorizontal) }
     fun toggleFlipVertical() = updateEditState { it.copy(flipVertical = !it.flipVertical) }
 

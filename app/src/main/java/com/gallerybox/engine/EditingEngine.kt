@@ -112,8 +112,13 @@ class EditingEngine @Inject constructor(
     private val lutEngine: LutEngine,
     private val exportEngine: ExportEngine
 ) {
-    suspend fun createPreview(bitmap: Bitmap, state: EditState, renderOverlays: Boolean = false): Bitmap {
-        return photoEngine.createPreview(bitmap, state, renderOverlays)
+    suspend fun createPreview(
+        bitmap: Bitmap,
+        state: EditState,
+        renderOverlays: Boolean = false,
+        applyGeometry: Boolean = false
+    ): Bitmap {
+        return photoEngine.createPreview(bitmap, state, renderOverlays, applyGeometry)
     }
 
     suspend fun extractFrame(uri: Uri, posMs: Long): File? {
@@ -395,7 +400,12 @@ class PhotoEditorEngine @Inject constructor(
     private val stickerEngine: StickerEngine,
     private val textEngine: TextEngine
 ) {
-    suspend fun createPreview(bitmap: Bitmap, state: EditState, renderOverlays: Boolean): Bitmap {
+    suspend fun createPreview(
+        bitmap: Bitmap,
+        state: EditState,
+        renderOverlays: Boolean,
+        applyGeometry: Boolean = false
+    ): Bitmap {
         return withContext(Dispatchers.Default) {
             var res = bitmap.copy(Bitmap.Config.ARGB_8888, true) ?: return@withContext bitmap
 
@@ -536,24 +546,26 @@ class PhotoEditorEngine @Inject constructor(
                 }
             }
 
-            // 5. Geometry Finalization
-            val sX = if (state.flipHorizontal) -1f else 1f
-            val sY = if (state.flipVertical) -1f else 1f
+            // 5. Geometry Finalization (export only — live preview is rotated on-screen by Compose)
+            if (applyGeometry) {
+                val sX = if (state.flipHorizontal) -1f else 1f
+                val sY = if (state.flipVertical) -1f else 1f
 
-            if (state.rotationDegrees != 0f || state.straightenDegrees != 0f || sX != 1f || sY != 1f) {
-                val finalMatrix = Matrix()
-                finalMatrix.postRotate(
-                    state.rotationDegrees + state.straightenDegrees,
-                    out.width / 2f,
-                    out.height / 2f
-                )
-                finalMatrix.postScale(sX, sY, out.width / 2f, out.height / 2f)
+                if (state.rotationDegrees != 0f || state.straightenDegrees != 0f || sX != 1f || sY != 1f) {
+                    val finalMatrix = Matrix()
+                    finalMatrix.postRotate(
+                        state.rotationDegrees + state.straightenDegrees,
+                        out.width / 2f,
+                        out.height / 2f
+                    )
+                    finalMatrix.postScale(sX, sY, out.width / 2f, out.height / 2f)
 
-                val rotated = Bitmap.createBitmap(out, 0, 0, out.width, out.height, finalMatrix, true)
-                if (rotated !== out && out !== bitmap) {
-                    out.recycle()
+                    val rotated = Bitmap.createBitmap(out, 0, 0, out.width, out.height, finalMatrix, true)
+                    if (rotated !== out && out !== bitmap) {
+                        out.recycle()
+                    }
+                    return@withContext rotated
                 }
-                return@withContext rotated
             }
 
             out
@@ -664,7 +676,7 @@ class ExportEngine @Inject constructor(
                     }
 
                     onProgress(0.4f)
-                    val out = photoEngine.createPreview(src, state, renderOverlays = true)
+                    val out = photoEngine.createPreview(src, state, renderOverlays = true, applyGeometry = true)
 
                     onProgress(0.8f)
 
