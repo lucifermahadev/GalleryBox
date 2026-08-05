@@ -102,6 +102,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
+import java.util.ArrayList
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
@@ -355,75 +356,72 @@ fun PictureScreen(
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             AnimatedVisibility(
                 visible = isSelectionMode,
-                enter = slideInVertically(initialOffsetY = { it }),
-                exit = slideOutVertically(targetOffsetY = { it })
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
             ) {
-                NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 3.dp
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp).navigationBarsPadding(),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 10.dp
                 ) {
-                    NavigationBarItem(
-                        selected = false,
-                        onClick = {
-                            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                                type = "*/*"
-                                putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(selectedMediaItems.map { it.uri }))
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                        BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") {
+                            onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), null); isSelectionMode = false
+                        }
+                        BottomBarActionItem(icon = Icons.Outlined.FileCopy, label = "Copy") {
+                            onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), null); isSelectionMode = false
+                        }
+                        BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") {
+                            if (selectedMediaItems.isNotEmpty()) {
+                                val intent = Intent(if (selectedMediaItems.size > 1) Intent.ACTION_SEND_MULTIPLE else Intent.ACTION_SEND).apply {
+                                    val hasImg = selectedMediaItems.any { !it.isVideo }; val hasVid = selectedMediaItems.any { it.isVideo }
+                                    type = if (hasVid && !hasImg) "video/*" else if (hasImg && !hasVid) "image/*" else "*/*"
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    if (selectedMediaItems.size > 1) putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(selectedMediaItems.map { it.uri }))
+                                    else putExtra(Intent.EXTRA_STREAM, selectedMediaItems.first().uri)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Share via"))
                             }
-                            context.startActivity(Intent.createChooser(intent, "Share via"))
                             isSelectionMode = false
                             selectedIds = emptySet()
-                        },
-                        icon = { Icon(Icons.Outlined.Share, contentDescription = "Share") },
-                        label = { Text("Share") }
-                    )
-
-                    NavigationBarItem(
-                        selected = false,
-                        onClick = {
+                        }
+                        BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Trash", isDestructive = true) {
                             activeDialog = PictureUiDialog.TrashConfirm(selectedMediaItems)
-                        },
-                        icon = { Icon(Icons.Outlined.Delete, contentDescription = "Trash") },
-                        label = { Text("Trash") },
-                        colors = NavigationBarItemDefaults.colors(
-                            unselectedIconColor = MaterialTheme.colorScheme.error,
-                            unselectedTextColor = MaterialTheme.colorScheme.error
-                        )
-                    )
-
-                    var showMoreMenu by remember { mutableStateOf(false) }
-                    Box(modifier = Modifier.weight(1f)) {
-                        this@NavigationBar.NavigationBarItem(
-                            selected = false,
-                            onClick = { showMoreMenu = true },
-                            icon = { Icon(Icons.Default.MoreVert, contentDescription = "More") },
-                            label = { Text("More") }
-                        )
-                        DropdownMenu(
-                            expanded = showMoreMenu,
-                            onDismissRequest = { showMoreMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Move to Album", color = MaterialTheme.colorScheme.onSurface) },
-                                onClick = {
-                                    showMoreMenu = false
-                                    onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), null)
-                                    isSelectionMode = false
+                        }
+                        Box {
+                            var showMoreMenu by remember { mutableStateOf(false) }
+                            BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showMoreMenu = true }
+                            DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }) {
+                                if (selectedIds.size == 1) {
+                                    DropdownMenuItem(
+                                        text = { Text("Details") },
+                                        onClick = { showMoreMenu = false; activeDialog = PictureUiDialog.MetadataInfo(selectedMediaItems.first()) },
+                                        leadingIcon = { Icon(Icons.Outlined.Info, null) }
+                                    )
                                 }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Copy to Album", color = MaterialTheme.colorScheme.onSurface) },
-                                onClick = {
-                                    showMoreMenu = false
-                                    onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), null)
-                                    isSelectionMode = false
-                                }
-                            )
+                                DropdownMenuItem(
+                                    text = { Text("Deselect All") },
+                                    onClick = { showMoreMenu = false; isSelectionMode = false; selectedIds = emptySet() },
+                                    leadingIcon = { Icon(Icons.Outlined.Deselect, null) }
+                                )
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+fun BottomBarActionItem(icon: ImageVector, label: String, isDestructive: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+    val contentColor = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface; val alphaColor = if (enabled) contentColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+    Column(modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(enabled = enabled, onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(alphaColor.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+            Icon(imageVector = icon, contentDescription = label, tint = alphaColor, modifier = Modifier.size(20.dp))
+        }
+        if (label.isNotEmpty()) { Spacer(Modifier.height(6.dp)); Text(text = label, style = MaterialTheme.typography.labelMedium, color = alphaColor, maxLines = 1) }
     }
 }
 
@@ -614,12 +612,13 @@ fun GalleryGridContent(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        val bottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + if (isSelectionMode) 100.dp else 16.dp
         LazyVerticalGrid(
             state = gridState, columns = gridCells,
             modifier = Modifier.fillMaxSize().then(dragModifier),
             contentPadding = PaddingValues(
                 top = 4.dp,
-                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + if (isSelectionMode) 0.dp else 80.dp,
+                bottom = bottomPadding,
                 start = 4.dp,
                 end = 4.dp
             ),

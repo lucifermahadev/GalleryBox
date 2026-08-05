@@ -1,6 +1,3 @@
-@file:Suppress("unused", "UnsafeOptInUsageError", "DEPRECATION")
-@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
-
 package com.gallerybox.ui.screens.music
 
 import android.app.Activity
