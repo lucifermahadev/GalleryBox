@@ -285,10 +285,6 @@ fun DashboardScreen(
     onNavigateToDuoMode: () -> Unit,
     onNavigateToFavorites: () -> Unit
 ) {
-    val recentHistoryRaw by viewModel.recentHistory.collectAsStateWithLifecycle(initialValue = emptyList())
-    val recentHistory = remember(recentHistoryRaw) { recentHistoryRaw.toImmutableList() }
-    val songMap = remember(loadedSongs) { loadedSongs.associateBy { it.id }.toImmutableMap() }
-
     LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
         item {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -315,41 +311,12 @@ fun DashboardScreen(
             }
         }
 
-        if (recentHistory.isNotEmpty()) {
-            item {
-                Text("Recently Played", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, bottom = 12.dp))
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    val historySongs = recentHistory.take(15).mapNotNull { id -> songMap[id] }.toImmutableList()
-                    items(historySongs, key = { it.id }, contentType = { "song" }) { song ->
-                        HorizontalSongCard(song) { viewModel.playQueue(historySongs, song) }
-                    }
-                }
-                Spacer(Modifier.height(24.dp))
-            }
-        }
-
         item {
             Text("Recently Added", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, bottom = 12.dp))
             LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 val recentAdded = loadedSongs.sortedByDescending { it.dateAdded }.take(15).toImmutableList()
                 items(recentAdded, key = { it.id }, contentType = { "song" }) { song ->
                     HorizontalSongCard(song) { viewModel.playQueue(recentAdded, song) }
-                }
-            }
-            Spacer(Modifier.height(24.dp))
-        }
-
-        item {
-            Text("Most Played", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, bottom = 12.dp))
-            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                val mostPlayedIds = viewModel.recentHistory.value.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.take(15).map { it.key }
-                val mostPlayed = mostPlayedIds.mapNotNull { id -> songMap[id] }.toImmutableList()
-                if (mostPlayed.isNotEmpty()) {
-                    items(mostPlayed, key = { it.id }, contentType = { "song" }) { song ->
-                        HorizontalSongCard(song) { viewModel.playQueue(mostPlayed, song) }
-                    }
-                } else {
-                    item { Text("Play more music to see your favorites here", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(16.dp)) }
                 }
             }
             Spacer(Modifier.height(24.dp))
