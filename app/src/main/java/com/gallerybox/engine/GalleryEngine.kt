@@ -342,13 +342,23 @@ data class TargetAlbum(
     val mediaType: Int? = null,
     val bucketId: String = "",
     val coverUri: Uri = Uri.EMPTY,
-    val volumeName: String? = null
+    val volumeName: String? = null,
+    val isSdCard: Boolean = false
 )
 
 @Singleton
 class MediaOperationEngine @Inject constructor(@ApplicationContext private val context: Context) {
 
     private val prefs = context.getSharedPreferences("saf_prefs", Context.MODE_PRIVATE)
+
+    fun markAlbumAsSdCard(bucketId: String) {
+        if (bucketId.isBlank()) return
+        val current = prefs.getStringSet("sd_card_album_ids", emptySet()) ?: emptySet()
+        prefs.edit { putStringSet("sd_card_album_ids", current + bucketId) }
+    }
+
+    fun isSdCardAlbum(bucketId: String): Boolean =
+        (prefs.getStringSet("sd_card_album_ids", emptySet()) ?: emptySet()).contains(bucketId)
 
     fun saveSafTreeUri(uri: Uri) {
         context.contentResolver.takePersistableUriPermission(
@@ -454,37 +464,39 @@ class MediaOperationEngine @Inject constructor(@ApplicationContext private val c
 
                 var destUri: Uri? = null
 
-                try {
-                    val volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        targetAlbum.volumeName?.takeIf { it.isNotBlank() && it in MediaStore.getExternalVolumeNames(context) } ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
-                    } else {
-                        null
-                    }
-
-                    val destCollection = if (item.isVideo) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Video.Media.getContentUri(volumeName!!)
-                        else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                    } else {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Images.Media.getContentUri(volumeName!!)
-                        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                    }
-
-                    val contentValues = ContentValues().apply {
-                        put(MediaStore.MediaColumns.DISPLAY_NAME, uniqueName)
-                        put(MediaStore.MediaColumns.MIME_TYPE, item.mimeType)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
-                            put(MediaStore.MediaColumns.IS_PENDING, 1)
+                if (!targetAlbum.isSdCard) {
+                    try {
+                        val volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            targetAlbum.volumeName?.takeIf { it.isNotBlank() && it in MediaStore.getExternalVolumeNames(context) } ?: MediaStore.VOLUME_EXTERNAL_PRIMARY
                         } else {
-                            val root = Environment.getExternalStorageDirectory()
-                            val destDir = File(root, relativePath)
-                            if (!destDir.exists()) destDir.mkdirs()
-                            put(MediaStore.Files.FileColumns.DATA, File(destDir, uniqueName).absolutePath)
+                            null
                         }
+
+                        val destCollection = if (item.isVideo) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Video.Media.getContentUri(volumeName!!)
+                            else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                        } else {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Images.Media.getContentUri(volumeName!!)
+                            else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                        }
+
+                        val contentValues = ContentValues().apply {
+                            put(MediaStore.MediaColumns.DISPLAY_NAME, uniqueName)
+                            put(MediaStore.MediaColumns.MIME_TYPE, item.mimeType)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                                put(MediaStore.MediaColumns.IS_PENDING, 1)
+                            } else {
+                                val root = Environment.getExternalStorageDirectory()
+                                val destDir = File(root, relativePath)
+                                if (!destDir.exists()) destDir.mkdirs()
+                                put(MediaStore.Files.FileColumns.DATA, File(destDir, uniqueName).absolutePath)
+                            }
+                        }
+                        destUri = resolver.insert(destCollection, contentValues)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
-                    destUri = resolver.insert(destCollection, contentValues)
-                } catch (e: Exception) {
-                    e.printStackTrace()
                 }
 
                 if (destUri == null) {

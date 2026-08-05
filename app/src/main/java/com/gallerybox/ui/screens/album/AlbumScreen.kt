@@ -58,7 +58,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -109,7 +108,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.ArrayList
@@ -330,6 +328,20 @@ fun AlbumScreen(
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
     val enginePrefs = remember { context.getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE) }
 
+    val safTreeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        viewModel.onSafTreeGranted(result.data?.data)
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.events.collect { event ->
+            when (event) {
+                is GalleryEvent.ShowToast -> Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
+                is GalleryEvent.LaunchIntent -> safTreeLauncher.launch(event.intent)
+                else -> {}
+            }
+        }
+    }
+
     val vmAlbums by viewModel.albumsState.collectAsState(initial = emptyList())
     val rawAlbumPreviews by viewModel.albumPreviewMap.collectAsState()
     val sortOption by viewModel.albumSort.collectAsState()
@@ -532,8 +544,11 @@ fun AlbumScreen(
                             sdCardAlbums = sdCardAlbums,
                             onOrderSaved = { albums: List<Album> -> viewModel.saveCustomAlbumOrder(albums) },
                             onAlbumClick = { album ->
-                                if (isSelectionMode) selectedIds = if (selectedIds.contains(album.id)) (selectedIds - album.id).toImmutableSet() else (selectedIds + album.id).toImmutableSet()
-                                else actions.onAlbumClick(album)
+                                if (isSelectionMode) {
+                                    val newSelection = if (selectedIds.contains(album.id)) (selectedIds - album.id).toImmutableSet() else (selectedIds + album.id).toImmutableSet()
+                                    selectedIds = newSelection
+                                    if (newSelection.isEmpty()) isSelectionMode = false
+                                } else actions.onAlbumClick(album)
                             },
                             onAlbumLongClick = { album ->
                                 isSelectionMode = true
@@ -1030,78 +1045,90 @@ fun StatelessAlbumGrid(
     ) {
         itemsIndexed(items = dynamicList, key = { _, album -> album.id }, contentType = { _, _ -> "album" }) { index, album ->
             val isBeingDragged = draggedIndex == index
-            val canSimpleDrag = sortOption == AlbumSort.Custom && searchQuery.isBlank() && isSelectionMode && selectedIds.size == 1 && selectedIds.contains(album.id)
-            val canLongPressDrag = sortOption == AlbumSort.Custom && searchQuery.isBlank() && !canSimpleDrag
+            val reorderEnabled = sortOption == AlbumSort.Custom && searchQuery.isBlank()
+            val isSelectedSolo = isSelectionMode && selectedIds.size == 1 && selectedIds.contains(album.id)
+            val canDrag = reorderEnabled && isSelectedSolo
 
-            val dragModifier = Modifier.pointerInput(album.id, canSimpleDrag, canLongPressDrag, isSelectionMode) {
-                if (canSimpleDrag) {
-                    detectDragGestures(
-                        onDragStart = {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            draggedIndex = index
-                            dragOffset = Offset.Zero
-                            onDragStateChange(true)
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume(); dragOffset += dragAmount
-                            val layoutInfo = gridState.layoutInfo; val visibleItems = layoutInfo.visibleItemsInfo; val draggedItemInfo = visibleItems.find { it.index == draggedIndex }
-                            if (draggedItemInfo != null) {
-                                val draggedCenterX = draggedItemInfo.offset.x + (draggedItemInfo.size.width / 2) + dragOffset.x.roundToInt()
-                                val draggedCenterY = draggedItemInfo.offset.y + (draggedItemInfo.size.height / 2) + dragOffset.y.roundToInt()
-                                scrollVelocity = when { draggedCenterY < layoutInfo.viewportStartOffset + 180 -> -15f; draggedCenterY > layoutInfo.viewportEndOffset - 180 -> 15f; else -> 0f }
-                                val targetItemInfo = visibleItems.find { it.index != draggedIndex && it.index < dynamicList.size && draggedCenterX in it.offset.x..(it.offset.x + it.size.width) && draggedCenterY in it.offset.y..(it.offset.y + it.size.height) }
-                                if (targetItemInfo != null) {
-                                    val targetIndex = targetItemInfo.index
-                                    dragOffset -= Offset((targetItemInfo.offset.x - draggedItemInfo.offset.x).toFloat(), (targetItemInfo.offset.y - draggedItemInfo.offset.y).toFloat())
-                                    val item = dynamicList.removeAt(draggedIndex)
-                                    dynamicList.add(targetIndex, item)
-                                    draggedIndex = targetIndex
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                }
-                            }
-                        },
-                        onDragEnd = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false); onOrderSaved(dynamicList.toList()) },
-                        onDragCancel = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false) }
+            fun checkAndPerformSwap() {
+                val layoutInfo = gridState.layoutInfo
+                val visibleItems = layoutInfo.visibleItemsInfo
+                val draggedItemInfo = visibleItems.find { it.index == draggedIndex } ?: return
+                val draggedCenterX = draggedItemInfo.offset.x + (draggedItemInfo.size.width / 2) + dragOffset.x.roundToInt()
+                val draggedCenterY = draggedItemInfo.offset.y + (draggedItemInfo.size.height / 2) + dragOffset.y.roundToInt()
+                scrollVelocity = when {
+                    draggedCenterY < layoutInfo.viewportStartOffset + 180 -> -15f
+                    draggedCenterY > layoutInfo.viewportEndOffset - 180 -> 15f
+                    else -> 0f
+                }
+                val targetItemInfo = visibleItems.find {
+                    it.index != draggedIndex && it.index < dynamicList.size &&
+                            draggedCenterX in it.offset.x..(it.offset.x + it.size.width) &&
+                            draggedCenterY in it.offset.y..(it.offset.y + it.size.height)
+                }
+                if (targetItemInfo != null) {
+                    val targetIndex = targetItemInfo.index
+                    dragOffset -= Offset(
+                        (targetItemInfo.offset.x - draggedItemInfo.offset.x).toFloat(),
+                        (targetItemInfo.offset.y - draggedItemInfo.offset.y).toFloat()
                     )
-                } else if (canLongPressDrag) {
-                    detectDragGesturesAfterLongPress(
-                        onDragStart = {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            onAlbumLongClick(album)
-                            draggedIndex = index
-                            dragOffset = Offset.Zero
-                            onDragStateChange(true)
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume(); dragOffset += dragAmount
-                            val layoutInfo = gridState.layoutInfo; val visibleItems = layoutInfo.visibleItemsInfo; val draggedItemInfo = visibleItems.find { it.index == draggedIndex }
-                            if (draggedItemInfo != null) {
-                                val draggedCenterX = draggedItemInfo.offset.x + (draggedItemInfo.size.width / 2) + dragOffset.x.roundToInt()
-                                val draggedCenterY = draggedItemInfo.offset.y + (draggedItemInfo.size.height / 2) + dragOffset.y.roundToInt()
-                                scrollVelocity = when { draggedCenterY < layoutInfo.viewportStartOffset + 180 -> -15f; draggedCenterY > layoutInfo.viewportEndOffset - 180 -> 15f; else -> 0f }
-                                val targetItemInfo = visibleItems.find { it.index != draggedIndex && it.index < dynamicList.size && draggedCenterX in it.offset.x..(it.offset.x + it.size.width) && draggedCenterY in it.offset.y..(it.offset.y + it.size.height) }
-                                if (targetItemInfo != null) {
-                                    val targetIndex = targetItemInfo.index
-                                    dragOffset -= Offset((targetItemInfo.offset.x - draggedItemInfo.offset.x).toFloat(), (targetItemInfo.offset.y - draggedItemInfo.offset.y).toFloat())
-                                    val item = dynamicList.removeAt(draggedIndex)
-                                    dynamicList.add(targetIndex, item)
-                                    draggedIndex = targetIndex
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                }
-                            }
-                        },
-                        onDragEnd = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false); onOrderSaved(dynamicList.toList()) },
-                        onDragCancel = { draggedIndex = -1; dragOffset = Offset.Zero; scrollVelocity = 0f; onDragStateChange(false) }
-                    )
+                    val item = dynamicList.removeAt(draggedIndex)
+                    dynamicList.add(targetIndex, item)
+                    draggedIndex = targetIndex
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                 }
             }
+
+            val dragModifier = if (canDrag) {
+                Modifier.pointerInput(album.id) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        if (draggedIndex != -1) return@awaitEachGesture
+
+                        val smoothThresholdPx = with(this) { 4.dp.toPx() }
+                        var accumulated = Offset.Zero
+                        var started = false
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            val delta = change.positionChange()
+                            if (!started) {
+                                accumulated += delta
+                                if (accumulated.getDistance() > smoothThresholdPx) {
+                                    started = true
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    draggedIndex = index
+                                    dragOffset = accumulated
+                                    onDragStateChange(true)
+                                    change.consume()
+                                    checkAndPerformSwap()
+                                }
+                            } else {
+                                change.consume()
+                                dragOffset += delta
+                                checkAndPerformSwap()
+                            }
+                            if (!event.changes.any { it.pressed }) break
+                        }
+
+                        if (started) {
+                            draggedIndex = -1
+                            dragOffset = Offset.Zero
+                            scrollVelocity = 0f
+                            onDragStateChange(false)
+                            onOrderSaved(dynamicList.toList())
+                        }
+                    }
+                }
+            } else Modifier
 
             Box(modifier = Modifier
                 .animateItem()
                 .zIndex(if (isBeingDragged) 1f else 0f)
                 .graphicsLayer {
                     if (isBeingDragged) {
-                        translationX = dragOffset.x; translationY = dragOffset.y;
+                        translationX = dragOffset.x; translationY = dragOffset.y
                         scaleX = 1.04f; scaleY = 1.04f; shadowElevation = 16.dp.toPx()
                     }
                 }
@@ -1111,7 +1138,7 @@ fun StatelessAlbumGrid(
                     previews = albumPreviews[album.id] ?: persistentListOf(),
                     isSelected = selectedIds.contains(album.id),
                     isSelectionMode = isSelectionMode,
-                    canDrag = canSimpleDrag || canLongPressDrag,
+                    canDrag = canDrag,
                     isSdCard = sdCardAlbums.contains(album.id),
                     dragModifier = dragModifier,
                     thumbSize = dynamicThumbSize,

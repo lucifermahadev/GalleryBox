@@ -435,18 +435,19 @@ fun StoryPlayer(
     val animatedScale = 1f - (dragOffsetY.value / 2500f).coerceIn(0f, 0.4f)
     val dynamicCornerRadius = (dragOffsetY.value / 10f).coerceIn(0f, 48f).dp
 
-    // Gesture State Variables
-    var lastTapTime by remember { mutableLongStateOf(0L) }
-    var isChangingStory by remember { mutableStateOf(false) }
-    var canReceiveTouch by remember { mutableStateOf(true) }
     var pressTime by remember { mutableLongStateOf(0L) }
     var pressPosition by remember { mutableStateOf(Offset.Zero) }
 
-    // Fix 4: Pause Touch During Video Transition
-    LaunchedEffect(currentIndex) {
-        canReceiveTouch = false
-        delay(250)
-        canReceiveTouch = true
+    // Single source of truth for advancing/rewinding — protects against
+    // an auto-advance (onComplete) and a manual tap firing on the same beat.
+    var lastAdvanceTime by remember { mutableLongStateOf(0L) }
+    val ADVANCE_LOCK_MS = 350L
+
+    fun canAdvance(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastAdvanceTime < ADVANCE_LOCK_MS) return false
+        lastAdvanceTime = now
+        return true
     }
 
     LaunchedEffect(story) {
@@ -475,31 +476,23 @@ fun StoryPlayer(
     }
 
     val onNextState by rememberUpdatedState {
-        sharedExoPlayer.seekTo(0)
-        currentItemProgress.floatValue = 0f
-        if (currentIndex < story.items.lastIndex) currentIndex++ else onNextStoryGroup()
+        if (canAdvance()) {
+            sharedExoPlayer.seekTo(0)
+            currentItemProgress.floatValue = 0f
+            if (currentIndex < story.items.lastIndex) currentIndex++ else onNextStoryGroup()
+        }
     }
 
     val onPrevState by rememberUpdatedState {
-        sharedExoPlayer.seekTo(0)
-        currentItemProgress.floatValue = 0f
-        if (currentIndex > 0) currentIndex-- else onPrevStoryGroup()
+        if (canAdvance()) {
+            sharedExoPlayer.seekTo(0)
+            currentItemProgress.floatValue = 0f
+            if (currentIndex > 0) currentIndex-- else onPrevStoryGroup()
+        }
     }
 
-    // Fix 1, 3, 6: Consolidated Handle Tap Logic
     val handleTap: (Boolean) -> Unit = { isNext ->
-        val now = System.currentTimeMillis()
-        if (now - lastTapTime >= 250L && canReceiveTouch && !isChangingStory) {
-            lastTapTime = now
-            isChangingStory = true
-
-            if (isNext) onNextState() else onPrevState()
-
-            coroutineScope.launch {
-                delay(300) // Lock Navigation During Animation
-                isChangingStory = false
-            }
-        }
+        if (isNext) onNextState() else onPrevState()
     }
 
     with(sharedTransitionScope) {
@@ -540,7 +533,7 @@ fun StoryPlayer(
                                     pressTime = System.currentTimeMillis()
                                     pressPosition = offset
                                     isPaused = true
-                                    tryAwaitRelease()
+                                    val released = tryAwaitRelease()
                                     isPaused = false
                                 },
                                 onTap = { offset ->
@@ -548,13 +541,10 @@ fun StoryPlayer(
                                     val dx = abs(offset.x - pressPosition.x)
                                     val dy = abs(offset.y - pressPosition.y)
 
-                                    // Fix 2: Ignore Small Finger Movement (Over 20px)
-                                    // Fix 5: Don't Trigger Tap While Holding (>150ms)
                                     if (dx > 20f || dy > 20f || holdDuration > 150L) {
                                         return@detectTapGestures
                                     }
 
-                                    // Fix 7: Better Touch Zones (25% | 50% | 25%)
                                     if (offset.x < size.width * 0.25f) {
                                         handleTap(false)
                                     } else if (offset.x > size.width * 0.75f) {
