@@ -20,7 +20,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
-import androidx.compose.foundation.pager.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -32,7 +31,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,11 +47,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.Player
@@ -62,24 +58,15 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.gallerybox.viewmodel.AudioTrack
 import com.gallerybox.viewmodel.MusicViewModel
-import com.gallerybox.viewmodel.Playlist
 import com.gallerybox.viewmodel.TrashViewModel
 import kotlinx.collections.immutable.*
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.util.Locale
 
 sealed class MusicRoute(val route: String) {
     data object Dashboard : MusicRoute("dashboard")
     data object Library : MusicRoute("library")
-    data object Playlists : MusicRoute("playlists")
     data object Folders : MusicRoute("folders")
-    data object History : MusicRoute("history")
-    data object Queue : MusicRoute("queue")
-    data object AudioInfo : MusicRoute("audio_info")
     data object Favorites : MusicRoute("favorites")
 }
 
@@ -96,18 +83,20 @@ fun MusicScreen(
     val navController = rememberNavController()
     val currentRoute = navController.currentBackStackEntryAsState().value?.destination?.route
     val context = LocalContext.current
+
     var showFullPlayer by remember { mutableStateOf(false) }
     var isSearchActive by remember { mutableStateOf(false) }
     var trackToTrash by remember { mutableStateOf<AudioTrack?>(null) }
     var showTopMenu by remember { mutableStateOf(false) }
-    var showCreatePlaylistDialog by remember { mutableStateOf(false) }
+
+    // Bottom Sheets States
+    var showQueueSheet by remember { mutableStateOf(false) }
+    var showAudioInfoSheet by remember { mutableStateOf(false) }
 
     val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
     val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
     val loadedSongsRaw by viewModel.allAudioTracks.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
-    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
 
     val loadedSongs = remember(loadedSongsRaw) { loadedSongsRaw.toImmutableList() }
 
@@ -149,10 +138,6 @@ fun MusicScreen(
         )
     }
 
-    if (showCreatePlaylistDialog) {
-        CreatePlaylistDialog(playlists, { showCreatePlaylistDialog = false }, { viewModel.createPlaylist(it); showCreatePlaylistDialog = false })
-    }
-
     BackHandler(showFullPlayer || isSearchActive) {
         if (showFullPlayer) showFullPlayer = false else { isSearchActive = false; viewModel.setSearchQuery("") }
     }
@@ -176,11 +161,7 @@ fun MusicScreen(
                     onDismissRequest = { showTopMenu = false },
                     modifier = Modifier.background(MaterialTheme.colorScheme.surface).clip(RoundedCornerShape(12.dp))
                 ) {
-                    if (currentRoute == MusicRoute.Playlists.route) {
-                        DropdownMenuItem(text = { Text("New Playlist") }, leadingIcon = { Icon(Icons.Rounded.Add, null) }, onClick = { showTopMenu = false; showCreatePlaylistDialog = true })
-                    } else {
-                        DropdownMenuItem(text = { Text("Equalizer") }, leadingIcon = { Icon(Icons.Rounded.GraphicEq, null) }, onClick = { showTopMenu = false; onNavigateToEqualizer() })
-                    }
+                    DropdownMenuItem(text = { Text("Equalizer") }, leadingIcon = { Icon(Icons.Rounded.GraphicEq, null) }, onClick = { showTopMenu = false; onNavigateToEqualizer() })
                 }
             }
         },
@@ -200,7 +181,7 @@ fun MusicScreen(
                         onNext = viewModel::skipNext,
                         onPrev = viewModel::skipPrevious,
                         onFavorite = { viewModel.toggleFavorite(listOf(track.id)) },
-                        onQueue = { navController.navigate(MusicRoute.Queue.route) }
+                        onQueue = { showQueueSheet = true }
                     )
                 }
             }
@@ -215,14 +196,21 @@ fun MusicScreen(
                 popEnterTransition = { fadeIn(tween(300)) },
                 popExitTransition = { slideOutHorizontally { it / 2 } + fadeOut(tween(300)) }
             ) {
-                composable(MusicRoute.Dashboard.route) { DashboardScreen(viewModel, loadedSongs, { navController.navigate(MusicRoute.Library.route) { launchSingleTop = true } }, onNavigateToRadio, { navController.navigate(MusicRoute.History.route) }, { navController.navigate(MusicRoute.Playlists.route) }, { navController.navigate(MusicRoute.Folders.route) }, { navController.navigate(MusicRoute.Queue.route) }, onNavigateToDuoPlayer, { navController.navigate(MusicRoute.Favorites.route) }) }
+                composable(MusicRoute.Dashboard.route) {
+                    DashboardScreen(
+                        viewModel = viewModel,
+                        loadedSongs = loadedSongs,
+                        onNavigateToAllSongs = { navController.navigate(MusicRoute.Library.route) { launchSingleTop = true } },
+                        onNavigateToRadio = onNavigateToRadio,
+                        onNavigateToFolders = { navController.navigate(MusicRoute.Folders.route) },
+                        onShowQueue = { showQueueSheet = true },
+                        onNavigateToDuoMode = onNavigateToDuoPlayer,
+                        onNavigateToFavorites = { navController.navigate(MusicRoute.Favorites.route) }
+                    )
+                }
                 composable(MusicRoute.Library.route) { LibraryContent(displaySongs, viewModel) { trackToTrash = it } }
-                composable(MusicRoute.History.route) { HistoryScreen(viewModel, loadedSongs) { trackToTrash = it } }
                 composable(MusicRoute.Favorites.route) { FavoritesScreen(viewModel, loadedSongs) { trackToTrash = it } }
-                composable(MusicRoute.Playlists.route) { PlaylistsScreen(viewModel, loadedSongs, currentTrack?.id) { viewModel.playQueue(it.first, it.second) } }
                 composable(MusicRoute.Folders.route) { FolderList(displaySongs, viewModel) { trackToTrash = it } }
-                composable(MusicRoute.Queue.route) { QueueScreen(viewModel, currentTrack) { trackToTrash = it } }
-                composable(MusicRoute.AudioInfo.route) { AudioInfoScreen(currentTrack) }
             }
         }
     }
@@ -233,8 +221,24 @@ fun MusicScreen(
             viewModel = viewModel,
             currentTrack = currentTrack,
             isPlaying = isPlaying,
-            onNavigateToQueue = { showFullPlayer = false; navController.navigate(MusicRoute.Queue.route) },
-            onNavigateToAudioInfo = { showFullPlayer = false; navController.navigate(MusicRoute.AudioInfo.route) }
+            onShowQueue = { showFullPlayer = false; showQueueSheet = true },
+            onShowAudioInfo = { showFullPlayer = false; showAudioInfoSheet = true }
+        )
+    }
+
+    if (showQueueSheet) {
+        QueueBottomSheet(
+            viewModel = viewModel,
+            currentTrack = currentTrack,
+            onDismiss = { showQueueSheet = false },
+            onTrashClick = { trackToTrash = it; showQueueSheet = false }
+        )
+    }
+
+    if (showAudioInfoSheet) {
+        AudioInfoBottomSheet(
+            currentTrack = currentTrack,
+            onDismiss = { showAudioInfoSheet = false }
         )
     }
 }
@@ -252,7 +256,13 @@ fun MusicTopAppBar(currentRoute: String?, isSearchActive: Boolean, searchQuery: 
             }
         }
     } else {
-        val title = when (currentRoute) { MusicRoute.Library.route -> "All Songs"; MusicRoute.Playlists.route -> "Playlists"; MusicRoute.History.route -> "Playback History"; MusicRoute.Folders.route -> "Folders"; MusicRoute.Queue.route -> "Up Next"; MusicRoute.Favorites.route -> "Favorites"; MusicRoute.AudioInfo.route -> "Audio Info"; MusicRoute.Dashboard.route -> "Music"; else -> "Music" }
+        val title = when (currentRoute) {
+            MusicRoute.Library.route -> "All Songs"
+            MusicRoute.Folders.route -> "Folders"
+            MusicRoute.Favorites.route -> "Favorites"
+            MusicRoute.Dashboard.route -> "Music"
+            else -> "Music"
+        }
         CenterAlignedTopAppBar(
             title = { Text(text = title, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, fontSize = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             navigationIcon = { if (currentRoute != MusicRoute.Dashboard.route) IconButton(onClick = onNavigateBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface) } },
@@ -265,12 +275,18 @@ fun MusicTopAppBar(currentRoute: String?, isSearchActive: Boolean, searchQuery: 
 }
 
 @Composable
-fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: ImmutableList<AudioTrack>, onNavigateToAllSongs: () -> Unit, onNavigateToRadio: () -> Unit, onNavigateToHistory: () -> Unit, onNavigateToPlaylists: () -> Unit, onNavigateToFolders: () -> Unit, onNavigateToQueue: () -> Unit, onNavigateToDuoMode: () -> Unit, onNavigateToFavorites: () -> Unit) {
+fun DashboardScreen(
+    viewModel: MusicViewModel,
+    loadedSongs: ImmutableList<AudioTrack>,
+    onNavigateToAllSongs: () -> Unit,
+    onNavigateToRadio: () -> Unit,
+    onNavigateToFolders: () -> Unit,
+    onShowQueue: () -> Unit,
+    onNavigateToDuoMode: () -> Unit,
+    onNavigateToFavorites: () -> Unit
+) {
     val recentHistoryRaw by viewModel.recentHistory.collectAsStateWithLifecycle(initialValue = emptyList())
-    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
-
     val recentHistory = remember(recentHistoryRaw) { recentHistoryRaw.toImmutableList() }
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
     val songMap = remember(loadedSongs) { loadedSongs.associateBy { it.id }.toImmutableMap() }
 
     LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
@@ -279,21 +295,21 @@ fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: ImmutableList<AudioT
                 Text("Quick Access", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 16.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     QuickActionIcon(Icons.Rounded.Favorite, "Favorites", onNavigateToFavorites)
-                    QuickActionIcon(Icons.Rounded.Schedule, "Recent", onNavigateToHistory)
                     QuickActionIcon(Icons.Rounded.Folder, "Folders", onNavigateToFolders)
+                    QuickActionIcon(Icons.AutoMirrored.Rounded.QueueMusic, "Queue", onShowQueue)
                     QuickActionIcon(Icons.Rounded.LibraryMusic, "All Songs", onNavigateToAllSongs)
                 }
                 Spacer(Modifier.height(16.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     QuickActionIcon(Icons.Rounded.Radio, "Radio", onNavigateToRadio)
                     QuickActionIcon(Icons.Rounded.Headset, "Duo Mode", onNavigateToDuoMode)
-                    QuickActionIcon(Icons.AutoMirrored.Rounded.QueueMusic, "Queue", onNavigateToQueue)
                     QuickActionIcon(Icons.Rounded.Shuffle, "Shuffle") {
                         if (loadedSongs.isNotEmpty()) {
                             val toPlay = if (loadedSongs.size > 1000) loadedSongs.shuffled().take(1000) else loadedSongs.shuffled()
                             toPlay.firstOrNull()?.let { track -> viewModel.playQueue(toPlay, track) }
                         }
                     }
+                    Spacer(Modifier.width(72.dp)) // Placeholder to align
                 }
                 Spacer(Modifier.height(24.dp))
             }
@@ -303,42 +319,13 @@ fun DashboardScreen(viewModel: MusicViewModel, loadedSongs: ImmutableList<AudioT
             item {
                 Text("Recently Played", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, bottom = 12.dp))
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    val historySongs = recentHistory.take(10).mapNotNull { id -> songMap[id] }.toImmutableList()
+                    val historySongs = recentHistory.take(15).mapNotNull { id -> songMap[id] }.toImmutableList()
                     items(historySongs, key = { it.id }, contentType = { "song" }) { song ->
                         HorizontalSongCard(song) { viewModel.playQueue(historySongs, song) }
                     }
                 }
                 Spacer(Modifier.height(24.dp))
             }
-        }
-
-        item {
-            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Your Playlists", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                TextButton(onClick = onNavigateToPlaylists) { Text("See All", color = MaterialTheme.colorScheme.primary) }
-            }
-
-            if (playlists.isEmpty()) {
-                Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(120.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("🎵", fontSize = 32.sp)
-                        Spacer(Modifier.height(8.dp))
-                        Text("No Playlists", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
-                        Text("Create your first playlist.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                    }
-                }
-            } else {
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    items(playlists, key = { it.id }, contentType = { "playlist" }) { playlist ->
-                        PlaylistCard(playlist) {
-                            if (playlist.tracks.isNotEmpty()) {
-                                viewModel.playQueue(playlist.tracks, playlist.tracks.first())
-                            }
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(24.dp))
         }
 
         item {
@@ -393,89 +380,9 @@ fun HorizontalSongCard(song: AudioTrack, onClick: () -> Unit) {
 }
 
 @Composable
-fun PlaylistCard(playlist: Playlist, onClick: () -> Unit) {
-    Column(modifier = Modifier.width(160.dp).clickable(onClick = onClick)) {
-        Surface(modifier = Modifier.size(160.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-            Box(contentAlignment = Alignment.Center) {
-                val coverTrack = playlist.tracks.firstOrNull { it.albumId > 0 }
-                if (coverTrack != null) {
-                    AsyncImage(getArtRequest(coverTrack.albumId), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                    Box(Modifier.fillMaxSize().background(Color.Black.copy(0.3f)))
-                } else {
-                    Icon(Icons.AutoMirrored.Rounded.QueueMusic, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), modifier = Modifier.size(64.dp))
-                }
-
-                if (playlist.tracks.isNotEmpty()) {
-                    Box(modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp).size(36.dp).background(MaterialTheme.colorScheme.primary, CircleShape), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Rounded.PlayArrow, "Play", tint = Color.White, modifier = Modifier.size(20.dp))
-                    }
-                }
-            }
-        }
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(playlist.name, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 4.dp))
-        Text("${playlist.tracks.size} Songs", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun HistoryScreen(viewModel: MusicViewModel, allSongs: ImmutableList<AudioTrack>, onTrashClick: (AudioTrack) -> Unit) {
-    val historyRaw by viewModel.recentHistory.collectAsStateWithLifecycle(initialValue = emptyList())
-    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle(initialValue = emptyList())
-
-    val history = remember(historyRaw) { historyRaw.toImmutableList() }
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
-    val songMap = remember(allSongs) { allSongs.associateBy { it.id }.toImmutableMap() }
-
-    val playCounts = remember(history) { history.groupingBy { it }.eachCount().toImmutableMap() }
-
-    var selectedIndex by remember { mutableIntStateOf(0) }
-
-    Column(Modifier.fillMaxSize()) {
-        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-            SegmentedButton(
-                selected = selectedIndex == 0,
-                onClick = { selectedIndex = 0 },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
-            ) { Text("Recently Played") }
-            SegmentedButton(
-                selected = selectedIndex == 1,
-                onClick = { selectedIndex = 1 },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
-            ) { Text("Top Played") }
-        }
-
-        if (selectedIndex == 0) {
-            val recentList = remember(history, songMap) { history.mapNotNull { id -> songMap[id] }.toImmutableList() }
-            if (recentList.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No recent history", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                items(recentList, key = { it.id }, contentType = { "song" }) { song ->
-                    InteractiveSongRow(song, playlists, viewModel, { viewModel.playQueue(recentList, song) }, { onTrashClick(song) })
-                }
-            }
-        } else {
-            val sortedSongs = remember(playCounts, songMap) {
-                playCounts.keys.mapNotNull { id -> songMap[id] }.sortedByDescending { playCounts[it.id] ?: 0 }.toImmutableList()
-            }
-
-            if (sortedSongs.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No play statistics yet", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                items(sortedSongs, key = { it.id }, contentType = { "song" }) { song ->
-                    HistoryStatRow(song, playCounts[song.id] ?: 0, viewModel, sortedSongs) { onTrashClick(song) }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 fun FavoritesScreen(viewModel: MusicViewModel, allSongs: ImmutableList<AudioTrack>, onTrashClick: (AudioTrack) -> Unit) {
     val favoriteIdsRaw by viewModel.favoriteIds.collectAsStateWithLifecycle()
-    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle()
-
     val favoriteIds = remember(favoriteIdsRaw) { favoriteIdsRaw.toImmutableSet() }
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
     val favoriteSongs = remember(allSongs, favoriteIds) { allSongs.filter { it.id in favoriteIds }.toImmutableList() }
 
     if (favoriteSongs.isEmpty()) {
@@ -483,7 +390,7 @@ fun FavoritesScreen(viewModel: MusicViewModel, allSongs: ImmutableList<AudioTrac
     } else {
         LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
             items(favoriteSongs, key = { it.id }, contentType = { "song" }) { song ->
-                InteractiveSongRow(song, playlists, viewModel, { viewModel.playQueue(favoriteSongs, song) }, { onTrashClick(song) })
+                InteractiveSongRow(song, viewModel, { viewModel.playQueue(favoriteSongs, song) }, { onTrashClick(song) })
             }
         }
     }
@@ -491,20 +398,15 @@ fun FavoritesScreen(viewModel: MusicViewModel, allSongs: ImmutableList<AudioTrac
 
 @Composable
 fun LibraryContent(displaySongs: ImmutableList<AudioTrack>, vm: MusicViewModel, onTrashClick: (AudioTrack) -> Unit) {
-    val playlistsRaw by vm.playlists.collectAsStateWithLifecycle()
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
-
     LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
         items(displaySongs, key = { it.id }, contentType = { "song" }) { song ->
-            InteractiveSongRow(song, playlists, vm, { vm.playQueue(displaySongs, song) }, { onTrashClick(song) })
+            InteractiveSongRow(song, vm, { vm.playQueue(displaySongs, song) }, { onTrashClick(song) })
         }
     }
 }
 
 @Composable
 fun FolderList(songs: ImmutableList<AudioTrack>, vm: MusicViewModel, onTrashClick: (AudioTrack) -> Unit) {
-    val playlistsRaw by vm.playlists.collectAsStateWithLifecycle()
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
     val folders = remember(songs) { songs.filter { it.path.isNotBlank() }.groupBy { it.path.substringBeforeLast("/", "Unknown").trim() }.toSortedMap() }
     var selectedFolder by remember { mutableStateOf<String?>(null) }
 
@@ -542,7 +444,7 @@ fun FolderList(songs: ImmutableList<AudioTrack>, vm: MusicViewModel, onTrashClic
                     }
                     LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 90.dp)) {
                         items(tracks, key = { it.id }, contentType = { "song" }) { song ->
-                            InteractiveSongRow(song, playlists, vm, { vm.playQueue(tracks, song) }, { onTrashClick(song) })
+                            InteractiveSongRow(song, vm, { vm.playQueue(tracks, song) }, { onTrashClick(song) })
                         }
                     }
                 }
@@ -551,196 +453,83 @@ fun FolderList(songs: ImmutableList<AudioTrack>, vm: MusicViewModel, onTrashClic
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun QueueScreen(viewModel: MusicViewModel, currentTrack: AudioTrack?, onTrashClick: (AudioTrack) -> Unit) {
+fun QueueBottomSheet(viewModel: MusicViewModel, currentTrack: AudioTrack?, onDismiss: () -> Unit, onTrashClick: (AudioTrack) -> Unit) {
     val activeQueueRaw by viewModel.currentQueue.collectAsStateWithLifecycle()
-    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle()
-
     val activeQueue = remember(activeQueueRaw) { activeQueueRaw.toImmutableList() }
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
 
-    Column(Modifier.fillMaxSize()) {
-        if (currentTrack != null) {
-            Text("NOW PLAYING", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-            InteractiveSongRow(currentTrack, playlists, viewModel, { }, { onTrashClick(currentTrack) })
-            HorizontalDivider(Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.surfaceVariant)
-        }
-        Text("UP NEXT", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-        if (activeQueue.isEmpty()) {
-            Box(Modifier.fillMaxWidth().weight(1f), Alignment.Center) { Text("No more tracks in queue", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 90.dp)) {
-                items(activeQueue, key = { it.id }, contentType = { "song" }) { song ->
-                    Row(modifier = Modifier.fillMaxWidth().clickable { viewModel.playQueue(activeQueue, song) }.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.DragHandle, "Reorder", tint = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(song.title, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(song.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        IconButton(onClick = { viewModel.removeFromQueue(song) }) { Icon(Icons.Default.Close, "Remove", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    }
-                }
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxSize()) {
+            if (currentTrack != null) {
+                Text("NOW PLAYING", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                InteractiveSongRow(currentTrack, viewModel, { }, { onTrashClick(currentTrack) })
+                HorizontalDivider(Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.surfaceVariant)
             }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun PlaylistsScreen(vm: MusicViewModel, allSongs: ImmutableList<AudioTrack>, currentTrackId: Long?, onPlayQueue: (Pair<List<AudioTrack>, AudioTrack>) -> Unit) {
-    val playlistsRaw by vm.playlists.collectAsStateWithLifecycle()
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
-
-    var openPlaylistId by remember { mutableStateOf<Long?>(null) }
-    val activePlaylist = remember(playlists, openPlaylistId) { playlists.find { it.id == openPlaylistId } }
-
-    var showAddSongsDialog by remember { mutableStateOf(false) }
-    var playlistToRename by remember { mutableStateOf<Playlist?>(null) }
-    var playlistToDelete by remember { mutableStateOf<Playlist?>(null) }
-
-    BackHandler(enabled = openPlaylistId != null) { openPlaylistId = null }
-
-    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        AnimatedContent(
-            targetState = openPlaylistId,
-            transitionSpec = {
-                if (targetState == null) {
-                    (fadeIn() + scaleIn(initialScale = 0.9f)) togetherWith (fadeOut() + scaleOut(targetScale = 0.9f))
-                } else {
-                    (fadeIn() + scaleIn(initialScale = 0.9f)) togetherWith (fadeOut() + scaleOut(targetScale = 0.9f))
-                }
-            },
-            label = "ScreenTransition"
-        ) { targetId ->
-            if (targetId == null) {
-                if (playlists.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("🎵", fontSize = 48.sp); Spacer(Modifier.height(16.dp)); Text("No Playlists", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface); Text("Create your first playlist.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
-                else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 100.dp, top = 16.dp)) { items(playlists, key = { it.id }, contentType = { "playlist" }) { pl -> PlaylistRow(pl, { openPlaylistId = pl.id }, { playlistToRename = pl }, { playlistToDelete = pl }) } }
+            Text("UP NEXT", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            if (activeQueue.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f), Alignment.Center) { Text("No more tracks in queue", color = MaterialTheme.colorScheme.onSurfaceVariant) }
             } else {
-                activePlaylist?.let { playlist ->
-                    val currentSongs = remember(playlist.tracks) { playlist.tracks.toImmutableList() }
-                    var searchQuery by remember { mutableStateOf("") }
-                    var filteredSongs by remember { mutableStateOf(currentSongs) }
-
-                    LaunchedEffect(currentSongs) {
-                        snapshotFlow { searchQuery }
-                            .debounce(250)
-                            .collect { query ->
-                                withContext(Dispatchers.Default) {
-                                    filteredSongs = if (query.isBlank()) currentSongs
-                                    else currentSongs.filter { it.title.contains(query, true) || it.artist.contains(query, true) }.toImmutableList()
-                                }
+                LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 24.dp)) {
+                    items(activeQueue, key = { it.id }, contentType = { "song" }) { song ->
+                        Row(modifier = Modifier.fillMaxWidth().clickable { viewModel.playQueue(activeQueue, song) }.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.DragHandle, "Reorder", tint = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(song.title, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(song.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                    }
-
-                    Scaffold(
-                        topBar = {
-                            TopAppBar(
-                                title = {
-                                    Column {
-                                        Text(playlist.name, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Text("${currentSongs.size} Songs", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                },
-                                navigationIcon = { IconButton(onClick = { openPlaylistId = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface) } },
-                                actions = { IconButton(onClick = { showAddSongsDialog = true }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add Songs", tint = MaterialTheme.colorScheme.onSurface) } },
-                                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
-                            )
-                        },
-                        floatingActionButton = {
-                            if (currentSongs.isEmpty()) {
-                                ExtendedFloatingActionButton(
-                                    onClick = { showAddSongsDialog = true },
-                                    icon = { Icon(Icons.Rounded.Add, "Add") },
-                                    text = { Text("Add Songs", fontWeight = FontWeight.Bold) },
-                                    containerColor = MaterialTheme.colorScheme.primary,
-                                    contentColor = Color.White
-                                )
-                            } else {
-                                FloatingActionButton(
-                                    onClick = { currentSongs.firstOrNull()?.let { onPlayQueue(currentSongs.shuffled() to it) } },
-                                    containerColor = MaterialTheme.colorScheme.primary,
-                                    contentColor = Color.White,
-                                    shape = RoundedCornerShape(16.dp)
-                                ) { Icon(Icons.Default.Shuffle, "Shuffle Play") }
-                            }
-                        },
-                        containerColor = MaterialTheme.colorScheme.background
-                    ) { padding ->
-                        Column(Modifier.padding(padding).fillMaxSize()) {
-                            if (currentSongs.isNotEmpty()) {
-                                OutlinedTextField(
-                                    value = searchQuery,
-                                    onValueChange = { searchQuery = it },
-                                    placeholder = { Text("Search in playlist...") },
-                                    leadingIcon = { Icon(Icons.Default.Search, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                                    shape = CircleShape,
-                                    singleLine = true,
-                                    colors = TextFieldDefaults.colors(
-                                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                        focusedIndicatorColor = Color.Transparent,
-                                        unfocusedIndicatorColor = Color.Transparent
-                                    )
-                                )
-                            }
-
-                            if (currentSongs.isEmpty()) {
-                                Box(Modifier.weight(1f).fillMaxWidth(), Alignment.Center) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("🎵", fontSize = 48.sp)
-                                        Spacer(Modifier.height(16.dp))
-                                        Text("No songs yet", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp)
-                                        Text("Tap + to add songs", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
-                                    }
-                                }
-                            } else if (filteredSongs.isEmpty()) {
-                                Box(Modifier.weight(1f).fillMaxWidth(), Alignment.Center) { Text(if (searchQuery.isNotEmpty()) "No matches found" else "Playlist is empty", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                            } else {
-                                LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 80.dp)) {
-                                    items(filteredSongs, key = { it.id }, contentType = { "song" }) { song ->
-                                        PlaylistEditableSongRow(song, currentTrackId == song.id, { onPlayQueue(currentSongs to song) }, { vm.removeSongFromPlaylist(playlist, song) })
-                                    }
-                                }
-                            }
+                            IconButton(onClick = { viewModel.removeFromQueue(song) }) { Icon(Icons.Default.Close, "Remove", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
                         }
                     }
                 }
             }
         }
     }
-
-    if (playlistToRename != null) RenamePlaylistDialog(playlistToRename!!, playlists, { playlistToRename = null }, { vm.renamePlaylist(playlistToRename!!, it); playlistToRename = null })
-
-    if (showAddSongsDialog && activePlaylist != null) AddSongsDialog(activePlaylist!!, allSongs, { showAddSongsDialog = false }, { selectedSongs -> selectedSongs.forEach { vm.addSongToPlaylist(activePlaylist, it) }; showAddSongsDialog = false })
-
-    if (playlistToDelete != null) {
-        AlertDialog(
-            shape = RoundedCornerShape(24.dp),
-            onDismissRequest = { playlistToDelete = null },
-            title = { Text("Delete Playlist", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
-            text = { Text("Are you sure you want to delete '${playlistToDelete?.name}'?") },
-            confirmButton = { Button(onClick = { vm.deletePlaylist(playlistToDelete!!); playlistToDelete = null; openPlaylistId = null }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Delete") } },
-            dismissButton = { TextButton(onClick = { playlistToDelete = null }) { Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant) } },
-            containerColor = MaterialTheme.colorScheme.surface
-        )
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlayerScreen(onBack: () -> Unit, viewModel: MusicViewModel, currentTrack: AudioTrack?, isPlaying: Boolean, onNavigateToQueue: () -> Unit, onNavigateToAudioInfo: () -> Unit) {
+fun AudioInfoBottomSheet(currentTrack: AudioTrack?, onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface) {
+        Column(modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 48.dp, top = 8.dp).fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 16.dp)) {
+                Icon(Icons.Rounded.Info, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+                Spacer(Modifier.width(12.dp))
+                Text("Audio Info", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+            }
+
+            AudioInfoItem("Title", currentTrack?.title ?: "N/A")
+            AudioInfoItem("Artist", currentTrack?.artist ?: "N/A")
+            AudioInfoItem("Album", currentTrack?.album ?: "N/A")
+            AudioInfoItem("Duration", currentTrack?.let { formatTime(it.duration) } ?: "N/A")
+            AudioInfoItem("Format", currentTrack?.path?.substringAfterLast('.')?.uppercase(Locale.US) ?: "N/A")
+            AudioInfoItem("Bitrate", "Unknown") // Placeholder as Bitrate might not be in generic AudioTrack model
+            AudioInfoItem("Sample Rate", "Unknown") // Placeholder as Sample Rate might not be in generic AudioTrack model
+            AudioInfoItem("Path", currentTrack?.path ?: "N/A")
+        }
+    }
+}
+
+@Composable
+fun AudioInfoItem(label: String, value: String) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text(value, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+    }
+}
+
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PlayerScreen(onBack: () -> Unit, viewModel: MusicViewModel, currentTrack: AudioTrack?, isPlaying: Boolean, onShowQueue: () -> Unit, onShowAudioInfo: () -> Unit) {
     val ctx = LocalContext.current
     val view = LocalView.current
-    val playlistsRaw by viewModel.playlists.collectAsStateWithLifecycle()
-    val playlists = remember(playlistsRaw) { playlistsRaw.toImmutableList() }
 
     val favoriteIds by viewModel.favoriteIds.collectAsStateWithLifecycle()
     val isFavorite = remember(currentTrack?.id, favoriteIds) { favoriteIds.contains(currentTrack?.id) }
 
     var showSleepTimer by remember { mutableStateOf(false) }
     var showEffectsSheet by remember { mutableStateOf(false) }
-    var showPlaylistDialog by remember { mutableStateOf(false) }
 
     val bgArtworkReq = remember(currentTrack?.albumId) {
         ImageRequest.Builder(ctx).data(getAlbumArtUri(currentTrack?.albumId ?: -1)).size(400).allowHardware(true).build()
@@ -783,16 +572,14 @@ fun PlayerScreen(onBack: () -> Unit, viewModel: MusicViewModel, currentTrack: Au
             Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 32.dp)) {
                 Row(modifier = Modifier.padding(vertical = 12.dp, horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                     IconButton(onClick = { currentTrack?.let { viewModel.toggleFavorite(listOf(it.id)) } }) { Icon(if (isFavorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, "Favorite", tint = if(isFavorite) Color.Red else MaterialTheme.colorScheme.onSurface) }
-                    IconButton(onClick = { showPlaylistDialog = true }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add to Playlist", tint = MaterialTheme.colorScheme.onSurface) }
-                    IconButton(onClick = onNavigateToQueue) { Icon(Icons.AutoMirrored.Rounded.QueueMusic, "Queue", tint = MaterialTheme.colorScheme.onSurface) }
-                    IconButton(onClick = onNavigateToAudioInfo) { Icon(Icons.Rounded.Info, "Audio Info", tint = MaterialTheme.colorScheme.onSurface) }
+                    IconButton(onClick = onShowQueue) { Icon(Icons.AutoMirrored.Rounded.QueueMusic, "Queue", tint = MaterialTheme.colorScheme.onSurface) }
+                    IconButton(onClick = onShowAudioInfo) { Icon(Icons.Rounded.Info, "Audio Info", tint = MaterialTheme.colorScheme.onSurface) }
                 }
             }
         }
     }
     if (showSleepTimer) SleepTimerDialog({ showSleepTimer = false }, { viewModel.startSleepTimer(it) }, { viewModel.cancelSleepTimer() })
     if (showEffectsSheet) AdvancedEffectsBottomSheet(viewModel) { showEffectsSheet = false }
-    if (showPlaylistDialog && currentTrack != null) SelectPlaylistDialog(playlists, { showPlaylistDialog = false }) { pl -> viewModel.addSongToPlaylist(pl, currentTrack); showPlaylistDialog = false }
 }
 
 @Composable
@@ -838,21 +625,8 @@ fun PlaybackControls(isPlaying: Boolean, isShuffleEnabled: Boolean, repeatMode: 
 }
 
 @Composable
-fun AudioInfoScreen(currentTrack: AudioTrack?) {
-    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
-        Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Rounded.HighQuality, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(64.dp)); Spacer(Modifier.height(16.dp))
-            Text("Format: ${currentTrack?.path?.substringAfterLast('.')?.uppercase(Locale.US) ?: "N/A"}", color = MaterialTheme.colorScheme.onBackground, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Text("Path: ${currentTrack?.path}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, textAlign = TextAlign.Center)
-        }
-    }
-}
-
-@Composable
-fun InteractiveSongRow(song: AudioTrack, playlists: ImmutableList<Playlist>, vm: MusicViewModel, onClick: () -> Unit, onTrashClick: () -> Unit) {
+fun InteractiveSongRow(song: AudioTrack, vm: MusicViewModel, onClick: () -> Unit, onTrashClick: () -> Unit) {
     var showMenu by remember { mutableStateOf(false) }
-    var showTagEditor by remember { mutableStateOf(false) }
-    var showPlaylistDialog by remember { mutableStateOf(false) }
     val currentTrackRaw by vm.currentTrack.collectAsStateWithLifecycle()
     val isPlaying = remember(currentTrackRaw?.id, song.id) { currentTrackRaw?.id == song.id }
 
@@ -870,28 +644,9 @@ fun InteractiveSongRow(song: AudioTrack, playlists: ImmutableList<Playlist>, vm:
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
             DropdownMenuItem(text = { Text("Play Next", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMenu = false; vm.playNext(song) }, leadingIcon = { Icon(Icons.Rounded.QueuePlayNext, null, tint = MaterialTheme.colorScheme.onSurface) })
             DropdownMenuItem(text = { Text("Add to Queue", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMenu = false; vm.addToQueue(song) }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, null, tint = MaterialTheme.colorScheme.onSurface) })
-            DropdownMenuItem(text = { Text("Add to Playlist", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMenu = false; showPlaylistDialog = true }, leadingIcon = { Icon(Icons.Rounded.PlaylistAddCircle, null, tint = MaterialTheme.colorScheme.onSurface) })
-            DropdownMenuItem(text = { Text("Edit Tags", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMenu = false; showTagEditor = true }, leadingIcon = { Icon(Icons.Rounded.Edit, null, tint = MaterialTheme.colorScheme.onSurface) })
             DropdownMenuItem(text = { Text("Move to Trash", color = MaterialTheme.colorScheme.error) }, onClick = { showMenu = false; onTrashClick() }, leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) })
         }
     }
-    if (showTagEditor) TagEditorDialog(song, { showTagEditor = false }, { })
-    if (showPlaylistDialog) SelectPlaylistDialog(playlists, { showPlaylistDialog = false }) { pl -> vm.addSongToPlaylist(pl, song); showPlaylistDialog = false }
-}
-
-@Composable
-fun SelectPlaylistDialog(playlists: ImmutableList<Playlist>, onDismiss: () -> Unit, onSelect: (Playlist) -> Unit) {
-    AlertDialog(
-        shape = RoundedCornerShape(24.dp),
-        onDismissRequest = onDismiss,
-        title = { Text("Add to Playlist", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
-        text = {
-            if (playlists.isEmpty()) Text("No playlists available.")
-            else LazyColumn { items(playlists, key = { it.id }) { pl -> TextButton(onClick = { onSelect(pl) }, modifier = Modifier.fillMaxWidth()) { Text(pl.name, color = MaterialTheme.colorScheme.primary) } } }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant) } },
-        containerColor = MaterialTheme.colorScheme.surface
-    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -939,6 +694,7 @@ fun CompactSlider(label: String, value: Float, valueRange: ClosedFloatingPointRa
         )
     }
 }
+
 @Composable
 fun ModernMiniPlayer(
     track: AudioTrack,
@@ -1068,78 +824,6 @@ private fun BoxScope.MiniPlayerProgressBar(positionFlow: Flow<Long>, duration: L
 }
 
 @Composable
-fun HistoryStatRow(song: AudioTrack, count: Int, vm: MusicViewModel, sortedSongs: ImmutableList<AudioTrack>, onTrashClick: () -> Unit) {
-    var showMenu by remember { mutableStateOf(false) }
-    ListItem(
-        headlineContent = { Text(song.title, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        supportingContent = { Text("${song.artist}  •  Played $count times", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        leadingContent = { AsyncImage(getArtRequest(song.albumId), null, Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentScale = ContentScale.Crop) },
-        trailingContent = {
-            Box {
-                IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
-                    DropdownMenuItem(text = { Text("Play", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMenu = false; vm.playQueue(sortedSongs, song) }, leadingIcon = { Icon(Icons.Rounded.PlayArrow, null, tint = MaterialTheme.colorScheme.onSurface) })
-                    DropdownMenuItem(text = { Text("Move to Trash", color = MaterialTheme.colorScheme.error) }, onClick = { showMenu = false; onTrashClick() }, leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) })
-                }
-            }
-        }, colors = ListItemDefaults.colors(containerColor = Color.Transparent), modifier = Modifier.clickable { vm.playQueue(sortedSongs, song) }
-    )
-}
-
-@Composable
-fun PlaylistRow(playlist: Playlist, onClick: () -> Unit, onRename: () -> Unit, onDelete: () -> Unit) {
-    var showMenu by remember { mutableStateOf(false) }
-    val coverTrack = remember(playlist.tracks) { playlist.tracks.firstOrNull { it.albumId > 0 } }
-    val totalDurationMs = remember(playlist.tracks) { playlist.tracks.sumOf { it.duration } }
-
-    Row(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        val imgReq = getArtRequest(coverTrack?.albumId ?: -1L)
-        if (imgReq != null) {
-            AsyncImage(imgReq, null, contentScale = ContentScale.Crop, modifier = Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)))
-        } else {
-            Box(modifier = Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)), Alignment.Center) {
-                Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.primary)
-            }
-        }
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(playlist.name, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.height(4.dp))
-            Text("${playlist.tracks.size} Songs • ${formatTotalDuration(totalDurationMs)}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Box {
-            IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
-            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.background(MaterialTheme.colorScheme.surface)) {
-                DropdownMenuItem(text = { Text("Rename", color = MaterialTheme.colorScheme.onSurface) }, onClick = { showMenu = false; onRename() }, leadingIcon = { Icon(Icons.Default.Edit, null, tint = MaterialTheme.colorScheme.onSurface) })
-                DropdownMenuItem(text = { Text("Delete", color = MaterialTheme.colorScheme.error) }, onClick = { showMenu = false; onDelete() }, leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) })
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun PlaylistEditableSongRow(song: AudioTrack, isPlaying: Boolean, onClick: () -> Unit, onRemove: () -> Unit) {
-    val density = LocalDensity.current
-    val dismissState = remember(song.id) { SwipeToDismissBoxState(SwipeToDismissBoxValue.Settled, density, { if (it == SwipeToDismissBoxValue.EndToStart) { onRemove(); true } else false }, { it * 0.5f }) }
-
-    val titleColor by animateColorAsState(targetValue = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface, label = "editableTitleColor")
-
-    SwipeToDismissBox(state = dismissState, enableDismissFromStartToEnd = false, backgroundContent = { Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error).padding(horizontal = 24.dp), Alignment.CenterEnd) { Icon(Icons.Default.Delete, "Remove", tint = MaterialTheme.colorScheme.onError) } }) {
-        Row(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            AsyncImage(getArtRequest(song.albumId), null, contentScale = ContentScale.Crop, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh))
-            Spacer(Modifier.width(16.dp))
-            Column(Modifier.weight(1f)) {
-                Text(song.title, color = titleColor, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(2.dp))
-                Text(song.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            if (isPlaying) Icon(Icons.Default.GraphicEq, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-        }
-    }
-}
-
-@Composable
 fun PlayerHeader(albumName: String?, sleepTimeRemaining: Long, onBack: () -> Unit, onSleepTimerClick: () -> Unit, onEffectsClick: () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         Surface(onClick = onBack, shape = CircleShape, color = Color.Black.copy(0.2f), modifier = Modifier.size(44.dp)) {
@@ -1185,111 +869,6 @@ fun SleepTimerDialog(onDismiss: () -> Unit, onSet: (Int) -> Unit, onCancel: () -
         confirmButton = { TextButton(onClick = { onCancel(); onDismiss() }) { Text("Cancel Timer", color = MaterialTheme.colorScheme.error) } },
         containerColor = MaterialTheme.colorScheme.surface
     )
-}
-
-@Composable
-fun TagEditorDialog(song: AudioTrack, onDismiss: () -> Unit, onSave: () -> Unit) {
-    AlertDialog(
-        shape = RoundedCornerShape(24.dp),
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        title = { Text("Edit Metadata", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold) },
-        text = {
-            Column {
-                OutlinedTextField(song.title, {}, label = { Text("Title") })
-                OutlinedTextField(song.artist, {}, label = { Text("Artist") })
-            }
-        },
-        confirmButton = { TextButton(onClick = { onSave(); onDismiss() }) { Text("Save", color = MaterialTheme.colorScheme.primary) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant) } }
-    )
-}
-
-@Composable
-fun CreatePlaylistDialog(existingPlaylists: ImmutableList<Playlist>, onDismiss: () -> Unit, onCreate: (String) -> Unit) {
-    var newName by remember { mutableStateOf("") }
-    var isError by remember { mutableStateOf(false) }
-    AlertDialog(
-        shape = RoundedCornerShape(24.dp),
-        onDismissRequest = onDismiss,
-        title = { Text("New Playlist", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
-        text = {
-            Column {
-                OutlinedTextField(newName, { newName = it; isError = false }, label = { Text("Playlist Name") }, singleLine = true, isError = isError, colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
-                if (isError) Text("Name already exists", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-            }
-        },
-        confirmButton = {
-            Button(onClick = {
-                if (newName.isNotBlank()) {
-                    if (existingPlaylists.any { it.name.equals(newName, true) }) isError = true else onCreate(newName)
-                }
-            }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)) { Text("Create") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant) } },
-        containerColor = MaterialTheme.colorScheme.surface
-    )
-}
-
-@Composable
-fun RenamePlaylistDialog(playlist: Playlist, existingPlaylists: ImmutableList<Playlist>, onDismiss: () -> Unit, onRename: (String) -> Unit) {
-    var newName by remember { mutableStateOf(playlist.name) }
-    var isError by remember { mutableStateOf(false) }
-    AlertDialog(
-        shape = RoundedCornerShape(24.dp),
-        onDismissRequest = onDismiss,
-        title = { Text("Rename Playlist", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
-        text = {
-            Column {
-                OutlinedTextField(newName, { newName = it; isError = false }, label = { Text("New Name") }, singleLine = true, isError = isError, colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent))
-                if (isError) Text("Name already exists", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-            }
-        },
-        confirmButton = {
-            Button(onClick = {
-                if (newName.isNotBlank() && newName != playlist.name) {
-                    if (existingPlaylists.any { it.name.equals(newName, true) }) isError = true else onRename(newName)
-                } else if (newName == playlist.name) onDismiss()
-            }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)) { Text("Rename") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant) } },
-        containerColor = MaterialTheme.colorScheme.surface
-    )
-}
-
-@Composable
-fun AddSongsDialog(playlist: Playlist, allSongs: ImmutableList<AudioTrack>, onDismiss: () -> Unit, onAddSongs: (List<AudioTrack>) -> Unit) {
-    val availableSongs = remember(allSongs, playlist.tracks) { val existingIds = playlist.tracks.map { it.id }.toSet(); allSongs.filter { it.id !in existingIds }.toImmutableList() }
-    val selectedIds = remember { mutableStateListOf<Long>() }
-    Dialog(onDismissRequest = onDismiss) {
-        Card(modifier = Modifier.fillMaxWidth().heightIn(max = 600.dp), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(Modifier.fillMaxSize()) {
-                Text("Add Songs", modifier = Modifier.padding(20.dp), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.onSurface)
-                if (availableSongs.isEmpty()) {
-                    Box(Modifier.weight(1f).fillMaxWidth(), Alignment.Center) { Text("No more songs to add", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                } else {
-                    LazyColumn(modifier = Modifier.weight(1f)) {
-                        items(availableSongs, key = { it.id }) { song ->
-                            val isSel = selectedIds.contains(song.id)
-                            Row(Modifier.fillMaxWidth().clickable { if (isSel) selectedIds.remove(song.id) else selectedIds.add(song.id) }.padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(checked = isSel, onCheckedChange = { if (it) selectedIds.add(song.id) else selectedIds.remove(song.id) }, colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.primary))
-                                Spacer(Modifier.width(12.dp))
-                                Column {
-                                    Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                                    Text(song.artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                        }
-                    }
-                }
-                Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = onDismiss) { Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    Spacer(Modifier.width(8.dp))
-                    Button(onClick = { onAddSongs(availableSongs.filter { it.id in selectedIds }) }, enabled = selectedIds.isNotEmpty(), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)) { Text("Add (${selectedIds.size})") }
-                }
-            }
-        }
-    }
 }
 
 @Composable

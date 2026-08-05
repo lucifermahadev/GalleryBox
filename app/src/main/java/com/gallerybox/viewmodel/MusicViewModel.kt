@@ -50,12 +50,6 @@ data class AudioTrack(
     val composer: String = "Unknown"
 )
 
-data class Playlist(
-    val id: Long = System.currentTimeMillis(),
-    val name: String,
-    val tracks: List<AudioTrack> = emptyList()
-)
-
 data class PlayerState(
     val track: AudioTrack? = null,
     val isPlaying: Boolean = false,
@@ -259,7 +253,6 @@ class MusicViewModel @Inject constructor(
     application: Application
 ) : AndroidViewModel(application) {
 
-    private val settingsPrefs = application.getSharedPreferences("gallerybox_music_prefs", Context.MODE_PRIVATE)
     private var observeJob: Job? = null
     private var eqSaveJob: Job? = null
 
@@ -278,25 +271,11 @@ class MusicViewModel @Inject constructor(
         }.flow
     }.cachedIn(viewModelScope)
 
-    private val _playCounts = MutableStateFlow<Map<Long, Int>>(emptyMap())
-    val playCounts: StateFlow<Map<Long, Int>> = _playCounts.asStateFlow()
-
     fun setSearchQuery(q: String) { _searchQuery.value = q }
     fun setSortOption(o: SortOption) { _currentSortOption.value = o }
 
     private val _favoriteIds = MutableStateFlow<Set<Long>>(emptySet())
     val favoriteIds = _favoriteIds.asStateFlow()
-
-    // Normal recent history tracking
-    private val _recentHistory = MutableStateFlow<ArrayDeque<Long>>(ArrayDeque())
-    val recentHistory = _recentHistory.asStateFlow()
-
-    // Duo player history tracking
-    private val _duoRecentHistory = MutableStateFlow<ArrayDeque<Long>>(ArrayDeque())
-    val duoRecentHistory = _duoRecentHistory.asStateFlow()
-
-    private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
-    val playlists = _playlists.asStateFlow()
 
     private val _originalQueue = MutableStateFlow<List<AudioTrack>>(emptyList())
     private val _queue = MutableStateFlow<List<AudioTrack>>(emptyList())
@@ -352,15 +331,6 @@ class MusicViewModel @Inject constructor(
     private val _virtualizer = MutableStateFlow(0f); val virtualizer = _virtualizer.asStateFlow()
     private val _reverbPreset = MutableStateFlow(0.toShort()); val reverbPreset = _reverbPreset.asStateFlow()
 
-    private val _isGaplessEnabled = MutableStateFlow(settingsPrefs.getBoolean("gapless_playback", true))
-    val isGaplessEnabled = _isGaplessEnabled.asStateFlow()
-
-    private val _isCrossfadeEnabled = MutableStateFlow(settingsPrefs.getBoolean("crossfade_enabled", false))
-    val isCrossfadeEnabled = _isCrossfadeEnabled.asStateFlow()
-
-    private val _isPauseOnUnplugEnabled = MutableStateFlow(settingsPrefs.getBoolean("pause_on_unplug", true))
-    val isPauseOnUnplugEnabled = _isPauseOnUnplugEnabled.asStateFlow()
-
     var isShuffleEnabled by mutableStateOf(false)
     var repeatMode by mutableIntStateOf(Player.REPEAT_MODE_OFF)
     var isDuoModeActive by mutableStateOf(false)
@@ -377,7 +347,7 @@ class MusicViewModel @Inject constructor(
     }
 
     init {
-        loadAllAudioTracks() // Crucial fix: Preload local queue to prevent blank folders/all songs
+        loadAllAudioTracks()
         observePlayerManager()
         loadRoomData()
         _eqBands1.value.forEachIndexed { i, v -> playerManager.updateEq(i, v, false) }
@@ -394,23 +364,6 @@ class MusicViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             val stats = musicDao.getAllStats()
             _favoriteIds.value = stats.filter { it.isFavorite }.map { it.trackId }.toSet()
-
-            val deque = ArrayDeque<Long>()
-            stats.sortedByDescending { it.lastPlayed }.take(50).forEach { deque.add(it.trackId) }
-
-            _recentHistory.value = ArrayDeque(deque)
-            _duoRecentHistory.value = ArrayDeque(deque)
-
-            musicDao.getPlaylistsWithTracks().collectLatest { entities ->
-                val uniqueTrackIds = entities.flatMap { it.trackRefs.map { ref -> ref.trackId } }.distinct()
-                val allTracksMap = repository.getTracksByIds(uniqueTrackIds).associateBy { it.id }
-
-                val resolvedPlaylists = entities.map { entity ->
-                    val tracks = entity.trackRefs.mapNotNull { allTracksMap[it.trackId] }
-                    Playlist(entity.playlist.id, entity.playlist.name, tracks)
-                }
-                _playlists.value = resolvedPlaylists
-            }
         }
     }
 
@@ -471,7 +424,7 @@ class MusicViewModel @Inject constructor(
     fun playTrack(track: AudioTrack, secondary: Boolean = false) {
         if (!secondary) {
             setDuoMode(false)
-            updateStats(track.id, false)
+            updateStats(track.id)
 
             _currentPosition1.value = 0L
             _duration1.value = track.duration
@@ -557,7 +510,7 @@ class MusicViewModel @Inject constructor(
         }
         _queue.value = q
         _currentQueueIndex.value = 0
-        q.firstOrNull()?.let { updateStats(it.id, false) }
+        q.firstOrNull()?.let { updateStats(it.id) }
         playerManager.setPlaylist(q, 0)
     }
 
@@ -569,7 +522,7 @@ class MusicViewModel @Inject constructor(
 
     fun playDuoTrack(track: AudioTrack, isPlayer2: Boolean) {
         setDuoMode(true)
-        updateStats(track.id, true)
+        updateStats(track.id)
         if (isPlayer2) {
             _currentTrack2.value = track
             _currentPosition2.value = 0L
@@ -648,26 +601,6 @@ class MusicViewModel @Inject constructor(
     fun setDuoMode(enabled: Boolean) {
         isDuoModeActive = enabled
         playerManager.setDuoMode(enabled)
-    }
-
-    fun toggleGaplessPlayback(enabled: Boolean) {
-        _isGaplessEnabled.value = enabled
-        settingsPrefs.edit().putBoolean("gapless_playback", enabled).apply()
-        playerManager.gaplessPlayback = enabled
-    }
-
-    fun toggleCrossfade(enabled: Boolean) {
-        _isCrossfadeEnabled.value = enabled
-        settingsPrefs.edit().putBoolean("crossfade_enabled", enabled).apply()
-        val duration = _duration1.value
-        val fadeDurationMs = if (enabled) min(5000L, (duration * 0.03).toLong()).toInt() else 0
-        playerManager.setCrossfadeDuration(fadeDurationMs)
-    }
-
-    fun togglePauseOnUnplug(enabled: Boolean) {
-        _isPauseOnUnplugEnabled.value = enabled
-        settingsPrefs.edit().putBoolean("pause_on_unplug", enabled).apply()
-        playerManager.pauseOnUnplug = enabled
     }
 
     fun resetAudioEffects() {
@@ -787,39 +720,6 @@ class MusicViewModel @Inject constructor(
         playerManager.setReverb(p)
     }
 
-    fun createPlaylist(name: String) {
-        val cleanName = name.trim()
-        if(cleanName.isNotBlank()) viewModelScope.launch(Dispatchers.IO) {
-            musicDao.insertPlaylist(PlaylistEntity(name = cleanName))
-        }
-    }
-
-    fun deletePlaylist(playlist: Playlist) {
-        viewModelScope.launch(Dispatchers.IO) {
-            musicDao.deletePlaylist(PlaylistEntity(playlist.id, playlist.name))
-        }
-    }
-
-    fun renamePlaylist(playlist: Playlist, newName: String) {
-        val cleanName = newName.trim()
-        if(cleanName.isNotBlank()) viewModelScope.launch(Dispatchers.IO) {
-            musicDao.renamePlaylist(playlist.id, cleanName)
-        }
-    }
-
-    fun addSongToPlaylist(playlist: Playlist, track: AudioTrack) {
-        if (playlist.tracks.any { it.id == track.id }) return
-        viewModelScope.launch(Dispatchers.IO) {
-            musicDao.addTrackToPlaylist(PlaylistTrackCrossRef(playlist.id, track.id))
-        }
-    }
-
-    fun removeSongFromPlaylist(playlist: Playlist, track: AudioTrack) {
-        viewModelScope.launch(Dispatchers.IO) {
-            musicDao.removeTrackFromPlaylist(PlaylistTrackCrossRef(playlist.id, track.id))
-        }
-    }
-
     fun startSleepTimer(minutes: Int) {
         cancelSleepTimer()
         val ms = minutes * 60000L
@@ -841,27 +741,12 @@ class MusicViewModel @Inject constructor(
         sleepTimeRemaining = 0
     }
 
-    private fun updateStats(id: Long, isDuo: Boolean = false) {
+    private fun updateStats(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             val existing = musicDao.getStat(id)
             val newStat = existing?.copy(playCount = existing.playCount + 1, lastPlayed = System.currentTimeMillis())
                 ?: TrackStatEntity(id, 1, System.currentTimeMillis(), false)
             musicDao.insertStat(newStat)
-
-            // Accurately update the separate recent histories for Compose StateFlow to react
-            if (isDuo) {
-                val h = ArrayDeque(_duoRecentHistory.value)
-                h.remove(id)
-                h.addFirst(id)
-                if (h.size > 50) h.removeLast()
-                _duoRecentHistory.value = h
-            } else {
-                val h = ArrayDeque(_recentHistory.value)
-                h.remove(id)
-                h.addFirst(id)
-                if (h.size > 50) h.removeLast()
-                _recentHistory.value = h
-            }
         }
     }
 

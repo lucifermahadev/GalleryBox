@@ -89,6 +89,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import androidx.media3.common.MediaItem as Media3Item
 import coil.compose.AsyncImage
+import coil.imageLoader
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import coil.size.Precision
@@ -104,6 +105,7 @@ import com.gallerybox.viewmodel.PhotoSort
 import com.gallerybox.viewmodel.SecurityViewModel
 import com.gallerybox.viewmodel.TrashViewModel
 import kotlinx.collections.immutable.*
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -290,6 +292,18 @@ fun toggleAppLock(
     )
 }
 
+/**
+ * Shared helper to refresh the gallery view model and clear coil caches.
+ * Prevents edited/moved items from showing old thumbnails.
+ */
+private fun refreshAndClearCache(context: Context, viewModel: GalleryViewModel) {
+    viewModel.refreshAfterFileOperation()
+    context.imageLoader.memoryCache?.clear()
+    CoroutineScope(Dispatchers.IO).launch {
+        context.imageLoader.diskCache?.clear()
+    }
+}
+
 @Composable
 fun rememberGridImageRequest(uri: Uri?, size: Int, isVideo: Boolean): ImageRequest {
     val context = LocalContext.current
@@ -410,7 +424,7 @@ fun AlbumScreen(
     }
 
     LaunchedEffect(trashViewModel) {
-        trashViewModel.onRefreshGallery = { viewModel.refreshAfterFileOperation() }
+        trashViewModel.onRefreshGallery = { refreshAndClearCache(context, viewModel) }
         trashViewModel.events.collect { event ->
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
@@ -522,7 +536,8 @@ fun AlbumScreen(
                 }
             }
         ) { padding ->
-            Column(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding())) {
+            val bottomPadding = if (isSelectionMode) padding.calculateBottomPadding() else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+            Column(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding(), bottom = bottomPadding)) {
                 if (dynamicList.isEmpty()) {
                     Box(modifier = Modifier.weight(1f)) {
                         EmptyAlbumsOverlay(onCreateClick = { activeDialog = AlbumUiDialog.CreateAlbum })
@@ -596,7 +611,7 @@ fun AlbumScreen(
                             ListItem(headlineContent = { Text(targetAlbum.name, fontWeight = FontWeight.Medium) }, leadingContent = { Icon(Icons.Outlined.Folder, null) }, modifier = Modifier.clickable {
                                 if (dialog.isMove) optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
                                 viewModel.mergeAlbums(sourceAlbumIds = dialog.albums.map { id -> id.id }, targetAlbumId = targetAlbum.id, mergeMode = if (dialog.isMove) MergeMode.MOVE_AND_DELETE else MergeMode.COPY)
-                                viewModel.refreshAfterFileOperation()
+                                refreshAndClearCache(context, viewModel)
                                 activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
                             }, colors = ListItemDefaults.colors(containerColor = Color.Transparent))
                         }
@@ -610,15 +625,15 @@ fun AlbumScreen(
                 val mediaIds = allMedia.filter { item -> dialog.albums.any { album -> album.id == item.bucketId } }.map { it.id }
                 if (dialog.isMove) viewModel.createAndMove(mediaIds, newName) else viewModel.createAndCopy(mediaIds, newName)
                 if (dialog.isMove) optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
-                viewModel.refreshAfterFileOperation()
+                refreshAndClearCache(context, viewModel)
                 activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
             })
         }
-        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String -> viewModel.renameAlbum(dialog.album, newName); viewModel.refreshAfterFileOperation(); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
+        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String -> viewModel.renameAlbum(dialog.album, newName); refreshAndClearCache(context, viewModel); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
         is AlbumUiDialog.Delete -> ModernMoveToTrashSheet(count = dialog.albums.size, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = {
             optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { it.id })
             trashViewModel.confirmPendingAlbumTrash(dialog.albums, allMedia.toList())
-            viewModel.refreshAfterFileOperation()
+            refreshAndClearCache(context, viewModel)
             activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
         })
         is AlbumUiDialog.CreateAlbum -> ModernCreateAlbumSheet(onDismiss = { activeDialog = AlbumUiDialog.None }, onCreate = { name: String, sd: Boolean -> viewModel.createAlbum(name, sd); activeDialog = AlbumUiDialog.None })
@@ -717,7 +732,7 @@ fun AlbumDetailScreen(
     }
 
     LaunchedEffect(trashViewModel) {
-        trashViewModel.onRefreshGallery = { viewModel.refreshAfterFileOperation() }
+        trashViewModel.onRefreshGallery = { refreshAndClearCache(context, viewModel) }
         trashViewModel.events.collect { event ->
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
@@ -889,7 +904,7 @@ fun AlbumDetailScreen(
                                     if (albumId == ID_HIDDEN) {
                                         DropdownMenuItem(text = { Text("Unhide") }, onClick = { showMediaSelectionMenu = false; viewModel.unhideMedia(selectedIds.toList()); Toast.makeText(context, "Items restored", Toast.LENGTH_SHORT).show(); isSelectionMode = false }, leadingIcon = { Icon(Icons.Outlined.Visibility, null) })
                                     } else {
-                                        DropdownMenuItem(text = { Text("Hide") }, onClick = { showMediaSelectionMenu = false; viewModel.hideItems(selectedIds.toList()); Toast.makeText(context, "${selectedIds.size} items hidden", Toast.LENGTH_SHORT).show(); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(selectedIds); viewModel.refreshAfterFileOperation(); isSelectionMode = false }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
+                                        DropdownMenuItem(text = { Text("Hide") }, onClick = { showMediaSelectionMenu = false; viewModel.hideItems(selectedIds.toList()); Toast.makeText(context, "${selectedIds.size} items hidden", Toast.LENGTH_SHORT).show(); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(selectedIds); refreshAndClearCache(context, viewModel); isSelectionMode = false }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
                                     }
                                 }
                             }
@@ -898,7 +913,8 @@ fun AlbumDetailScreen(
                 }
             }
         ) { padding ->
-            Column(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding())) {
+            val bottomPadding = if (isSelectionMode) padding.calculateBottomPadding() else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+            Column(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding(), bottom = bottomPadding)) {
                 if (actuallyFilteredMedia.isEmpty() && localSearchQuery.isBlank() && mediaFilter == AlbumMediaFilter.ALL) {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -985,7 +1001,7 @@ fun AlbumDetailScreen(
 
     when (val dialog = activeDialog) {
         is DetailUiDialog.DeleteAlbum -> AlertDialog(onDismissRequest = { activeDialog = DetailUiDialog.None }, icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Delete Album?") }, text = { Text("This will delete the manual album placeholder. Any physical media stored within this folder on your device will remain intact.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { actions.onDeleteAlbum?.invoke(albumId); activeDialog = DetailUiDialog.None; actions.onBack() }) { Text("Delete") } }, dismissButton = { TextButton(onClick = { activeDialog = DetailUiDialog.None }) { Text("Cancel") } })
-        is DetailUiDialog.Delete -> ModernMoveToTrashSheet(count = dialog.mediaIds.size, onDismiss = { activeDialog = DetailUiDialog.None }, onConfirm = { val itemsToTrash = allMedia.filter { dialog.mediaIds.contains(it.id) }; if (itemsToTrash.isNotEmpty()) { trashViewModel.confirmPendingGalleryTrash(itemsToTrash); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(dialog.mediaIds) }; viewModel.refreshAfterFileOperation(); activeDialog = DetailUiDialog.None; isSelectionMode = false; viewModel.closeViewer() })
+        is DetailUiDialog.Delete -> ModernMoveToTrashSheet(count = dialog.mediaIds.size, onDismiss = { activeDialog = DetailUiDialog.None }, onConfirm = { val itemsToTrash = allMedia.filter { dialog.mediaIds.contains(it.id) }; if (itemsToTrash.isNotEmpty()) { trashViewModel.confirmPendingGalleryTrash(itemsToTrash); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(dialog.mediaIds) }; refreshAndClearCache(context, viewModel); activeDialog = DetailUiDialog.None; isSelectionMode = false; viewModel.closeViewer() })
         is DetailUiDialog.GridSize -> ModernGridSheet(currentColumns = detailColumns, max = 8, onDismiss = { activeDialog = DetailUiDialog.None }, onUpdate = { cols: Int -> detailColumns = cols; prefs.edit().putInt("gallery_media_grid_columns", cols).apply(); activeDialog = DetailUiDialog.None })
         is DetailUiDialog.Sort -> ModernMediaSortSheet(activeSort = currentPhotoSort, onDismiss = { activeDialog = DetailUiDialog.None }, onSortSelected = { sort: PhotoSort -> currentPhotoSort = sort; activeDialog = DetailUiDialog.None })
         else -> {}

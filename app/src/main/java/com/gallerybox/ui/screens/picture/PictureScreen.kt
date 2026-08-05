@@ -230,7 +230,20 @@ fun PictureScreen(
                                 TextButton(onClick = {
                                     selectedIds = if (isAllSelected) emptySet() else mediaItems.map { it.item.id }.take(5000).toSet()
                                 }) {
-                                    Text(text = if (isAllSelected) "Deselect All" else "Select All", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                    if (isAllSelected) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Check,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                    }
+                                    Text(
+                                        text = "Select All",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             },
                             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
@@ -331,26 +344,27 @@ fun PictureScreen(
             )
         }
 
-        if (isSelectionMode) {
-            val selectedMediaItems = remember(selectedIds, pagedMedia.itemSnapshotList) {
-                pagedMedia.itemSnapshotList.items
-                    .filterIsInstance<GalleryGridItem.Media>()
-                    .filter { selectedIds.contains(it.item.id) }
-                    .map { it.item }
-            }
+        val selectedMediaItems = remember(selectedIds, pagedMedia.itemSnapshotList) {
+            if (selectedIds.isEmpty()) emptyList()
+            else pagedMedia.itemSnapshotList.items
+                .filterIsInstance<GalleryGridItem.Media>()
+                .filter { selectedIds.contains(it.item.id) }
+                .map { it.item }
+        }
 
-            Box(modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp).navigationBarsPadding()) {
-                Surface(
-                    shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    shadowElevation = 10.dp
+        Box(modifier = Modifier.align(Alignment.BottomCenter)) {
+            AnimatedVisibility(
+                visible = isSelectionMode,
+                enter = slideInVertically(initialOffsetY = { it }),
+                exit = slideOutVertically(targetOffsetY = { it })
+            ) {
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 3.dp
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(8.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") {
+                    NavigationBarItem(
+                        selected = false,
+                        onClick = {
                             val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
                                 type = "*/*"
                                 putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(selectedMediaItems.map { it.uri }))
@@ -359,33 +373,52 @@ fun PictureScreen(
                             context.startActivity(Intent.createChooser(intent, "Share via"))
                             isSelectionMode = false
                             selectedIds = emptySet()
-                        }
+                        },
+                        icon = { Icon(Icons.Outlined.Share, contentDescription = "Share") },
+                        label = { Text("Share") }
+                    )
 
-                        BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Trash", isDestructive = true) {
+                    NavigationBarItem(
+                        selected = false,
+                        onClick = {
                             activeDialog = PictureUiDialog.TrashConfirm(selectedMediaItems)
-                        }
+                        },
+                        icon = { Icon(Icons.Outlined.Delete, contentDescription = "Trash") },
+                        label = { Text("Trash") },
+                        colors = NavigationBarItemDefaults.colors(
+                            unselectedIconColor = MaterialTheme.colorScheme.error,
+                            unselectedTextColor = MaterialTheme.colorScheme.error
+                        )
+                    )
 
-                        var showMoreMenu by remember { mutableStateOf(false) }
-                        Box {
-                            BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showMoreMenu = true }
-                            DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Move to Album", color = MaterialTheme.colorScheme.onSurface) },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), null)
-                                        isSelectionMode = false
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Copy to Album", color = MaterialTheme.colorScheme.onSurface) },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), null)
-                                        isSelectionMode = false
-                                    }
-                                )
-                            }
+                    var showMoreMenu by remember { mutableStateOf(false) }
+                    Box(modifier = Modifier.weight(1f)) {
+                        this@NavigationBar.NavigationBarItem(
+                            selected = false,
+                            onClick = { showMoreMenu = true },
+                            icon = { Icon(Icons.Default.MoreVert, contentDescription = "More") },
+                            label = { Text("More") }
+                        )
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Move to Album", color = MaterialTheme.colorScheme.onSurface) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), null)
+                                    isSelectionMode = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Copy to Album", color = MaterialTheme.colorScheme.onSurface) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), null)
+                                    isSelectionMode = false
+                                }
+                            )
                         }
                     }
                 }
@@ -584,7 +617,12 @@ fun GalleryGridContent(
         LazyVerticalGrid(
             state = gridState, columns = gridCells,
             modifier = Modifier.fillMaxSize().then(dragModifier),
-            contentPadding = PaddingValues(top = 4.dp, bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 80.dp, start = 4.dp, end = 4.dp),
+            contentPadding = PaddingValues(
+                top = 4.dp,
+                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + if (isSelectionMode) 0.dp else 80.dp,
+                start = 4.dp,
+                end = 4.dp
+            ),
             verticalArrangement = Arrangement.spacedBy(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
@@ -875,17 +913,6 @@ fun ActionItem(icon: ImageVector, label: String, isDestructive: Boolean = false,
             Box(modifier = Modifier.size(46.dp).clip(CircleShape).background(contentColor.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Icon(imageVector = icon, contentDescription = label, tint = contentColor, modifier = Modifier.size(24.dp)) }
             Spacer(Modifier.height(10.dp)); Text(text = label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = contentColor, maxLines = 1)
         }
-    }
-}
-
-@Composable
-fun BottomBarActionItem(icon: ImageVector, label: String, isDestructive: Boolean = false, onClick: () -> Unit) {
-    val contentColor = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-    Column(modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(contentColor.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
-            Icon(imageVector = icon, contentDescription = label, tint = contentColor, modifier = Modifier.size(20.dp))
-        }
-        Spacer(Modifier.height(6.dp)); Text(text = label, style = MaterialTheme.typography.labelMedium, color = contentColor, maxLines = 1)
     }
 }
 

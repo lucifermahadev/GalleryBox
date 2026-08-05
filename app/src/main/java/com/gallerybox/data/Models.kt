@@ -313,27 +313,6 @@ data class VaultInfo(
     val uuid: String
 )
 
-data class PlaylistWithTracks(
-    @Embedded val playlist: PlaylistEntity,
-    @Relation(parentColumn = "id", entityColumn = "playlistId") val trackRefs: List<PlaylistTrackCrossRef>
-)
-
-
-@Entity(tableName = "music_playlists")
-data class PlaylistEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val name: String
-)
-
-@Entity(
-    tableName = "music_playlist_tracks",
-    primaryKeys = ["playlistId", "trackId"]
-)
-data class PlaylistTrackCrossRef(
-    val playlistId: Long,
-    val trackId: Long
-)
-
 @Entity(tableName = "music_track_stats")
 data class TrackStatEntity(
     @PrimaryKey val trackId: Long,
@@ -568,33 +547,10 @@ data class ManualAlbumEntity(
 @Dao
 @JvmSuppressWildcards
 interface MusicDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertPlaylist(playlist: PlaylistEntity): Long
-
-    @Delete
-    suspend fun deletePlaylist(playlist: PlaylistEntity): Int
-
-    @Query("UPDATE music_playlists SET name = :newName WHERE id = :id")
-    suspend fun renamePlaylist(id: Long, newName: String): Int
-
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun addTrackToPlaylist(crossRef: PlaylistTrackCrossRef): Long
-
-    @Delete
-    suspend fun removeTrackFromPlaylist(crossRef: PlaylistTrackCrossRef): Int
-
-    @Transaction
-    @Query("SELECT * FROM music_playlists")
-    fun getPlaylistsWithTracks(): Flow<List<PlaylistWithTracks>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertStats(stats: List<TrackStatEntity>)
 
-    @Query("SELECT * FROM music_playlists")
-    fun getPlaylists(): Flow<List<PlaylistEntity>>
-
-    @Query("SELECT trackId FROM music_playlist_tracks WHERE playlistId = :playlistId")
-    suspend fun getTrackIdsForPlaylist(playlistId: Long): List<Long>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertStat(stat: TrackStatEntity): Long
@@ -871,8 +827,6 @@ interface AlbumThumbnailDao {
         MediaMetadataCore::class,
         MediaMetadataVideo::class,
         MediaMetadataFlags::class,
-        PlaylistEntity::class,
-        PlaylistTrackCrossRef::class,
         TrackStatEntity::class,
         ManualAlbumEntity::class,
         UsageEntity::class
