@@ -14,8 +14,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
@@ -32,6 +34,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -198,11 +201,14 @@ fun DuoMusicScreen(viewModel: MusicViewModel, onBack: () -> Unit) {
             containerColor = MaterialTheme.colorScheme.background,
             dragHandle = { BottomSheetDefaults.DragHandle(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)) }
         ) {
+            val otherPlayerTrackId = if (activePlayerForSelection == 1) track2?.id else track1?.id
+
             SongPickerSheet(
                 pagedSongs = pagedSongs,
                 searchQuery = searchQuery,
                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
                 playerLabel = if (activePlayerForSelection == 1) "Left Earphone" else "Right Earphone",
+                otherTrackId = otherPlayerTrackId,
                 onSongSelected = { track ->
                     viewModel.playDuoTrack(track = track, isPlayer2 = activePlayerForSelection == 2)
                     showSheet = false
@@ -218,8 +224,6 @@ fun PremiumDJDivider(
     p1Color: Color, p2Color: Color, isPlaying: Boolean, isLinked: Boolean,
     onSync: () -> Unit, onLink: () -> Unit, onCrossfade: () -> Unit
 ) {
-    // OPTIMIZATION: Removed infinite transition. Uses Animatable triggered only when actively playing.
-    // Saves battery and GPU tick loop on low-end devices.
     val animatedPulse = remember { Animatable(0.35f) }
 
     LaunchedEffect(isPlaying) {
@@ -233,18 +237,54 @@ fun PremiumDJDivider(
         }
     }
 
-    Box(modifier = Modifier.fillMaxWidth().height(88.dp).background(MaterialTheme.colorScheme.background)) {
+    Box(modifier = Modifier.fillMaxWidth().height(100.dp).background(MaterialTheme.colorScheme.background)) {
         Box(modifier = Modifier.align(Alignment.Center).fillMaxWidth().height(4.dp).background(Brush.horizontalGradient(listOf(p1Color.copy(alpha = animatedPulse.value), p2Color.copy(alpha = animatedPulse.value)))))
         Row(modifier = Modifier.fillMaxSize().padding(horizontal = 28.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            FilledIconButton(onClick = onSync, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) { Icon(Icons.Rounded.Sync, "Sync", tint = p1Color) }
 
-            // Reduced shadow elevation from 6.dp to 4.dp
-            Surface(modifier = Modifier.size(68.dp), shape = CircleShape, color = if (isLinked) p1Color else MaterialTheme.colorScheme.surfaceContainerHigh, shadowElevation = if (isLinked) 4.dp else 2.dp) {
-                Box(modifier = Modifier.fillMaxSize().clickable { onLink() }, contentAlignment = Alignment.Center) { Icon(if (isLinked) Icons.Default.Lock else Icons.Default.LockOpen, null, modifier = Modifier.size(28.dp), tint = if (isLinked) Color.White else MaterialTheme.colorScheme.onSurfaceVariant) }
+            DividerControlButton(
+                icon = Icons.Rounded.Sync,
+                label = "Sync FX",
+                color = p1Color,
+                onClick = onSync
+            )
+
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.offset(y = (-4).dp)) {
+                Surface(
+                    modifier = Modifier.size(56.dp),
+                    shape = CircleShape,
+                    color = if (isLinked) p1Color else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shadowElevation = if (isLinked) 4.dp else 2.dp
+                ) {
+                    Box(modifier = Modifier.fillMaxSize().clickable { onLink() }, contentAlignment = Alignment.Center) {
+                        Icon(if (isLinked) Icons.Default.Lock else Icons.Default.LockOpen, contentDescription = "Link Players", modifier = Modifier.size(24.dp), tint = if (isLinked) Color.White else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(if (isLinked) "Linked" else "Link", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
             }
 
-            FilledIconButton(onClick = onCrossfade, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) { Icon(Icons.Rounded.CompareArrows, "Crossfade", tint = p2Color) }
+            DividerControlButton(
+                icon = Icons.Rounded.CompareArrows,
+                label = "Crossfade",
+                color = p2Color,
+                onClick = onCrossfade
+            )
         }
+    }
+}
+
+@Composable
+fun DividerControlButton(icon: ImageVector, label: String, color: Color, onClick: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        FilledIconButton(
+            onClick = onClick,
+            modifier = Modifier.size(48.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+        ) {
+            Icon(icon, contentDescription = label, tint = color)
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -259,30 +299,32 @@ fun DuoPlayerHalf(
     LaunchedEffect(track?.id) { showFx = false }
     val view = LocalView.current
 
-    // OPTIMIZATION: Reduced size to 400 and disabled crossfade for immediate local image rendering
     val artRequest = rememberAlbumArtRequest(albumId = track?.albumId ?: -1L, size = 400, crossfade = false)
 
     key(track?.id, isTop) {
         Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             if (track != null) AsyncImage(model = artRequest, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, alpha = 0.08f)
             Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(if (isTop) listOf(MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.background.copy(alpha = 0.82f), Color.Transparent) else listOf(Color.Transparent, MaterialTheme.colorScheme.background.copy(alpha = 0.82f), MaterialTheme.colorScheme.background))))
-            Text(text = if (isTop) "L" else "R", color = color.copy(alpha = 0.08f), fontSize = 170.sp, fontWeight = FontWeight.Black, modifier = Modifier.align(if (isTop) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = 18.dp))
 
+            // Reduced opacity for background L/R letters to minimize visual clutter
+            Text(text = if (isTop) "L" else "R", color = color.copy(alpha = 0.03f), fontSize = 170.sp, fontWeight = FontWeight.Black, modifier = Modifier.align(if (isTop) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = 18.dp))
+
+            // Wrapped in verticalScroll to prevent squeezing on small screens
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
                 Surface(shape = CircleShape, color = color.copy(alpha = 0.14f), border = BorderStroke(1.dp, color.copy(alpha = 0.25f))) {
                     Text(text = label, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.labelSmall, color = color, fontWeight = FontWeight.Bold)
                 }
 
-                Spacer(modifier = Modifier.weight(0.5f))
+                Spacer(modifier = Modifier.height(16.dp))
 
                 if (track != null) {
-                    // OPTIMIZATION: Rotates vinyl continuously but only consumes animation ticks when actively playing.
-                    // Acts like a physical record retaining its position when paused.
                     val rotationAnimatable = remember { Animatable(0f) }
 
                     LaunchedEffect(isPlaying) {
@@ -296,19 +338,10 @@ fun DuoPlayerHalf(
                         }
                     }
 
-                    val dynamicSeekStep = maxOf(10000L, (track.duration * 0.01).toLong())
-
-                    // Reduced shadow elevation from 6.dp to 4.dp
                     Surface(
                         modifier = Modifier
                             .size(130.dp)
-                            .clip(CircleShape)
-                            .pointerInput(track.id) {
-                                detectTapGestures(onDoubleTap = {
-                                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                    onSeek((position + dynamicSeekStep).coerceAtMost(track.duration))
-                                })
-                            },
+                            .clip(CircleShape),
                         shape = CircleShape, color = Color.White, shadowElevation = 4.dp
                     ) {
                         Box {
@@ -330,7 +363,7 @@ fun DuoPlayerHalf(
                     Text(text = "Tap library to choose a track", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
-                Spacer(modifier = Modifier.weight(0.5f))
+                Spacer(modifier = Modifier.height(16.dp))
 
                 val duration = (track?.duration ?: 1000L).toFloat().coerceAtLeast(1f)
                 val safePosition = if (track != null) position.toFloat().coerceIn(0f, duration) else 0f
@@ -382,27 +415,52 @@ fun DuoPlayerHalf(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    FilledIconButton(modifier = Modifier.size(40.dp), onClick = { view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); showFx = !showFx }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = if (showFx) color else MaterialTheme.colorScheme.surfaceContainerHigh)) {
-                        Icon(Icons.Rounded.Tune, null, tint = if (showFx) Color.White else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
-                    }
 
-                    // Reduced shadow elevation from 6.dp to 4.dp
-                    Surface(modifier = Modifier.size(56.dp).clip(CircleShape).pointerInput(track?.id) { detectTapGestures(onLongPress = { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); onSeek(0L) }, onTap = { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); onPlayPause() }) }, shape = CircleShape, color = color, shadowElevation = if (isPlaying) 4.dp else 2.dp) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(32.dp))
+                    DuoControlButton(
+                        icon = Icons.Rounded.Tune,
+                        label = "Effects",
+                        color = color,
+                        isSelected = showFx,
+                        onClick = { view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); showFx = !showFx }
+                    )
+
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Surface(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .pointerInput(track?.id) {
+                                    detectTapGestures(
+                                        onLongPress = { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); onSeek(0L) },
+                                        onTap = { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); onPlayPause() }
+                                    )
+                                },
+                            shape = CircleShape,
+                            color = color,
+                            shadowElevation = if (isPlaying) 4.dp else 2.dp
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, contentDescription = "Play/Pause", tint = Color.White, modifier = Modifier.size(32.dp))
+                            }
                         }
+                        Spacer(Modifier.height(4.dp))
+                        Text(if (isPlaying) "Pause" else "Play", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
 
-                    FilledIconButton(modifier = Modifier.size(40.dp), onClick = { view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); onOpenLibrary() }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) {
-                        Icon(Icons.AutoMirrored.Rounded.QueueMusic, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
-                    }
+                    DuoControlButton(
+                        icon = Icons.AutoMirrored.Rounded.QueueMusic,
+                        label = "Library",
+                        color = color,
+                        isSelected = false,
+                        onClick = { view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); onOpenLibrary() }
+                    )
                 }
 
                 AnimatedVisibility(visible = showFx, enter = fadeIn(tween(300)) + slideInVertically(tween(300)) { it / 3 }, exit = fadeOut(tween(200)) + slideOutVertically(tween(200)) { it / 3 }) {
-                    ElevatedCard(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), shape = RoundedCornerShape(20.dp), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) {
+                    ElevatedCard(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), shape = RoundedCornerShape(20.dp), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             FxSlider("Speed", speedVal, 0.5f..2f, color, isPitch = false) { onSpeed(it) }
                             Spacer(modifier = Modifier.height(6.dp))
@@ -410,8 +468,27 @@ fun DuoPlayerHalf(
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
             }
         }
+    }
+}
+
+@Composable
+fun DuoControlButton(icon: ImageVector, label: String, color: Color, isSelected: Boolean, onClick: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick).padding(4.dp)) {
+        Surface(
+            shape = CircleShape,
+            color = if (isSelected) color else MaterialTheme.colorScheme.surfaceContainerHigh,
+            modifier = Modifier.size(44.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = label, tint = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(text = label, style = MaterialTheme.typography.labelSmall, color = if (isSelected) color else MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -445,7 +522,7 @@ fun FxSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SongPickerSheet(pagedSongs: LazyPagingItems<AudioTrack>, searchQuery: String, onSearchQueryChange: (String) -> Unit, playerLabel: String, onSongSelected: (AudioTrack) -> Unit) {
+fun SongPickerSheet(pagedSongs: LazyPagingItems<AudioTrack>, searchQuery: String, onSearchQueryChange: (String) -> Unit, playerLabel: String, otherTrackId: Long?, onSongSelected: (AudioTrack) -> Unit) {
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(horizontal = 18.dp).padding(top = 12.dp)) {
         Box(modifier = Modifier.align(Alignment.CenterHorizontally).width(54.dp).height(5.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)))
         Spacer(modifier = Modifier.height(22.dp))
@@ -465,6 +542,8 @@ fun SongPickerSheet(pagedSongs: LazyPagingItems<AudioTrack>, searchQuery: String
                 items(count = pagedSongs.itemCount, key = { index -> pagedSongs.peek(index)?.id ?: index }) { index ->
                     pagedSongs[index]?.let { song ->
                         val artRequest = rememberAlbumArtRequest(albumId = song.albumId, size = 200, crossfade = false)
+                        val isUsedByOther = song.id == otherTrackId
+
                         ElevatedCard(modifier = Modifier.fillMaxWidth().clickable { onSongSelected(song) }, shape = RoundedCornerShape(28.dp), elevation = CardDefaults.elevatedCardElevation(2.dp), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) {
                             Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Box(modifier = Modifier.size(72.dp).clip(RoundedCornerShape(22.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
@@ -472,7 +551,19 @@ fun SongPickerSheet(pagedSongs: LazyPagingItems<AudioTrack>, searchQuery: String
                                     Box(modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(24.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary), contentAlignment = Alignment.Center) { Icon(Icons.Rounded.PlayArrow, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(16.dp)) }
                                 }
                                 Spacer(modifier = Modifier.width(16.dp))
-                                Column(modifier = Modifier.weight(1f)) { Text(song.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis); Spacer(Modifier.height(4.dp)); Text(song.artist, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(song.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Spacer(Modifier.height(4.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(song.artist, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        if (isUsedByOther) {
+                                            Spacer(Modifier.width(8.dp))
+                                            Surface(color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(12.dp)) {
+                                                Text("In Use (Other Ear)", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                                            }
+                                        }
+                                    }
+                                }
                                 Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }

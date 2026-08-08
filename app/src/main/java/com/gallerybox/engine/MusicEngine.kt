@@ -31,12 +31,15 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.support.v4.media.session.MediaSessionCompat
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
@@ -46,7 +49,6 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.session.MediaSession
-import androidx.media3.ui.PlayerNotificationManager
 import coil.ImageLoader
 import coil.request.ImageRequest
 import com.gallerybox.MainActivity
@@ -426,6 +428,10 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
     private val _queue = MutableStateFlow<List<AudioTrack>>(emptyList())
     val queue = _queue.asStateFlow()
 
+    // Expose playback errors for UI feedback
+    private val _playerError = MutableStateFlow<String?>(null)
+    val playerError = _playerError.asStateFlow()
+
     private var queueMap = emptyMap<String, AudioTrack>()
 
     private val _audioSessionId = MutableStateFlow(C.AUDIO_SESSION_ID_UNSET)
@@ -492,6 +498,7 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
                 _isPlaying.value = isPlaying
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                _playerError.value = null // Clear previous errors
                 mediaItem?.mediaId?.let { id ->
                     queueMap[id]?.let { track ->
                         _currentTrack.value = track
@@ -509,6 +516,11 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
                     wasPausedByUnplug = false
                 }
             }
+            override fun onPlayerError(error: PlaybackException) {
+                _isPlaying.value = false
+                _playerError.value = "Playback failed: ${error.localizedMessage}"
+                Log.e("PlayerManager", "Player 1 Error", error)
+            }
         })
 
         player2.addListener(object : Player.Listener {
@@ -517,13 +529,23 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
                 _isPlaying2.value = isPlaying
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                _playerError.value = null // Clear previous errors
                 mediaItem?.mediaId?.let { id ->
                     queueMap[id]?.let { track ->
                         _currentTrack2.value = track
                     }
                 }
             }
+            override fun onPlayerError(error: PlaybackException) {
+                _isPlaying2.value = false
+                _playerError.value = "Secondary playback failed: ${error.localizedMessage}"
+                Log.e("PlayerManager", "Player 2 Error", error)
+            }
         })
+    }
+
+    fun clearError() {
+        _playerError.value = null
     }
 
     private fun createExoPlayer(processor: DynamicStereoProcessor): ExoPlayer {
@@ -775,6 +797,7 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
 
     fun playTrack(track: AudioTrack, secondary: Boolean = false) {
         registerCallbacks()
+        _playerError.value = null // Clear error before attempting to play
 
         val targetPlayer = if (secondary) player2 else player
 
@@ -806,6 +829,7 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
 
     fun setPlaylist(tracks: List<AudioTrack>, startIndex: Int = 0) {
         registerCallbacks()
+        _playerError.value = null
         _queue.value = tracks
         queueMap = tracks.associateBy { it.id.toString() }
 
@@ -887,6 +911,7 @@ class PlayerManager @Inject constructor(@ApplicationContext private val context:
         _currentTrack.value = null
         _currentTrack2.value = null
         _queue.value = emptyList()
+        _playerError.value = null
 
         _isPlaying.value = false
         _isPlaying2.value = false
@@ -928,140 +953,159 @@ class MusicService : Service() {
     private val imageLoader by lazy { ImageLoader(this) }
 
     private var mediaSession: MediaSession? = null
-    private var notificationManager: PlayerNotificationManager? = null
-    private var currentNotification: Notification? = null
+    private var notificationManager: NotificationManager? = null
+    private var currentAlbumArt: Bitmap? = null
     private var autoStopJob: Job? = null
 
     private val _playbackMode = MutableStateFlow(PlaybackMode.NONE)
     val playbackMode = _playbackMode.asStateFlow()
 
-    inner class MusicBinder : Binder() {
-        fun getService(): MusicService = this@MusicService
-    }
+    inner class MusicBinder : Binder() { fun getService(): MusicService = this@MusicService }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         createNotificationChannel()
         setupMediaSession()
-        setupNotification()
         coordinateEngines()
     }
 
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        val isActive = playerManager.player.isPlaying ||
-                playerManager.player.playWhenReady ||
-                playerManager.player2.isPlaying ||
-                playerManager.player2.playWhenReady ||
-                fmRadioEngine.isPlaying.value
-
-        if (!isActive) {
-            stopServiceAndPlayback()
-        }
-        super.onTaskRemoved(rootIntent)
-    }
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_NOT_STICKY
-    }
-
-    private fun scheduleAutoStop() {
-        autoStopJob?.cancel()
-        autoStopJob = serviceScope.launch {
-            delay(15000)
-            val isActive = playerManager.player.isPlaying ||
-                    playerManager.player2.isPlaying ||
-                    fmRadioEngine.isPlaying.value
-
-            if (!isActive) {
-                stopServiceAndPlayback()
-            }
+        when (intent?.action) {
+            ACTION_PLAY_PAUSE -> togglePlayPause()
+            ACTION_NEXT -> if (_playbackMode.value == PlaybackMode.FM_RADIO) fmRadioEngine.scanNext() else playerManager.seekToNext()
+            ACTION_PREV -> if (_playbackMode.value == PlaybackMode.FM_RADIO) fmRadioEngine.scanPrevious() else playerManager.seekToPrevious()
         }
+        return START_NOT_STICKY
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val notificationManagerService = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val channel = NotificationChannel(CHANNEL_ID, "Media Playback", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Background music and radio playback controls"
+                description = "Music and Radio controls"
                 setShowBadge(false)
             }
-            notificationManagerService.createNotificationChannel(channel)
+            notificationManager?.createNotificationChannel(channel)
         }
-    }
-
-    private fun coordinateEngines() {
-        serviceScope.launch {
-            playerManager.isPlaying.collect { isPlaying ->
-                if (isPlaying) {
-                    autoStopJob?.cancel()
-                    fmRadioEngine.stop()
-                    _playbackMode.value = PlaybackMode.LOCAL_MUSIC
-                    updateNotificationActions(false)
-                } else {
-                    if (_playbackMode.value == PlaybackMode.LOCAL_MUSIC) {
-                        _playbackMode.value = PlaybackMode.NONE
-                    }
-                    scheduleAutoStop()
-                }
-            }
-        }
-
-        serviceScope.launch {
-            fmRadioEngine.isPlaying.collect { isPlaying ->
-                if (isPlaying) {
-                    autoStopJob?.cancel()
-                    playerManager.pause()
-                    _playbackMode.value = PlaybackMode.FM_RADIO
-                    updateNotificationActions(true)
-                    currentNotification?.let { notification ->
-                        startForegroundSafe(NOTIFICATION_ID, notification)
-                    }
-                } else {
-                    if (_playbackMode.value == PlaybackMode.FM_RADIO) {
-                        _playbackMode.value = PlaybackMode.NONE
-                        stopForeground(STOP_FOREGROUND_DETACH)
-                    }
-                    scheduleAutoStop()
-                }
-            }
-        }
-    }
-
-    private fun updateNotificationActions(isFm: Boolean) {
-        notificationManager?.setUseNextAction(!isFm)
-        notificationManager?.setUsePreviousAction(!isFm)
     }
 
     private fun setupMediaSession() {
         mediaSession = MediaSession.Builder(this, playerManager.player).build()
     }
 
-    private fun setupNotification() {
-        notificationManager = PlayerNotificationManager.Builder(this, NOTIFICATION_ID, CHANNEL_ID)
-            .setChannelNameResourceId(R.string.app_name)
-            .setMediaDescriptionAdapter(DescriptionAdapter())
-            .setNotificationListener(object : PlayerNotificationManager.NotificationListener {
-                override fun onNotificationPosted(notificationId: Int, notification: Notification, ongoing: Boolean) {
-                    currentNotification = notification
-                    val isPlaying = playerManager.isPlaying.value || fmRadioEngine.isPlaying.value
+    private fun coordinateEngines() {
+        // Observe Music State
+        serviceScope.launch {
+            playerManager.isPlaying.collect { isPlaying ->
+                if (isPlaying) {
+                    fmRadioEngine.stop()
+                    _playbackMode.value = PlaybackMode.LOCAL_MUSIC
+                    updateNotification(true)
+                } else if (_playbackMode.value == PlaybackMode.LOCAL_MUSIC) {
+                    updateNotification(false)
+                    scheduleAutoStop()
+                }
+            }
+        }
 
-                    if (ongoing && isPlaying) {
-                        startForegroundSafe(notificationId, notification)
-                    } else if (!isPlaying && _playbackMode.value != PlaybackMode.NONE) {
-                        stopForeground(STOP_FOREGROUND_DETACH)
+        serviceScope.launch {
+            playerManager.currentTrack.collect { track ->
+                if (_playbackMode.value == PlaybackMode.LOCAL_MUSIC) {
+                    if (track?.albumId != null && track.albumId > 0) {
+                        loadAlbumArt(track.albumId)
+                    } else {
+                        currentAlbumArt = null
+                        updateNotification(playerManager.isPlaying.value)
                     }
                 }
-
-                override fun onNotificationCancelled(notificationId: Int, dismissed: Boolean) {
-                    stopServiceAndPlayback()
-                }
-            })
-            .build()
-            .apply {
-                setPlayer(playerManager.player)
             }
+        }
+
+        // Observe FM Radio State
+        serviceScope.launch {
+            fmRadioEngine.isPlaying.collect { isPlaying ->
+                if (isPlaying) {
+                    playerManager.pause()
+                    _playbackMode.value = PlaybackMode.FM_RADIO
+                    updateNotification(true)
+                } else if (_playbackMode.value == PlaybackMode.FM_RADIO) {
+                    updateNotification(false)
+                    scheduleAutoStop()
+                }
+            }
+        }
+
+        serviceScope.launch {
+            fmRadioEngine.frequency.collect {
+                if (_playbackMode.value == PlaybackMode.FM_RADIO) {
+                    updateNotification(fmRadioEngine.isPlaying.value)
+                }
+            }
+        }
+    }
+
+    private suspend fun loadAlbumArt(albumId: Long) {
+        try {
+            val request = ImageRequest.Builder(this)
+                .data(ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), albumId))
+                .size(256)
+                .bitmapConfig(Bitmap.Config.RGB_565)
+                .allowHardware(false)
+                .build()
+            val result = imageLoader.execute(request).drawable as? BitmapDrawable
+            currentAlbumArt = result?.bitmap
+        } catch (e: Exception) {
+            currentAlbumArt = null
+        }
+        updateNotification(playerManager.isPlaying.value)
+    }
+
+    private fun updateNotification(isPlaying: Boolean) {
+        val isFm = _playbackMode.value == PlaybackMode.FM_RADIO
+
+        val title = if (isFm) "FM Radio" else playerManager.currentTrack.value?.title ?: "Music"
+        val text = if (isFm) "${fmRadioEngine.frequency.value} MHz" else playerManager.currentTrack.value?.artist ?: "Unknown Artist"
+
+        // Use Media3's ExoPlayer material icons instead of stock android icons
+        val playPauseIcon = if (isPlaying) androidx.media3.ui.R.drawable.exo_icon_pause else androidx.media3.ui.R.drawable.exo_icon_play
+        val playPauseAction = NotificationCompat.Action(playPauseIcon, "Play/Pause", pendingIntent(ACTION_PLAY_PAUSE, 0))
+        val prevAction = NotificationCompat.Action(androidx.media3.ui.R.drawable.exo_icon_previous, "Previous", pendingIntent(ACTION_PREV, 1))
+        val nextAction = NotificationCompat.Action(androidx.media3.ui.R.drawable.exo_icon_next, "Next", pendingIntent(ACTION_NEXT, 2))
+
+        val openIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
+        val mediaStyle = androidx.media3.session.MediaStyleNotificationHelper.MediaStyle(mediaSession!!)
+            .setShowActionsInCompactView(0, 1, 2)
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(androidx.media3.ui.R.drawable.exo_icon_play) // Use a neutral material media icon
+            .setContentTitle(title)
+            .setContentText(text)
+            .setLargeIcon(if (isFm) null else currentAlbumArt)
+            .setContentIntent(openIntent)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(isPlaying)
+            .addAction(prevAction)
+            .addAction(playPauseAction)
+            .addAction(nextAction)
+            .setStyle(mediaStyle)
+
+        val notification = builder.build()
+
+        if (isPlaying) {
+            startForegroundSafe(NOTIFICATION_ID, notification)
+            autoStopJob?.cancel()
+        } else {
+            notificationManager?.notify(NOTIFICATION_ID, notification)
+            stopForeground(STOP_FOREGROUND_DETACH)
+        }
+    }
+
+    private fun pendingIntent(action: String, reqCode: Int): PendingIntent {
+        val intent = Intent(this, MusicService::class.java).setAction(action)
+        return PendingIntent.getService(this, reqCode, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 
     private fun startForegroundSafe(notificationId: Int, notification: Notification) {
@@ -1072,7 +1116,7 @@ class MusicService : Service() {
                 startForeground(notificationId, notification)
             }
         } catch (e: Exception) {
-            Log.e("MusicService", "Foreground service start rejected: ${e.message}")
+            Log.e("MusicService", "Foreground service start rejected", e)
         }
     }
 
@@ -1080,86 +1124,44 @@ class MusicService : Service() {
         when (_playbackMode.value) {
             PlaybackMode.LOCAL_MUSIC -> playerManager.togglePlayPause()
             PlaybackMode.FM_RADIO -> {
-                if (fmRadioEngine.isPlaying.value) {
-                    fmRadioEngine.stop()
-                } else {
-                    fmRadioEngine.start(98.0f)
-                }
+                if (fmRadioEngine.isPlaying.value) fmRadioEngine.stop() else fmRadioEngine.start(98.0f)
             }
             PlaybackMode.NONE -> {}
         }
     }
 
-    fun stopServiceAndPlayback() {
-        playerManager.stopAll()
-        fmRadioEngine.stop()
-        notificationManager?.setPlayer(null)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+    private fun scheduleAutoStop() {
+        autoStopJob?.cancel()
+        autoStopJob = serviceScope.launch {
+            delay(15000)
+            if (!playerManager.isPlaying.value && !fmRadioEngine.isPlaying.value) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (!playerManager.isPlaying.value && !fmRadioEngine.isPlaying.value) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
         serviceScope.cancel()
         mediaSession?.release()
-        notificationManager?.setPlayer(null)
+        playerManager.release()
+        fmRadioEngine.release()
         super.onDestroy()
-    }
-
-    private inner class DescriptionAdapter : PlayerNotificationManager.MediaDescriptionAdapter {
-        override fun getCurrentContentTitle(player: Player): CharSequence {
-            return if (_playbackMode.value == PlaybackMode.FM_RADIO) {
-                "FM Radio"
-            } else {
-                playerManager.currentTrack.value?.title ?: "Music Player"
-            }
-        }
-
-        override fun createCurrentContentIntent(player: Player): PendingIntent? {
-            val intent = Intent(this@MusicService, MainActivity::class.java)
-            return PendingIntent.getActivity(this@MusicService, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        }
-
-        override fun getCurrentContentText(player: Player): CharSequence? {
-            return if (_playbackMode.value == PlaybackMode.FM_RADIO) {
-                "${fmRadioEngine.frequency.value} MHz"
-            } else {
-                playerManager.currentTrack.value?.artist ?: "Unknown Artist"
-            }
-        }
-
-        override fun getCurrentLargeIcon(player: Player, callback: PlayerNotificationManager.BitmapCallback): Bitmap? {
-            val track = playerManager.currentTrack.value?.takeIf { it.id.toString() == player.currentMediaItem?.mediaId }
-                ?: playerManager.queue.value.find { it.id.toString() == player.currentMediaItem?.mediaId }
-
-            if (_playbackMode.value != PlaybackMode.FM_RADIO && track != null && track.albumId > 0) {
-                serviceScope.launch(Dispatchers.IO) {
-                    try {
-                        val request = ImageRequest.Builder(this@MusicService)
-                            .data(ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), track.albumId))
-                            .size(256, 256)
-                            .bitmapConfig(Bitmap.Config.RGB_565)
-                            .allowHardware(false)
-                            .build()
-
-                        val result = imageLoader.execute(request)
-                        val bitmap = (result.drawable as? BitmapDrawable)?.bitmap
-
-                        bitmap?.let {
-                            withContext(Dispatchers.Main) {
-                                callback.onBitmap(it)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }
-            }
-            return null
-        }
     }
 
     companion object {
         const val NOTIFICATION_ID = 101
         const val CHANNEL_ID = "gallerybox_music_channel"
+        const val ACTION_PLAY_PAUSE = "com.gallerybox.ACTION_PLAY_PAUSE"
+        const val ACTION_NEXT = "com.gallerybox.ACTION_NEXT"
+        const val ACTION_PREV = "com.gallerybox.ACTION_PREV"
     }
 }

@@ -17,7 +17,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.*
@@ -46,7 +47,6 @@ private val WarningAmberColor = Color(0xFFFFA000)
 @Composable
 fun EqualizerScreen(viewModel: MusicViewModel = hiltViewModel(), onBack: () -> Unit) {
     var showSaveDialog by remember { mutableStateOf(false) }
-    var showMenu by remember { mutableStateOf(false) }
 
     val enabled by viewModel.eqEnabled.collectAsState()
     val pagerState = rememberPagerState(pageCount = { 2 })
@@ -60,15 +60,8 @@ fun EqualizerScreen(viewModel: MusicViewModel = hiltViewModel(), onBack: () -> U
                 title = { Text("Equalizer", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = colors.onSurface) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = colors.onSurface) } },
                 actions = {
-                    Box {
-                        IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More", tint = colors.onSurface) }
-                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.background(colors.surface).clip(RoundedCornerShape(12.dp))) {
-                            DropdownMenuItem(
-                                text = { Text("Save Preset", color = colors.onSurface) },
-                                leadingIcon = { Icon(Icons.Default.Save, null, tint = colors.onSurface) },
-                                onClick = { showMenu = false; showSaveDialog = true }
-                            )
-                        }
+                    IconButton(onClick = { showSaveDialog = true }) {
+                        Icon(Icons.Default.Save, "Save Preset", tint = colors.onSurface)
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent)
@@ -79,11 +72,11 @@ fun EqualizerScreen(viewModel: MusicViewModel = hiltViewModel(), onBack: () -> U
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(colors.primary.copy(alpha = 0.05f), colors.background))))
 
             Column(Modifier.fillMaxSize().padding(paddingValues)) {
-                Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
-                    Surface(shape = RoundedCornerShape(20.dp), color = colors.surfaceContainerHigh) {
-                        Row(Modifier.height(40.dp).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            TabPill("Equalizer", pagerState.currentPage == 0) { scope.launch { pagerState.animateScrollToPage(0) } }
-                            TabPill("Effects", pagerState.currentPage == 1) { scope.launch { pagerState.animateScrollToPage(1) } }
+                Box(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp)) {
+                    Surface(shape = RoundedCornerShape(20.dp), color = colors.surfaceContainerHigh, modifier = Modifier.fillMaxWidth()) {
+                        Row(Modifier.height(44.dp).padding(4.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            TabPill("Equalizer", pagerState.currentPage == 0, Modifier.weight(1f)) { scope.launch { pagerState.animateScrollToPage(0) } }
+                            TabPill("Effects", pagerState.currentPage == 1, Modifier.weight(1f)) { scope.launch { pagerState.animateScrollToPage(1) } }
                         }
                     }
                 }
@@ -98,7 +91,10 @@ fun EqualizerScreen(viewModel: MusicViewModel = hiltViewModel(), onBack: () -> U
     if (showSaveDialog) {
         SavePresetDialog(
             onDismiss = { showSaveDialog = false },
-            onSave = { presetName -> showSaveDialog = false }
+            onSave = { presetName ->
+                viewModel.saveCustomPreset(presetName)
+                showSaveDialog = false
+            }
         )
     }
 }
@@ -134,11 +130,13 @@ fun SavePresetDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
         confirmButton = {
             Button(
                 onClick = {
-                    if (name.isNotBlank()) {
-                        Toast.makeText(context, "'$name' Saved", Toast.LENGTH_SHORT).show()
-                        onSave(name)
+                    val trimmed = name.trim()
+                    if (trimmed.isNotBlank()) {
+                        Toast.makeText(context, "'$trimmed' Saved", Toast.LENGTH_SHORT).show()
+                        onSave(trimmed)
                     }
                 },
+                enabled = name.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = colors.primary),
                 contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp)
             ) {
@@ -154,15 +152,14 @@ fun SavePresetDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
 }
 
 @Composable
-fun TabPill(text: String, isSelected: Boolean, onClick: () -> Unit) {
+fun TabPill(text: String, isSelected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     Box(
-        Modifier
+        modifier
             .fillMaxHeight()
             .clip(RoundedCornerShape(16.dp))
             .background(if (isSelected) colors.primary else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 24.dp),
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -173,6 +170,10 @@ fun TabPill(text: String, isSelected: Boolean, onClick: () -> Unit) {
         )
     }
 }
+
+// Converts HEAVY_METAL -> "Heavy Metal", HIP_HOP -> "Hip Hop", NORMAL -> "Normal"
+private fun Preset.displayName(): String =
+    name.lowercase().split("_").joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
 
 @Composable
 fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
@@ -196,8 +197,11 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
     }
     val colors = MaterialTheme.colorScheme
     val currentPreset by viewModel.currentPreset.collectAsState(initial = Preset.NORMAL)
+    val activeCustomName by viewModel.activeCustomPresetName.collectAsState()
+    val customPresets by viewModel.customPresets.collectAsState()
 
     var expandedPresetMenu by remember { mutableStateOf(false) }
+    var presetPendingDelete by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp).padding(bottom = 48.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -207,7 +211,7 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
                 color = colors.surfaceContainerHigh,
                 shadowElevation = 2.dp
             ) {
-                Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(Modifier.padding(horizontal = 16.dp).fillMaxSize(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Column {
                         Text("Equalizer", color = colors.onSurface, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         Text("Improve sound quality", color = colors.onSurfaceVariant, fontSize = 13.sp)
@@ -221,7 +225,7 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
             }
 
             Surface(
-                modifier = Modifier.weight(0.6f).height(80.dp),
+                modifier = Modifier.weight(0.75f).height(80.dp),
                 shape = RoundedCornerShape(20.dp),
                 color = colors.surfaceContainerHigh,
                 shadowElevation = 2.dp
@@ -233,36 +237,57 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
                     ) {
                         Text("Preset", color = colors.onSurfaceVariant, fontSize = 13.sp)
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(currentPreset.name, color = colors.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                text = activeCustomName ?: currentPreset.displayName(),
+                                color = colors.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
+                            )
                             Icon(Icons.Default.ArrowDropDown, null, tint = colors.primary)
                         }
                     }
                     DropdownMenu(expanded = expandedPresetMenu, onDismissRequest = { expandedPresetMenu = false }, modifier = Modifier.background(colors.surfaceContainerHigh).clip(RoundedCornerShape(12.dp))) {
+                        Text("BUILT-IN", color = colors.onSurfaceVariant, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                         Preset.entries.forEach { p ->
                             DropdownMenuItem(
-                                text = { Text(p.name, color = colors.onSurface) },
-                                onClick = {
-                                    viewModel.applyPreset(p)
-                                    expandedPresetMenu = false
-                                }
+                                text = { Text(p.displayName(), color = colors.onSurface) },
+                                onClick = { viewModel.applyPreset(p); expandedPresetMenu = false }
                             )
+                        }
+                        if (customPresets.isNotEmpty()) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = colors.background)
+                            Text("YOUR PRESETS", color = colors.onSurfaceVariant, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+                            customPresets.keys.sorted().forEach { name ->
+                                DropdownMenuItem(
+                                    text = { Text(name, color = colors.onSurface) },
+                                    onClick = { viewModel.applyCustomPreset(name); expandedPresetMenu = false },
+                                    trailingIcon = {
+                                        IconButton(onClick = { presetPendingDelete = name; expandedPresetMenu = false }, modifier = Modifier.size(20.dp)) {
+                                            Icon(Icons.Default.Delete, "Delete $name", tint = colors.error, modifier = Modifier.size(18.dp))
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(16.dp))
 
-        Box(contentAlignment = Alignment.Center) {
-            EqCurveGraph(bands = bands, enabled = enabled, labels = freqs)
+        TextButton(onClick = { viewModel.applyPreset(Preset.FLAT) }, modifier = Modifier.align(Alignment.End)) {
+            Icon(Icons.Default.Refresh, null, tint = colors.onSurfaceVariant, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Reset to Flat", color = colors.onSurfaceVariant, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
 
-            this@Column.AnimatedVisibility(visible = isDistorting && enabled, enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
-                Surface(
-                    shape = CircleShape,
-                    color = WarningAmberColor.copy(alpha = 0.15f),
-                    modifier = Modifier.padding(bottom = 16.dp)
-                ) {
+        Spacer(Modifier.height(8.dp))
+
+        EqCurveGraph(bands = bands, enabled = enabled, labels = freqs)
+
+        AnimatedVisibility(visible = isDistorting && enabled, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.Center) {
+                Surface(shape = CircleShape, color = WarningAmberColor.copy(alpha = 0.15f)) {
                     Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.WarningAmber, "Warning", tint = WarningAmberColor, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(8.dp))
@@ -272,7 +297,11 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
             }
         }
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(16.dp))
+
+        AnimatedVisibility(visible = !enabled) {
+            Text("Turn on Equalizer above to adjust bands", color = colors.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(bottom = 8.dp))
+        }
 
         Row(Modifier.weight(1f).fillMaxWidth().alpha(if (enabled) 1f else 0.4f)) {
             Column(Modifier.fillMaxHeight().padding(end = 12.dp, bottom = 24.dp, top = 14.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.End) {
@@ -293,6 +322,13 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
             }
         }
 
+        Text(
+            "Double-tap a band to reset it",
+            color = colors.onSurfaceVariant.copy(alpha = if (enabled) 0.7f else 0.3f),
+            fontSize = 11.sp, fontWeight = FontWeight.Medium,
+            modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 4.dp)
+        )
+
         Spacer(Modifier.height(24.dp))
 
         Row(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
@@ -300,6 +336,23 @@ fun EqTab(viewModel: MusicViewModel, enabled: Boolean) {
             Spacer(Modifier.width(16.dp))
             KnobCard("Surround", viewModel.virtualizer, enabled) { viewModel.updateVirtualizer(it) }
         }
+    }
+
+    presetPendingDelete?.let { name ->
+        AlertDialog(
+            shape = RoundedCornerShape(24.dp),
+            containerColor = colors.surfaceContainerHigh,
+            onDismissRequest = { presetPendingDelete = null },
+            title = { Text("Delete Preset?", color = colors.onSurface, fontWeight = FontWeight.Bold) },
+            text = { Text("Delete '$name'? This can't be undone.", color = colors.onSurfaceVariant) },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.deleteCustomPreset(name); presetPendingDelete = null },
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.error)
+                ) { Text("Delete", color = colors.onError, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { presetPendingDelete = null }) { Text("Cancel", color = colors.onSurfaceVariant) } }
+        )
     }
 }
 
@@ -320,6 +373,7 @@ fun KnobCard(title: String, valueFlow: kotlinx.coroutines.flow.StateFlow<Float>,
             Text(title, color = if (enabled) colors.onSurface else colors.onSurfaceVariant, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
             Text("${(value * 100).toInt()}%", color = colors.primary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text("Drag to adjust", color = colors.onSurfaceVariant.copy(alpha = 0.6f), fontSize = 10.sp)
         }
     }
 }
@@ -514,6 +568,20 @@ fun VerticalEqSlider(modifier: Modifier, levelProvider: () -> Float, enabled: Bo
                     .background(colors.primary, CircleShape)
                     .border(2.dp, colors.surface, CircleShape)
             )
+
+            this@Column.AnimatedVisibility(
+                visible = isDragging,
+                modifier = Modifier.align(Alignment.TopCenter).offset { IntOffset(0, handleY.toInt() - 36) },
+                enter = fadeIn(), exit = fadeOut()
+            ) {
+                Surface(shape = RoundedCornerShape(8.dp), color = colors.primary) {
+                    Text(
+                        text = "${if (dbValue > 0) "+" else ""}$dbValue dB",
+                        color = colors.onPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
         }
     }
 }

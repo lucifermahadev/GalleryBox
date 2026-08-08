@@ -12,6 +12,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.text.format.Formatter
+import android.view.MotionEvent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -109,11 +110,23 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 enum class UiMediaFilter(val label: String) { ALL("All"), PHOTOS("Photos"), VIDEOS("Videos") }
+enum class DeviceTier { LOW, MID, HIGH }
+
 fun isValidUri(context: Context, uri: Uri?): Boolean = uri != null && uri != Uri.EMPTY
 fun getSmartName(item: MediaItem): String = item.name.lowercase().let { when { "fdownloader" in it -> "Downloaded Video"; "instagram" in it -> "Instagram Video"; "whatsapp" in it -> "WhatsApp Media"; "screenshot" in it -> "Screenshot"; item.isVideo -> "Video"; else -> "Photo" } }
 fun getFolderName(path: String): String = try { java.io.File(path).parentFile?.name ?: "Unknown Folder" } catch(e: Exception) { "Unknown Folder" }
 
-fun isLowRAMDevice(context: Context): Boolean { val m = ActivityManager.MemoryInfo(); (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(m); return m.totalMem <= 4L * 1024 * 1024 * 1024 }
+fun getDeviceTier(context: Context): DeviceTier {
+    val m = ActivityManager.MemoryInfo()
+    (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(m)
+    val gb = m.totalMem / (1024.0 * 1024 * 1024)
+    return when {
+        gb <= 3.0 -> DeviceTier.LOW
+        gb <= 8.0 -> DeviceTier.MID
+        else -> DeviceTier.HIGH
+    }
+}
+
 private val metadataFormatter by lazy { SimpleDateFormat("EEEE, MMMM dd, yyyy 'at' hh a", Locale.getDefault()) }
 private val shortDateFormatter by lazy { SimpleDateFormat("MMMM dd, yyyy", Locale.getDefault()) }
 
@@ -150,7 +163,7 @@ fun PictureScreen(
     onNavigateToMoveCopy: (String, String, String?) -> Unit
 ) {
     val context = LocalContext.current
-    val isLowRam = remember { isLowRAMDevice(context) }
+    val deviceTier = remember { getDeviceTier(context) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val haptic = LocalHapticFeedback.current
@@ -212,6 +225,13 @@ fun PictureScreen(
     BackHandler(enabled = isSelectionMode) { isSelectionMode = false; selectedIds = emptySet() }
     BackHandler(enabled = activeDialog != PictureUiDialog.None) { activeDialog = PictureUiDialog.None }
     BackHandler(enabled = viewerState is GalleryViewerState.Open) { viewModel.closeViewer() }
+
+    fun getSelectedItems(): List<MediaItem> {
+        return pagedMedia.itemSnapshotList.items
+            .filterIsInstance<GalleryGridItem.Media>()
+            .filter { selectedIds.contains(it.item.id) }
+            .map { mediaMap[it.item.id] ?: it.item }
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Scaffold(
@@ -284,7 +304,7 @@ fun PictureScreen(
                 else {
                     AnimatedContent(targetState = activeFilter, label = "filter_transition") { targetFilter: UiMediaFilter ->
                         GalleryGridContent(
-                            pagedMedia = pagedMedia, gridState = gridState, columnCount = columnCount, isSelectionMode = isSelectionMode, selectedIds = selectedIds, mediaMap = mediaMap, isLowRam = isLowRam,
+                            pagedMedia = pagedMedia, gridState = gridState, columnCount = columnCount, isSelectionMode = isSelectionMode, selectedIds = selectedIds, mediaMap = mediaMap, deviceTier = deviceTier,
                             onSelectionChange = { selectedIds = it }, onSelectionModeChange = { isSelectionMode = it },
                             onItemClick = { item ->
                                 if (isSelectionMode) {
@@ -345,14 +365,6 @@ fun PictureScreen(
             )
         }
 
-        val selectedMediaItems = remember(selectedIds, pagedMedia.itemSnapshotList) {
-            if (selectedIds.isEmpty()) emptyList()
-            else pagedMedia.itemSnapshotList.items
-                .filterIsInstance<GalleryGridItem.Media>()
-                .filter { selectedIds.contains(it.item.id) }
-                .map { it.item }
-        }
-
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             AnimatedVisibility(
                 visible = isSelectionMode,
@@ -373,13 +385,14 @@ fun PictureScreen(
                             onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), null); isSelectionMode = false
                         }
                         BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") {
-                            if (selectedMediaItems.isNotEmpty()) {
-                                val intent = Intent(if (selectedMediaItems.size > 1) Intent.ACTION_SEND_MULTIPLE else Intent.ACTION_SEND).apply {
-                                    val hasImg = selectedMediaItems.any { !it.isVideo }; val hasVid = selectedMediaItems.any { it.isVideo }
+                            val itemsToShare = getSelectedItems()
+                            if (itemsToShare.isNotEmpty()) {
+                                val intent = Intent(if (itemsToShare.size > 1) Intent.ACTION_SEND_MULTIPLE else Intent.ACTION_SEND).apply {
+                                    val hasImg = itemsToShare.any { !it.isVideo }; val hasVid = itemsToShare.any { it.isVideo }
                                     type = if (hasVid && !hasImg) "video/*" else if (hasImg && !hasVid) "image/*" else "*/*"
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    if (selectedMediaItems.size > 1) putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(selectedMediaItems.map { it.uri }))
-                                    else putExtra(Intent.EXTRA_STREAM, selectedMediaItems.first().uri)
+                                    if (itemsToShare.size > 1) putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(itemsToShare.map { it.uri }))
+                                    else putExtra(Intent.EXTRA_STREAM, itemsToShare.first().uri)
                                 }
                                 context.startActivity(Intent.createChooser(intent, "Share via"))
                             }
@@ -387,7 +400,7 @@ fun PictureScreen(
                             selectedIds = emptySet()
                         }
                         BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Trash", isDestructive = true) {
-                            activeDialog = PictureUiDialog.TrashConfirm(selectedMediaItems)
+                            activeDialog = PictureUiDialog.TrashConfirm(getSelectedItems())
                         }
                         Box {
                             var showMoreMenu by remember { mutableStateOf(false) }
@@ -396,7 +409,7 @@ fun PictureScreen(
                                 if (selectedIds.size == 1) {
                                     DropdownMenuItem(
                                         text = { Text("Details") },
-                                        onClick = { showMoreMenu = false; activeDialog = PictureUiDialog.MetadataInfo(selectedMediaItems.first()) },
+                                        onClick = { showMoreMenu = false; activeDialog = PictureUiDialog.MetadataInfo(getSelectedItems().first()) },
                                         leadingIcon = { Icon(Icons.Outlined.Info, null) }
                                     )
                                 }
@@ -468,15 +481,40 @@ fun DialogsHost(
 @Composable
 fun GalleryGridContent(
     pagedMedia: LazyPagingItems<GalleryGridItem>, gridState: LazyGridState, columnCount: Int, isSelectionMode: Boolean, selectedIds: Set<Long>,
-    mediaMap: Map<Long, MediaItem>, isLowRam: Boolean, onSelectionChange: (Set<Long>) -> Unit, onSelectionModeChange: (Boolean) -> Unit,
+    mediaMap: Map<Long, MediaItem>, deviceTier: DeviceTier, onSelectionChange: (Set<Long>) -> Unit, onSelectionModeChange: (Boolean) -> Unit,
     onItemClick: (MediaItem) -> Unit, onItemLongClick: (MediaItem) -> Unit,
     header: @Composable () -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
     val screenWidthPx = with(LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
 
-    val dynamicThumbSize = remember(columnCount, screenWidthPx) {
-        val raw = (screenWidthPx / columnCount).coerceIn(180, 480)
+    var isScrollingFast by remember { mutableStateOf(false) }
+    LaunchedEffect(gridState) {
+        var lastOffset = 0
+        var lastIndex = 0
+        var lastTime = 0L
+        snapshotFlow { gridState.firstVisibleItemScrollOffset to gridState.firstVisibleItemIndex }
+            .collect { (offset, index) ->
+                val now = System.currentTimeMillis()
+                val dt = (now - lastTime).coerceAtLeast(1)
+                val delta = kotlin.math.abs(offset - lastOffset) + kotlin.math.abs((index - lastIndex) * 1000)
+                val velocity = delta / dt.toFloat()
+
+                isScrollingFast = when {
+                    velocity > 10f -> true
+                    velocity < 3f -> false
+                    else -> isScrollingFast
+                }
+
+                lastOffset = offset
+                lastIndex = index
+                lastTime = now
+            }
+    }
+
+    val dynamicThumbSize = remember(columnCount, screenWidthPx, deviceTier) {
+        val maxSize = if (deviceTier == DeviceTier.LOW) 260 else 480
+        val raw = (screenWidthPx / columnCount).coerceIn(160, maxSize)
         (raw / 40) * 40
     }
 
@@ -580,7 +618,8 @@ fun GalleryGridContent(
     }
 
     val dragModifier = if (isSelectionMode) {
-        Modifier.pointerInput(pagedMedia.itemCount) {
+        Modifier.pointerInput(Unit) {
+            var lastDragUpdateMs = 0L
             detectDragGestures(
                 onDragStart = { offset ->
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -588,14 +627,19 @@ fun GalleryGridContent(
                 },
                 onDrag = { change, _ ->
                     change.consume()
-                    updateDrag(change.position, size.height, density)
+                    val now = System.currentTimeMillis()
+                    if (now - lastDragUpdateMs > 16) {
+                        updateDrag(change.position, size.height, density)
+                        lastDragUpdateMs = now
+                    }
                 },
                 onDragEnd = { endDrag() },
                 onDragCancel = { endDrag() }
             )
         }
     } else {
-        Modifier.pointerInput(pagedMedia.itemCount) {
+        Modifier.pointerInput(Unit) {
+            var lastDragUpdateMs = 0L
             detectDragGesturesAfterLongPress(
                 onDragStart = { offset ->
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -603,7 +647,11 @@ fun GalleryGridContent(
                 },
                 onDrag = { change, _ ->
                     change.consume()
-                    updateDrag(change.position, size.height, density)
+                    val now = System.currentTimeMillis()
+                    if (now - lastDragUpdateMs > 16) {
+                        updateDrag(change.position, size.height, density)
+                        lastDragUpdateMs = now
+                    }
                 },
                 onDragEnd = { endDrag() },
                 onDragCancel = { endDrag() }
@@ -644,10 +692,19 @@ fun GalleryGridContent(
                         }
                     )
                     is GalleryGridItem.Media -> {
-                        val mediaItem = mediaMap[gridItem.item.id] ?: gridItem.item
+                        val mediaId = gridItem.item.id
+                        val mediaItem = mediaMap[mediaId] ?: gridItem.item
+
+                        val baseModifier = if (deviceTier == DeviceTier.LOW) Modifier else Modifier.animateItem()
+
                         ModernMediaGridTile(
-                            modifier = Modifier.animateItem(), item = mediaItem, thumbSize = dynamicThumbSize, isSelected = selectedIds.contains(mediaItem.id),
-                            isSelectionMode = isSelectionMode, isLowRam = isLowRam,
+                            modifier = baseModifier,
+                            item = mediaItem,
+                            thumbSize = dynamicThumbSize,
+                            isSelected = selectedIds.contains(mediaId),
+                            isSelectionMode = isSelectionMode,
+                            deviceTier = deviceTier,
+                            isScrollingFast = isScrollingFast,
                             onClick = { onItemClick(mediaItem) },
                             onLongClick = { onItemLongClick(mediaItem) }
                         )
@@ -662,17 +719,23 @@ fun GalleryGridContent(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ModernMediaGridTile(
-    modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, isLowRam: Boolean,
+    modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, deviceTier: DeviceTier, isScrollingFast: Boolean,
     onClick: () -> Unit, onLongClick: () -> Unit
 ) {
-    val animatedRadius by animateDpAsState(targetValue = if (isSelected) 16.dp else 12.dp, animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy), label = "radius")
-    val scale by animateFloatAsState(targetValue = if (isSelected) 0.85f else 1f, animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy), label = "scale")
+    val animate = deviceTier != DeviceTier.LOW && !isScrollingFast
+    val animatedRadius = if (animate) {
+        animateDpAsState(if (isSelected) 16.dp else 12.dp, tween(120), label = "radius").value
+    } else if (isSelected) 16.dp else 12.dp
+    val scale = if (animate) {
+        animateFloatAsState(if (isSelected) 0.85f else 1f, tween(120), label = "scale").value
+    } else if (isSelected) 0.85f else 1f
+
     val context = LocalContext.current
 
     Box(
         modifier = modifier
             .aspectRatio(1f)
-            .scale(scale)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(animatedRadius))
             .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -685,16 +748,21 @@ fun ModernMediaGridTile(
                 }
             )
     ) {
-        val request = remember(item.id, thumbSize) {
+        val effectiveSize = if (isScrollingFast) (thumbSize * 0.6f).toInt().coerceAtLeast(120) else thumbSize
+        val cacheKeySuffix = if (isScrollingFast) "_fast" else ""
+
+        val request = remember(item.id, thumbSize, deviceTier, isScrollingFast) {
             ImageRequest.Builder(context)
                 .data(item.uri)
-                .size(thumbSize)
-                .memoryCacheKey("${item.id}_thumb_$thumbSize")
+                .size(effectiveSize)
+                .memoryCacheKey("${item.id}_thumb_${thumbSize}$cacheKeySuffix")
                 .diskCacheKey("${item.id}_thumb_$thumbSize")
-                .bitmapConfig(Bitmap.Config.RGB_565)
+                .bitmapConfig(if (deviceTier == DeviceTier.LOW) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
                 .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(CachePolicy.ENABLED)
+                .diskCachePolicy(if (isScrollingFast) CachePolicy.READ_ONLY else CachePolicy.ENABLED)
+                .networkCachePolicy(CachePolicy.DISABLED)
                 .precision(Precision.INEXACT)
+                .allowHardware(deviceTier != DeviceTier.LOW)
                 .crossfade(false)
                 .build()
         }
@@ -711,20 +779,32 @@ fun ModernMediaGridTile(
                 }
             }
         }
-        SelectionOverlay(isSelected = isSelected, isSelectionMode = isSelectionMode, cornerRadius = animatedRadius)
+        SelectionOverlay(isSelected = isSelected, isSelectionMode = isSelectionMode, cornerRadius = animatedRadius, deviceTier = deviceTier)
     }
 }
 
 @Composable
-fun SelectionOverlay(isSelected: Boolean, isSelectionMode: Boolean, cornerRadius: Dp) {
+fun SelectionOverlay(isSelected: Boolean, isSelectionMode: Boolean, cornerRadius: Dp, deviceTier: DeviceTier) {
     if (isSelectionMode) {
         Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(cornerRadius))) {
             Box(modifier = Modifier.fillMaxSize().background(if (isSelected) Color.White.copy(alpha = 0.25f) else Color.Transparent))
-            AnimatedVisibility(visible = isSelected, enter = scaleIn() + fadeIn(), exit = scaleOut() + fadeOut(), modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
-                Icon(imageVector = Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp).shadow(4.dp, CircleShape).background(Color.White, CircleShape))
+            val enterAnim = if (deviceTier == DeviceTier.LOW) fadeIn(tween(100)) else scaleIn() + fadeIn()
+            val exitAnim = if (deviceTier == DeviceTier.LOW) fadeOut(tween(100)) else scaleOut() + fadeOut()
+            AnimatedVisibility(visible = isSelected, enter = enterAnim, exit = exitAnim, modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp).let { if (deviceTier == DeviceTier.LOW) it else it.shadow(4.dp, CircleShape) }.background(Color.White, CircleShape)
+                )
             }
             if (!isSelected) {
-                Icon(imageVector = Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.align(Alignment.TopStart).padding(8.dp).size(24.dp).shadow(2.dp, CircleShape))
+                Icon(
+                    imageVector = Icons.Outlined.RadioButtonUnchecked,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.9f),
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp).size(24.dp).let { if (deviceTier == DeviceTier.LOW) it else it.shadow(2.dp, CircleShape) }
+                )
             }
         }
     }
@@ -838,8 +918,10 @@ fun VideoPreviewPage(item: MediaItem, videoIndex: Int, isCurrentPage: Boolean, s
                     useController = false
                     setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
                     layoutParams = android.view.ViewGroup.LayoutParams(-1, -1)
-                    setOnTouchListener { view, _ ->
-                        view.performClick()
+                    setOnTouchListener { view, event ->
+                        if (event.action == MotionEvent.ACTION_UP) {
+                            view.performClick()
+                        }
                         false
                     }
                 }

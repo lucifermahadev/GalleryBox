@@ -1,6 +1,4 @@
-@file:SuppressLint("UnsafeOptInUsageError", "StaticFieldLeak")
-@file:Suppress("unused")
-@file:OptIn(kotlinx.coroutines.FlowPreview::class, kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+@file:Suppress("unused", "UnsafeOptInUsageError")
 
 package com.gallerybox.viewmodel
 
@@ -167,6 +165,33 @@ class MusicRepository @Inject constructor(
     }
 
     fun loadEqBands(): List<Float>? = prefs.getString("eq_bands", null)?.split(",")?.mapNotNull { it.toFloatOrNull() }?.takeIf { it.isNotEmpty() }
+
+    suspend fun saveCustomPreset(name: String, bands: List<Float>) = withContext(Dispatchers.IO) {
+        val namesKey = "custom_preset_names"
+        val names = (prefs.getString(namesKey, "") ?: "")
+            .split("|").filter { it.isNotBlank() }.toMutableSet()
+        names.add(name)
+        prefs.edit()
+            .putString(namesKey, names.joinToString("|"))
+            .putString("custom_preset_$name", bands.joinToString(","))
+            .apply()
+    }
+
+    fun loadCustomPresets(): Map<String, List<Float>> {
+        val names = (prefs.getString("custom_preset_names", "") ?: "").split("|").filter { it.isNotBlank() }
+        return names.associateWith { name ->
+            prefs.getString("custom_preset_$name", null)?.split(",")?.mapNotNull { it.toFloatOrNull() } ?: emptyList()
+        }.filterValues { it.isNotEmpty() }
+    }
+
+    suspend fun deleteCustomPreset(name: String) = withContext(Dispatchers.IO) {
+        val names = (prefs.getString("custom_preset_names", "") ?: "")
+            .split("|").filter { it.isNotBlank() && it != name }
+        prefs.edit()
+            .putString("custom_preset_names", names.joinToString("|"))
+            .remove("custom_preset_$name")
+            .apply()
+    }
 }
 
 // --- PAGING ENGINE ---
@@ -256,6 +281,13 @@ class MusicViewModel @Inject constructor(
     private var observeJob: Job? = null
     private var eqSaveJob: Job? = null
 
+    // Library State Variables
+    private val _isLoading = MutableStateFlow(true)
+    val isLoading = _isLoading.asStateFlow()
+
+    private val _error = MutableStateFlow<String?>(null)
+    val error = _error.asStateFlow()
+
     private val _searchQuery = MutableStateFlow("")
     val searchQuery = _searchQuery.asStateFlow()
 
@@ -265,11 +297,24 @@ class MusicViewModel @Inject constructor(
     private val _allAudioTracks = MutableStateFlow<List<AudioTrack>>(emptyList())
     val allAudioTracks = _allAudioTracks.asStateFlow()
 
+    val isLoadComplete: StateFlow<Boolean> = _isLoading
+        .map { !it }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val totalSongCount: StateFlow<Int> = _allAudioTracks
+        .map { it.size }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
     val pagedAudio: Flow<PagingData<AudioTrack>> = combine(_searchQuery.debounce(300), _currentSortOption, ::Pair).flatMapLatest { (q, s) ->
         Pager(PagingConfig(pageSize = 50, enablePlaceholders = false)) {
             AudioPagingSource(getApplication<Application>().contentResolver, q, s)
         }.flow
     }.cachedIn(viewModelScope)
+
+    // Multi-Select State
+    private val _selectedTrackIds = MutableStateFlow<Set<Long>>(emptySet())
+    val selectedTrackIds = _selectedTrackIds.asStateFlow()
 
     fun setSearchQuery(q: String) { _searchQuery.value = q }
     fun setSortOption(o: SortOption) { _currentSortOption.value = o }
@@ -315,6 +360,12 @@ class MusicViewModel @Inject constructor(
     private val _eqBands2 = MutableStateFlow(repository.loadEqBands() ?: List(9) { 0.5f })
     val eqBands2 = _eqBands2.asStateFlow()
 
+    private val _customPresets = MutableStateFlow(repository.loadCustomPresets())
+    val customPresets = _customPresets.asStateFlow()
+
+    private val _activeCustomPresetName = MutableStateFlow<String?>(null)
+    val activeCustomPresetName = _activeCustomPresetName.asStateFlow()
+
     private val _currentPreset = MutableStateFlow(Preset.NORMAL)
     val currentPreset = _currentPreset.asStateFlow()
     private val _eqEnabled = MutableStateFlow(true)
@@ -356,7 +407,15 @@ class MusicViewModel @Inject constructor(
 
     fun loadAllAudioTracks() {
         viewModelScope.launch {
-            _allAudioTracks.value = repository.getLocalQueue(_currentSortOption.value)
+            _isLoading.value = true
+            _error.value = null
+            try {
+                _allAudioTracks.value = repository.getLocalQueue(_currentSortOption.value)
+            } catch (e: Exception) {
+                _error.value = e.localizedMessage ?: "Failed to load music library"
+            } finally {
+                _isLoading.value = false
+            }
         }
     }
 
@@ -421,6 +480,64 @@ class MusicViewModel @Inject constructor(
         }
     }
 
+    // --- MULTI-SELECT FUNCTIONS ---
+    fun toggleSelection(trackId: Long) {
+        val current = _selectedTrackIds.value.toMutableSet()
+        if (current.contains(trackId)) current.remove(trackId) else current.add(trackId)
+        _selectedTrackIds.value = current
+    }
+
+    fun selectAll(tracks: List<AudioTrack>) {
+        _selectedTrackIds.value = tracks.map { it.id }.toSet()
+    }
+
+    fun clearSelection() {
+        _selectedTrackIds.value = emptySet()
+    }
+
+    fun playSelectedNext(tracksToResolve: List<AudioTrack>) {
+        val selectedIds = _selectedTrackIds.value
+        if (selectedIds.isEmpty()) return
+
+        val selectedTracks = tracksToResolve.filter { selectedIds.contains(it.id) }
+        val currentList = _queue.value.toMutableList()
+        var insertIndex = if (_currentQueueIndex.value + 1 <= currentList.size) _currentQueueIndex.value + 1 else currentList.size
+
+        selectedTracks.forEach { track ->
+            if (currentList.none { it.id == track.id }) {
+                currentList.add(insertIndex++, track)
+            }
+        }
+        _queue.value = currentList
+        playerManager.setPlaylist(currentList, _currentQueueIndex.value.coerceAtLeast(0))
+        clearSelection()
+    }
+
+    fun addSelectedToQueue(tracksToResolve: List<AudioTrack>) {
+        val selectedIds = _selectedTrackIds.value
+        if (selectedIds.isEmpty()) return
+
+        val selectedTracks = tracksToResolve.filter { selectedIds.contains(it.id) }
+        val currentList = _queue.value.toMutableList()
+
+        selectedTracks.forEach { track ->
+            if (currentList.none { it.id == track.id }) {
+                currentList.add(track)
+            }
+        }
+        _queue.value = currentList
+        playerManager.setPlaylist(currentList, _currentQueueIndex.value)
+        clearSelection()
+    }
+
+    fun favoriteSelected() {
+        val selectedIds = _selectedTrackIds.value.toList()
+        if (selectedIds.isEmpty()) return
+        toggleFavorite(selectedIds)
+        clearSelection()
+    }
+
+    // --- PLAYBACK CONTROL FUNCTIONS ---
     fun playTrack(track: AudioTrack, secondary: Boolean = false) {
         if (!secondary) {
             setDuoMode(false)
@@ -483,6 +600,26 @@ class MusicViewModel @Inject constructor(
             _queue.value = currentList
             if (indexToRemove < _currentQueueIndex.value) _currentQueueIndex.value -= 1
             playerManager.setPlaylist(currentList, _currentQueueIndex.value)
+        }
+    }
+
+    fun reorderQueue(fromIndex: Int, toIndex: Int) {
+        val currentList = _queue.value.toMutableList()
+        if (fromIndex in currentList.indices && toIndex in currentList.indices) {
+            val item = currentList.removeAt(fromIndex)
+            currentList.add(toIndex, item)
+            _queue.value = currentList
+
+            // Adjust current queue index so playback doesn't randomly jump
+            if (_currentQueueIndex.value == fromIndex) {
+                _currentQueueIndex.value = toIndex
+            } else if (_currentQueueIndex.value in (fromIndex + 1)..toIndex) {
+                _currentQueueIndex.value -= 1
+            } else if (_currentQueueIndex.value in toIndex until fromIndex) {
+                _currentQueueIndex.value += 1
+            }
+
+            playerManager.setPlaylist(currentList, _currentQueueIndex.value.coerceAtLeast(0))
         }
     }
 
@@ -652,6 +789,7 @@ class MusicViewModel @Inject constructor(
             if (index in list.indices) {
                 list[index] = value
                 _eqBands1.value = list
+                _activeCustomPresetName.value = null // Clear custom preset display
                 eqSaveJob?.cancel()
                 eqSaveJob = viewModelScope.launch {
                     delay(300)
@@ -665,11 +803,39 @@ class MusicViewModel @Inject constructor(
 
     fun applyPreset(p: Preset) {
         _currentPreset.value = p
+        _activeCustomPresetName.value = null // Clear custom preset display
         val tSize = _eqBands1.value.size
         val safeLevels = if (p.levels.size == tSize) p.levels else resampleLevels(p.levels, tSize)
         _eqBands1.value = safeLevels
         viewModelScope.launch { repository.saveEqBands(safeLevels) }
         safeLevels.forEachIndexed { i, level -> playerManager.updateEq(i, level, false) }
+    }
+
+    fun saveCustomPreset(name: String) {
+        val bands = _eqBands1.value
+        viewModelScope.launch {
+            repository.saveCustomPreset(name, bands)
+            _customPresets.value = repository.loadCustomPresets()
+            _activeCustomPresetName.value = name
+        }
+    }
+
+    fun applyCustomPreset(name: String) {
+        val bands = _customPresets.value[name] ?: return
+        val tSize = _eqBands1.value.size
+        val safeLevels = if (bands.size == tSize) bands else resampleLevels(bands, tSize)
+        _eqBands1.value = safeLevels
+        _activeCustomPresetName.value = name
+        viewModelScope.launch { repository.saveEqBands(safeLevels) }
+        safeLevels.forEachIndexed { i, level -> playerManager.updateEq(i, level, false) }
+    }
+
+    fun deleteCustomPreset(name: String) {
+        viewModelScope.launch {
+            repository.deleteCustomPreset(name)
+            _customPresets.value = repository.loadCustomPresets()
+            if (_activeCustomPresetName.value == name) _activeCustomPresetName.value = null
+        }
     }
 
     private fun resampleLevels(input: List<Float>, targetSize: Int): List<Float> {

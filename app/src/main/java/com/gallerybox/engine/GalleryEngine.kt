@@ -2,6 +2,9 @@
 @file:OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.gallerybox.engine
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.ContentValues
@@ -14,6 +17,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.core.app.NotificationCompat
 import androidx.core.content.edit
 import androidx.documentfile.provider.DocumentFile
 import androidx.media3.common.AudioAttributes
@@ -25,6 +29,13 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
 import com.gallerybox.data.MediaItem
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -33,18 +44,21 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
-import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.coroutineContext
 import kotlin.math.floor
 import kotlin.math.log2
+import kotlin.random.Random
 
 @UnstableApi
 @Singleton
@@ -117,11 +131,10 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                 val hC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.HEIGHT) else -1
 
                 val hiddenItemsSet = getHiddenItems()
-                val cal = Calendar.getInstance()
-                var lastCode = -1L
 
                 while (c.moveToNext()) {
                     if (trashC != -1 && c.getInt(trashC) == 1) continue
+                    if (mediaList.size % 200 == 0) coroutineContext.ensureActive()
 
                     val type = c.getInt(typeC)
                     val isImg = type == MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
@@ -152,9 +165,6 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                     }
 
                     val dSec = c.getLong(dateC)
-                    cal.timeInMillis = dSec * 1000L
-                    val code = (cal.get(Calendar.YEAR) * 100L) + cal.get(Calendar.MONTH)
-                    if (code != lastCode) lastCode = code
 
                     mediaList.add(
                         MediaItem(
@@ -720,5 +730,116 @@ class MediaOperationEngine @Inject constructor(@ApplicationContext private val c
             newName = "$nameWithoutExt ($counter)$dotExt"
         }
         return newName
+    }
+}
+
+
+object NotificationHelper {
+    const val WORK_NAME_SCHEDULER = "DailySchedulerWork"
+    const val WORK_NAME_DISPLAY = "DisplayNotificationWork"
+
+    fun enableDailyNotifications(context: Context) {
+        val periodicRequest = PeriodicWorkRequestBuilder<DailySchedulerWorker>(24, TimeUnit.HOURS)
+            .build()
+
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            WORK_NAME_SCHEDULER,
+            ExistingPeriodicWorkPolicy.KEEP,
+            periodicRequest
+        )
+    }
+
+    fun disableDailyNotifications(context: Context) {
+        val workManager = WorkManager.getInstance(context)
+        workManager.cancelUniqueWork(WORK_NAME_SCHEDULER)
+        workManager.cancelUniqueWork(WORK_NAME_DISPLAY)
+    }
+}
+
+class DailySchedulerWorker(
+    context: Context,
+    workerParams: WorkerParameters
+) : CoroutineWorker(context, workerParams) {
+
+    override suspend fun doWork(): Result {
+        val randomDelayMinutes = Random.nextLong(0, 23 * 60)
+
+        val displayRequest = OneTimeWorkRequestBuilder<NotificationDisplayWorker>()
+            .setInitialDelay(randomDelayMinutes, TimeUnit.MINUTES)
+            .build()
+
+        WorkManager.getInstance(applicationContext).enqueueUniqueWork(
+            NotificationHelper.WORK_NAME_DISPLAY,
+            ExistingWorkPolicy.REPLACE,
+            displayRequest
+        )
+
+        return Result.success()
+    }
+}
+
+class NotificationDisplayWorker(
+    private val context: Context,
+    workerParams: WorkerParameters
+) : CoroutineWorker(context, workerParams) {
+
+    private val quotes = listOf(
+        "Capture the moment before it's gone.",
+        "Your memories are waiting to be revisited.",
+        "A picture is a poem without words.",
+        "Take a moment to look back at your best days.",
+        "Every picture tells a story. What's yours today?",
+        "Time flies, but memories in GalleryBox last forever."
+    )
+
+    override suspend fun doWork(): Result = withContext(Dispatchers.Main) {
+        showNotification()
+        Result.success()
+    }
+
+    private fun showNotification() {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = "daily_reminder_channel"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "Daily Reminders",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Daily random quotes and app reminders"
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        // Dynamically launches the main activity for the app
+        val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+
+        val pendingIntent = intent?.let {
+            PendingIntent.getActivity(
+                context,
+                0,
+                it,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+        }
+
+        val randomQuote = quotes.random()
+
+        val notificationBuilder = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(android.R.drawable.ic_menu_gallery)
+            .setContentTitle("GalleryBox Reminder")
+            .setContentText(randomQuote)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(randomQuote))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+
+        if (pendingIntent != null) {
+            notificationBuilder.setContentIntent(pendingIntent)
+        }
+
+        notificationManager.notify(System.currentTimeMillis().toInt(), notificationBuilder.build())
     }
 }

@@ -1,3 +1,6 @@
+@file:Suppress("UnsafeOptInUsageError", "UnstableApiUsage", "OPT_IN_USAGE", "unused", "DEPRECATION")
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.gallerybox.ui.screens.editor
 
 import android.graphics.Bitmap
@@ -298,19 +301,32 @@ fun EditorScreen(
             var ox by remember { mutableFloatStateOf(0f) }
             var oy by remember { mutableFloatStateOf(0f) }
 
-            val imgWidth = previewBitmap?.width?.toFloat() ?: mediaItem.width.toFloat().takeIf { it > 0f } ?: 1f
-            val imgHeight = previewBitmap?.height?.toFloat() ?: mediaItem.height.toFloat().takeIf { it > 0f } ?: 1f
-            val imgAspect = imgWidth / imgHeight
-            val isCropping = activeTab == EditorTab.CROP && editorMode == EditorMode.TOOL
+            // Missing aspect ratio decoding handler
+            var decodedAspect by remember(mediaId) { mutableStateOf<Float?>(null) }
+            LaunchedEffect(mediaItem.uri) {
+                if (mediaItem.width <= 0 && mediaItem.height <= 0) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            ctx.contentResolver.openInputStream(mediaItem.uri)?.use {
+                                android.graphics.BitmapFactory.decodeStream(it, null, opts)
+                            }
+                            if (opts.outWidth > 0 && opts.outHeight > 0) {
+                                decodedAspect = opts.outWidth.toFloat() / opts.outHeight.toFloat()
+                            }
+                        } catch (e: Exception) { /* leave null, fall through to default */ }
+                    }
+                }
+            }
 
-            val netRotation = ((editState.rotationDegrees % 180) + 180) % 180
-            val isSideways = abs(netRotation - 90f) < 1f || abs(netRotation - 270f) < 1f
-            val displayAspect = if (isSideways && !mediaItem.isVideo) 1f / imgAspect else imgAspect
+            val imgWidth = previewBitmap?.width?.toFloat() ?: mediaItem.width.toFloat().takeIf { it > 0f } ?: decodedAspect ?: 1f
+            val imgHeight = previewBitmap?.height?.toFloat() ?: mediaItem.height.toFloat().takeIf { it > 0f } ?: 1f
+            val isCropping = activeTab == EditorTab.CROP && editorMode == EditorMode.TOOL
 
             val isOverlaySelected = selectedLayerId != null
 
             // 1. The unified transform container for BOTH Image and Overlays
-            Box(
+            BoxWithConstraints(
                 Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) {
@@ -333,18 +349,39 @@ fun EditorScreen(
                     },
                 contentAlignment = Alignment.Center
             ) {
+                val maxWPx = constraints.maxWidth.toFloat()
+                val maxHPx = constraints.maxHeight.toFloat()
+
+                // Size the box to the image's OWN (unrotated) aspect ratio, fit within available space
+                val baseAspect = imgWidth / imgHeight
+                var fitW = maxWPx
+                var fitH = maxWPx / baseAspect
+                if (fitH > maxHPx) { fitH = maxHPx; fitW = maxHPx * baseAspect }
+
+                // Total visual rotation applied this frame
+                val totalRotation = if (!isComparing && !mediaItem.isVideo) editState.rotationDegrees + editState.straightenDegrees else 0f
+                val angleRad = Math.toRadians(totalRotation.toDouble())
+                val cosA = abs(cos(angleRad)).toFloat()
+                val sinA = abs(sin(angleRad)).toFloat()
+
+                // Bounding box of the rotated rectangle — shrink it to fit inside available space
+                val rotatedW = fitW * cosA + fitH * sinA
+                val rotatedH = fitW * sinA + fitH * cosA
+                val fitScale = min(maxWPx / rotatedW, maxHPx / rotatedH).coerceAtMost(1f)
+
                 // 2. The perfectly aspect-ratio matched canvas
                 Box(
                     Modifier
-                        .aspectRatio(displayAspect)
-                        .fillMaxSize()
+                        .width(with(LocalDensity.current) { fitW.toDp() })
+                        .height(with(LocalDensity.current) { fitH.toDp() })
                         .graphicsLayer(
-                            scaleX = sc * (if (!isComparing && editState.flipHorizontal) -1f else 1f),
-                            scaleY = sc * (if (!isComparing && editState.flipVertical) -1f else 1f),
-                            rotationZ = if (!isComparing && !mediaItem.isVideo) editState.rotationDegrees + editState.straightenDegrees else 0f,
+                            // Video flips are handled by ExoPlayer's own ScaleAndRotateTransformation, so don't double flip here.
+                            scaleX = sc * fitScale * (if (!isComparing && !mediaItem.isVideo && editState.flipHorizontal) -1f else 1f),
+                            scaleY = sc * fitScale * (if (!isComparing && !mediaItem.isVideo && editState.flipVertical) -1f else 1f),
+                            rotationZ = totalRotation,
                             translationX = ox,
                             translationY = oy,
-                            clip = true
+                            clip = false
                         )
                 ) {
                     if (mediaItem.isVideo) {
@@ -369,9 +406,9 @@ fun EditorScreen(
                     } else {
                         // The active preview
                         if (previewBitmap != null) {
-                            Image(previewBitmap!!.asImageBitmap(), "Preview", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                            Image(previewBitmap!!.asImageBitmap(), "Preview", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                         } else {
-                            AsyncImage(ImageRequest.Builder(LocalContext.current).data(mediaItem.uri).build(), "Original", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                            AsyncImage(ImageRequest.Builder(LocalContext.current).data(mediaItem.uri).build(), "Original", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                         }
 
                         // The locked coordinate Overlays
@@ -553,7 +590,7 @@ fun EditorVideoPreview(
         } else {
             val ef = mutableListOf<Effect>()
 
-            // Apply Straighten and Flip
+            // Apply Straighten and Flip directly inside ExoPlayer
             if (state.rotationDegrees != 0f || state.straightenDegrees != 0f || state.flipHorizontal || state.flipVertical) {
                 ef.add(ScaleAndRotateTransformation.Builder()
                     .setRotationDegrees(state.rotationDegrees + state.straightenDegrees)
@@ -567,21 +604,25 @@ fun EditorVideoPreview(
     // Trim loop logic & Progress tracker
     LaunchedEffect(state.trimStartMs, state.trimEndMs, exo.duration) {
         while (isActive) {
-            val pos = exo.currentPosition
-            onPos(pos)
+            if (isPlay) {
+                val pos = exo.currentPosition
+                onPos(pos)
 
-            // Stop/Loop at Trim End
-            if (state.trimEndMs > 0 && pos >= state.trimEndMs - 50) {
-                exo.seekTo(state.trimStartMs)
-                if (!isPlay) onPos(state.trimStartMs)
+                // Stop/Loop at Trim End
+                if (state.trimEndMs > 0 && pos >= state.trimEndMs - 50) {
+                    exo.seekTo(state.trimStartMs)
+                    if (!isPlay) onPos(state.trimStartMs)
+                }
+                // Enforce Trim Start
+                if (pos < state.trimStartMs - 50) {
+                    exo.seekTo(state.trimStartMs)
+                    if (!isPlay) onPos(state.trimStartMs)
+                }
+                delay(30)
+            } else {
+                // Poll much slower if paused to save CPU
+                delay(150)
             }
-            // Enforce Trim Start
-            if (pos < state.trimStartMs - 50) {
-                exo.seekTo(state.trimStartMs)
-                if (!isPlay) onPos(state.trimStartMs)
-            }
-
-            delay(30)
         }
     }
 

@@ -359,8 +359,12 @@ class GalleryViewModel @Inject constructor(
                 )
             } else if (renameId != null && renameOldName != null && renameNewName != null) {
                 val renamed = renameSdCardFolder(renameOldName, renameNewName)
-                dao.insertManualAlbum(ManualAlbumEntity(id = renameId, name = renameNewName, hasBeenUsed = false))
-                mediaOpEngine.markAlbumAsSdCard(renameId)
+
+                try { dao.deleteManualAlbum(renameId) } catch (e: Exception) {}
+                val newManualId = "manual_${System.currentTimeMillis()}"
+                dao.insertManualAlbum(ManualAlbumEntity(id = newManualId, name = renameNewName, hasBeenUsed = false))
+                mediaOpEngine.markAlbumAsSdCard(newManualId)
+
                 _events.send(
                     if (renamed) GalleryEvent.ShowToast("Album renamed")
                     else GalleryEvent.ShowToast("Renamed in app, but folder update failed on SD card")
@@ -552,10 +556,6 @@ class GalleryViewModel @Inject constructor(
         player.playWhenReady = true
         player.prepare()
         player.play()
-
-        Log.d(TAG, "Opened video index=$index")
-        Log.d(TAG, "Playlist size=${playlist.size}")
-        Log.d(TAG, "Current=${playlist[index]}")
     }
 
     fun togglePlayPause() {
@@ -801,13 +801,14 @@ class GalleryViewModel @Inject constructor(
         }
 
         viewModelScope.launch(Dispatchers.Default) {
-            combine(trashBin, favoriteIds, secureIds, albumMeta, _hiddenAlbums, _albumSort, manualAlbums) { _ ->
-            }.collectLatest {
-                if (_rawMedia.value.isNotEmpty()) {
-                    rebuildIndexesAndAlbums(_rawMedia.value)
-                    invalidatePagingSources()
+            combine(trashBin, favoriteIds, secureIds, albumMeta, _hiddenAlbums, _albumSort, manualAlbums) { _ -> }
+                .debounce(120)
+                .collectLatest {
+                    if (_rawMedia.value.isNotEmpty()) {
+                        rebuildIndexesAndAlbums(_rawMedia.value)
+                        invalidatePagingSources()
+                    }
                 }
-            }
         }
 
         viewModelScope.launch(Dispatchers.Default) {
@@ -854,12 +855,9 @@ class GalleryViewModel @Inject constructor(
 
     fun refreshAfterFileOperation() {
         viewModelScope.launch {
-            delay(500)
-            safeLoadLibrary(forceRefresh = true)
-            delay(700)
-            safeLoadLibrary(forceRefresh = true)
-            delay(1000)
-            safeLoadLibrary(forceRefresh = true)
+            delay(500); safeLoadLibrary(forceRefresh = true)
+            delay(700); safeLoadLibrary(forceRefresh = false)
+            delay(1000); safeLoadLibrary(forceRefresh = false)
         }
     }
 
@@ -885,14 +883,14 @@ class GalleryViewModel @Inject constructor(
                 val needsFullScan = forceRefresh || (now - lastFullScanTime > 30 * 60 * 1000L)
 
                 val localMedia = if (isAndroid11Plus && !needsFullScan && _rawMedia.value.isNotEmpty()) {
-                    val fetched = engine.fetchIncrementalMedia(lastMediaStoreGeneration)
+                    val fetched = withContext(Dispatchers.IO) { engine.fetchIncrementalMedia(lastMediaStoreGeneration) }
                     val merged = java.util.HashMap<Long, MediaItem>(_rawMedia.value.size + fetched.size)
                     _rawMedia.value.forEach { merged[it.id] = it }
                     fetched.forEach { merged[it.id] = it }
                     merged.values.toList()
                 } else {
                     lastFullScanTime = now
-                    engine.fetchAllMedia().also {
+                    withContext(Dispatchers.IO) { engine.fetchAllMedia() }.also {
                         if (isAndroid11Plus) lastMediaStoreGeneration = MediaStore.getGeneration(getApplication<Application>(), MediaStore.VOLUME_EXTERNAL)
                     }
                 }
@@ -1640,14 +1638,26 @@ class GalleryViewModel @Inject constructor(
             }
             viewModelScope.launch(Dispatchers.IO) {
                 try {
-                    val volumeName = resolveAlbumVolumeName(album.id)
-                    val isPrimary = volumeName == null || volumeName == MediaStore.VOLUME_EXTERNAL_PRIMARY
+                    val isSd = mediaOpEngine.isSdCardAlbum(album.id)
+                    val isPrimary = !isSd
 
                     if (isPrimary) {
                         var renamed = false
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                             val resolver = getApplication<Application>().contentResolver
                             val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+
+                            try {
+                                resolver.query(collection, arrayOf(MediaStore.MediaColumns._ID),
+                                    "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                                    arrayOf("Pictures/${album.name}/", ".nomedia"), null)?.use { c ->
+                                    if (c.moveToFirst()) {
+                                        val uri = ContentUris.withAppendedId(collection, c.getLong(0))
+                                        resolver.delete(uri, null, null)
+                                    }
+                                }
+                            } catch (e: Exception) {}
+
                             val values = ContentValues().apply {
                                 put(MediaStore.MediaColumns.DISPLAY_NAME, ".nomedia")
                                 put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/$trimmed/")
@@ -1659,9 +1669,15 @@ class GalleryViewModel @Inject constructor(
                             }
                         } else {
                             val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                            renamed = File(root, album.name).let { old -> if (old.exists()) old.renameTo(File(root, trimmed)) else File(root, trimmed).mkdirs() }
+                            val oldDir = File(root, album.name)
+                            val newDir = File(root, trimmed)
+                            renamed = if (oldDir.exists()) oldDir.renameTo(newDir) else newDir.mkdirs()
                         }
-                        dao.insertManualAlbum(ManualAlbumEntity(id = album.id, name = trimmed, hasBeenUsed = false))
+
+                        try { dao.deleteManualAlbum(album.id) } catch (e: Exception) {}
+                        val newManualId = "manual_${System.currentTimeMillis()}"
+                        dao.insertManualAlbum(ManualAlbumEntity(id = newManualId, name = trimmed, hasBeenUsed = false))
+
                         _events.send(GalleryEvent.ShowToast(if (renamed) "Album renamed" else "Renamed in app, but folder update failed"))
                     } else {
                         val treeUri = findPersistedSdCardTreeUri()
@@ -1677,7 +1693,12 @@ class GalleryViewModel @Inject constructor(
                             ))
                         } else {
                             val renamed = renameSdCardFolder(album.name, trimmed)
-                            dao.insertManualAlbum(ManualAlbumEntity(id = album.id, name = trimmed, hasBeenUsed = false))
+
+                            try { dao.deleteManualAlbum(album.id) } catch (e: Exception) {}
+                            val newManualId = "manual_${System.currentTimeMillis()}"
+                            dao.insertManualAlbum(ManualAlbumEntity(id = newManualId, name = trimmed, hasBeenUsed = false))
+                            mediaOpEngine.markAlbumAsSdCard(newManualId)
+
                             _events.send(GalleryEvent.ShowToast(if (renamed) "Album renamed" else "Renamed in app, but folder update failed on SD card"))
                         }
                     }

@@ -2,6 +2,8 @@
 
 package com.gallerybox.ui.screens.music
 
+import android.content.Intent
+import android.os.Build
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -23,6 +25,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -37,6 +40,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.gallerybox.engine.MusicService
 import com.gallerybox.viewmodel.RadioViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -47,7 +51,7 @@ import kotlin.math.roundToInt
 // --- UNIFIED LIGHT THEME PALETTE ---
 private val BgColor = Color(0xFFF2F2F7)
 private val SurfaceColor = Color(0xFFFFFFFF)
-private val PrimaryColor = Color(0xFF007AFF) // Replaced red with GalleryBox unified blue/primary
+private val PrimaryColor = Color(0xFF007AFF)
 private val TextPrimary = Color(0xFF000000)
 private val TextSecondary = Color(0xFF8E8E93)
 
@@ -76,6 +80,18 @@ fun RadioScreen(viewModel: RadioViewModel, onBack: () -> Unit) {
     var isRecording by remember { mutableStateOf(false) }
     var recordingTime by remember { mutableStateOf(0L) }
     var showTopMenu by remember { mutableStateOf(false) }
+
+    // Start the MusicService to ensure the notification appears when playing
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            val intent = Intent(context, MusicService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+    }
 
     DisposableEffect(LocalLifecycleOwner.current) {
         onDispose { if (isPlaying) viewModel.stopRadioIfNeeded() }
@@ -110,16 +126,27 @@ fun RadioScreen(viewModel: RadioViewModel, onBack: () -> Unit) {
             if (currentView != RadioView.DRIVE_MODE) {
                 RadioTopAppBar(
                     currentView = currentView,
-                    isHeadsetConnected = isHeadsetConnected,
-                    isMuted = isMuted,
-                    isSpeakerEnabled = isSpeakerEnabled,
                     onBack = { if (currentView == RadioView.TUNER) onBack() else currentView = RadioView.TUNER },
                     onMenuClick = { showTopMenu = true }
                 )
 
-                DropdownMenu(expanded = showTopMenu, onDismissRequest = { showTopMenu = false }, modifier = Modifier.background(SurfaceColor).clip(RoundedCornerShape(12.dp))) {
-                    DropdownMenuItem(text = { Text(if(isSpeakerEnabled) "Headphones" else "Speaker", color = TextPrimary) }, leadingIcon = { Icon(if(isSpeakerEnabled) Icons.Rounded.Headset else Icons.Rounded.Speaker, null, tint = TextPrimary) }, onClick = { showTopMenu = false; viewModel.toggleSpeaker() })
-                    DropdownMenuItem(text = { Text(if(isMuted) "Unmute" else "Mute", color = TextPrimary) }, leadingIcon = { Icon(if(isMuted) Icons.Rounded.VolumeUp else Icons.Rounded.VolumeOff, null, tint = TextPrimary) }, onClick = { showTopMenu = false; viewModel.toggleMute() })
+                DropdownMenu(
+                    expanded = showTopMenu,
+                    onDismissRequest = { showTopMenu = false },
+                    modifier = Modifier.background(SurfaceColor).clip(RoundedCornerShape(12.dp))
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(if(isSpeakerEnabled) "Headphones" else "Speaker", color = if (isHeadsetConnected) TextPrimary else TextSecondary) },
+                        leadingIcon = { Icon(if(isSpeakerEnabled) Icons.Rounded.Headset else Icons.Rounded.Speaker, null, tint = if (isHeadsetConnected) TextPrimary else TextSecondary) },
+                        enabled = isHeadsetConnected,
+                        onClick = { showTopMenu = false; viewModel.toggleSpeaker() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if(isMuted) "Unmute" else "Mute", color = if (isHeadsetConnected) TextPrimary else TextSecondary) },
+                        leadingIcon = { Icon(if(isMuted) Icons.Rounded.VolumeUp else Icons.Rounded.VolumeOff, null, tint = if (isHeadsetConnected) TextPrimary else TextSecondary) },
+                        enabled = isHeadsetConnected,
+                        onClick = { showTopMenu = false; viewModel.toggleMute() }
+                    )
                     DropdownMenuItem(text = { Text("Drive Mode", color = TextPrimary) }, leadingIcon = { Icon(Icons.Rounded.DirectionsCar, null, tint = TextPrimary) }, onClick = { showTopMenu = false; currentView = RadioView.DRIVE_MODE })
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = BgColor)
                     DropdownMenuItem(text = { Text("Auto Scan", color = TextPrimary) }, leadingIcon = { Icon(Icons.Rounded.AutoAwesome, null, tint = TextPrimary) }, onClick = { showTopMenu = false; viewModel.autoScanAndSaveAll() })
@@ -151,7 +178,7 @@ fun RadioScreen(viewModel: RadioViewModel, onBack: () -> Unit) {
                     RadioView.RECORDINGS -> RadioRecordingsContent()
                     RadioView.DIAGNOSTICS -> RadioDiagnosticsContent(currentFreq, signalStrength, stereoBlend, stationName)
                     RadioView.SETTINGS -> RadioSettingsContent()
-                    RadioView.DRIVE_MODE -> DriveModeContent(currentFreq, isPlaying, stationName, favorites, viewModel) { currentView = RadioView.TUNER }
+                    RadioView.DRIVE_MODE -> DriveModeContent(currentFreq, isPlaying, isHeadsetConnected, stationName, favorites, viewModel) { currentView = RadioView.TUNER }
                 }
             }
         }
@@ -162,9 +189,6 @@ fun RadioScreen(viewModel: RadioViewModel, onBack: () -> Unit) {
 @Composable
 private fun RadioTopAppBar(
     currentView: RadioView,
-    isHeadsetConnected: Boolean,
-    isMuted: Boolean,
-    isSpeakerEnabled: Boolean,
     onBack: () -> Unit,
     onMenuClick: () -> Unit
 ) {
@@ -590,8 +614,13 @@ private fun RadioDiagnosticsContent(currentFreq: Float, signalStrength: Int, ste
             }
         }
         Spacer(Modifier.weight(1f))
-        FilledTonalButton(onClick = {}, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(16.dp)) {
-            Text("Auto-Optimize Reception", fontWeight = FontWeight.Bold)
+        FilledTonalButton(
+            onClick = {},
+            enabled = false, // Functionality not connected to real ViewModel state
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Text("Auto-Optimize Reception (Coming Soon)", fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -612,11 +641,11 @@ private fun RadioSettingsContent() {
             Surface(color = SurfaceColor, shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
                 Column {
                     RadioSettingsHeader("Reception & Scanning")
-                    RadioSettingsNavRow("FM Frequency Region", "Current: 87.5 - 108.0 MHz (Global)")
+                    RadioSettingsNavRow("FM Frequency Region", "Current: 87.5 - 108.0 MHz (Global)", enabled = false)
                     HorizontalDivider(color = BgColor, modifier = Modifier.padding(horizontal = 16.dp))
-                    RadioSettingsNavRow("Scan Sensitivity", "Current: Medium (Default)")
+                    RadioSettingsNavRow("Scan Sensitivity", "Current: Medium (Default)", enabled = false)
                     HorizontalDivider(color = BgColor, modifier = Modifier.padding(horizontal = 16.dp))
-                    RadioSettingsSwitchRow("Force Mono Playback", "Improves clarity on weak signals", false)
+                    RadioSettingsSwitchRow("Force Mono Playback", "Improves clarity on weak signals", false, enabled = false)
                 }
             }
         }
@@ -624,9 +653,9 @@ private fun RadioSettingsContent() {
             Surface(color = SurfaceColor, shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
                 Column {
                     RadioSettingsHeader("Audio Engine")
-                    RadioSettingsSwitchRow("Noise Reduction", "Apply software filter to static hiss", true)
+                    RadioSettingsSwitchRow("Noise Reduction", "Apply software filter to static hiss", true, enabled = false)
                     HorizontalDivider(color = BgColor, modifier = Modifier.padding(horizontal = 16.dp))
-                    RadioSettingsNavRow("Radio Equalizer", "Dedicated EQ for FM broadcasts")
+                    RadioSettingsNavRow("Radio Equalizer", "Dedicated EQ for FM broadcasts", enabled = false)
                 }
             }
         }
@@ -634,9 +663,9 @@ private fun RadioSettingsContent() {
             Surface(color = SurfaceColor, shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
                 Column {
                     RadioSettingsHeader("Automation")
-                    RadioSettingsSwitchRow("Resume Last Station", "Play automatically on app start", true)
+                    RadioSettingsSwitchRow("Resume Last Station", "Play automatically on app start", true, enabled = false)
                     HorizontalDivider(color = BgColor, modifier = Modifier.padding(horizontal = 16.dp))
-                    RadioSettingsNavRow("Sleep Timer", "Turn off radio after set duration")
+                    RadioSettingsNavRow("Sleep Timer", "Turn off radio after set duration", enabled = false)
                 }
             }
         }
@@ -650,29 +679,29 @@ private fun RadioSettingsHeader(title: String) {
 }
 
 @Composable
-private fun RadioSettingsSwitchRow(title: String, sub: String, def: Boolean) {
+private fun RadioSettingsSwitchRow(title: String, sub: String, def: Boolean, enabled: Boolean = true) {
     var checked by remember { mutableStateOf(def) }
     Row(
-        modifier = Modifier.fillMaxWidth().clickable { checked = !checked }.padding(16.dp),
+        modifier = Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.5f).let { if (enabled) it.clickable { checked = !checked } else it }.padding(16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-            Text(sub, color = TextSecondary, fontSize = 13.sp)
+            Text(if (enabled) sub else "$sub (Coming Soon)", color = TextSecondary, fontSize = 13.sp)
         }
-        Switch(checked, { checked = it }, colors = SwitchDefaults.colors(checkedThumbColor = SurfaceColor, checkedTrackColor = PrimaryColor))
+        Switch(checked, { if (enabled) checked = it }, enabled = enabled, colors = SwitchDefaults.colors(checkedThumbColor = SurfaceColor, checkedTrackColor = PrimaryColor))
     }
 }
 
 @Composable
-private fun RadioSettingsNavRow(title: String, sub: String) {
+private fun RadioSettingsNavRow(title: String, sub: String, enabled: Boolean = true) {
     Row(
-        modifier = Modifier.fillMaxWidth().clickable {}.padding(16.dp),
+        modifier = Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.5f).let { if (enabled) it.clickable {} else it }.padding(16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-            Text(sub, color = TextSecondary, fontSize = 13.sp)
+            Text(if (enabled) sub else "$sub (Coming Soon)", color = TextSecondary, fontSize = 13.sp)
         }
     }
 }
@@ -681,6 +710,7 @@ private fun RadioSettingsNavRow(title: String, sub: String) {
 private fun DriveModeContent(
     currentFreq: Float,
     isPlaying: Boolean,
+    isHeadsetConnected: Boolean,
     stationName: String?,
     favorites: List<Float>,
     viewModel: RadioViewModel,
@@ -704,60 +734,69 @@ private fun DriveModeContent(
             }
         }
 
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(stationName ?: "FM RADIO", color = PrimaryColor, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text("%.1f".format(currentFreq), color = TextPrimary, fontSize = 120.sp, fontWeight = FontWeight.Black)
-        }
-
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = SurfaceColor,
-                modifier = Modifier.size(90.dp).clickable { viewModel.scanPrevious() }
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.SkipPrevious, null, tint = TextPrimary, modifier = Modifier.size(48.dp))
-                }
+        if (!isHeadsetConnected) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Rounded.HeadsetOff, null, modifier = Modifier.size(96.dp), tint = TextSecondary.copy(alpha = 0.4f))
+                Spacer(Modifier.height(16.dp))
+                Text("Connect Wired Headphones", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("Required as the FM antenna", color = TextSecondary, fontSize = 14.sp)
+            }
+        } else {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(stationName ?: "FM RADIO", color = PrimaryColor, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("%.1f".format(currentFreq), color = TextPrimary, fontSize = 120.sp, fontWeight = FontWeight.Black)
             }
 
-            Surface(
-                shape = CircleShape,
-                color = PrimaryColor,
-                modifier = Modifier.size(110.dp).clickable { viewModel.toggleRadio() }
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Power", tint = Color.White, modifier = Modifier.size(64.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = SurfaceColor,
+                    modifier = Modifier.size(90.dp).clickable { viewModel.scanPrevious() }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.SkipPrevious, null, tint = TextPrimary, modifier = Modifier.size(48.dp))
+                    }
                 }
-            }
 
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = SurfaceColor,
-                modifier = Modifier.size(90.dp).clickable { viewModel.autoScan() }
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.SkipNext, null, tint = TextPrimary, modifier = Modifier.size(48.dp))
+                Surface(
+                    shape = CircleShape,
+                    color = PrimaryColor,
+                    modifier = Modifier.size(110.dp).clickable { viewModel.toggleRadio() }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Power", tint = Color.White, modifier = Modifier.size(64.dp))
+                    }
                 }
-            }
-        }
 
-        if (favorites.isNotEmpty()) {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                items(favorites.take(5)) { freq ->
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = SurfaceColor,
-                        modifier = Modifier.height(72.dp).width(110.dp).clickable { viewModel.tuneToFrequency(freq) }
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text("%.1f".format(freq), color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                        }
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = SurfaceColor,
+                    modifier = Modifier.size(90.dp).clickable { viewModel.autoScan() }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.SkipNext, null, tint = TextPrimary, modifier = Modifier.size(48.dp))
                     }
                 }
             }
-        } else {
-            Spacer(Modifier.height(72.dp))
+
+            if (favorites.isNotEmpty()) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    items(favorites.take(5)) { freq ->
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = SurfaceColor,
+                            modifier = Modifier.height(72.dp).width(110.dp).clickable { viewModel.tuneToFrequency(freq) }
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text("%.1f".format(freq), color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            } else {
+                Spacer(Modifier.height(72.dp))
+            }
         }
     }
 }

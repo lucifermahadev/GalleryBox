@@ -3,12 +3,18 @@
 
 package com.gallerybox.ui.screens.stories
 
+import android.Manifest
 import android.app.Activity
+import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -49,6 +55,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -70,6 +77,7 @@ import coil.request.videoFrameMillis
 import coil.size.Precision
 import coil.size.Size
 import com.gallerybox.data.UiStory
+import com.gallerybox.engine.NotificationHelper
 import com.gallerybox.ui.screens.picture.GalleryGridItem
 import com.gallerybox.viewmodel.GalleryEvent
 import com.gallerybox.viewmodel.GalleryViewModel
@@ -122,13 +130,54 @@ fun StoriesScreen(
     var isRefreshing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-
     val sharedExoPlayer = remember(context) {
         ExoPlayer.Builder(context.applicationContext).build().apply { repeatMode = Player.REPEAT_MODE_OFF }
     }
 
     DisposableEffect(sharedExoPlayer) {
         onDispose { sharedExoPlayer.release() }
+    }
+
+    // Notification State & Permission setup
+    val prefs = remember { context.getSharedPreferences("app_settings", Context.MODE_PRIVATE) }
+    var isNotificationEnabled by remember { mutableStateOf(prefs.getBoolean("daily_notification", false)) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            isNotificationEnabled = true
+            prefs.edit().putBoolean("daily_notification", true).apply()
+            NotificationHelper.enableDailyNotifications(context)
+            Toast.makeText(context, "Daily Reminders Enabled", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "Notification Permission Denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val toggleNotification = {
+        if (isNotificationEnabled) {
+            isNotificationEnabled = false
+            prefs.edit().putBoolean("daily_notification", false).apply()
+            NotificationHelper.disableDailyNotifications(context)
+            Toast.makeText(context, "Daily Reminders Disabled", Toast.LENGTH_SHORT).show()
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                    isNotificationEnabled = true
+                    prefs.edit().putBoolean("daily_notification", true).apply()
+                    NotificationHelper.enableDailyNotifications(context)
+                    Toast.makeText(context, "Daily Reminders Enabled", Toast.LENGTH_SHORT).show()
+                } else {
+                    permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            } else {
+                isNotificationEnabled = true
+                prefs.edit().putBoolean("daily_notification", true).apply()
+                NotificationHelper.enableDailyNotifications(context)
+                Toast.makeText(context, "Daily Reminders Enabled", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     BackHandler(enabled = activeStoryIndex != null) {
@@ -174,6 +223,14 @@ fun StoriesScreen(
                                         }
                                     },
                                     actions = {
+                                        // Daily Notification Toggle Button
+                                        IconButton(onClick = toggleNotification) {
+                                            Icon(
+                                                imageVector = if (isNotificationEnabled) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
+                                                contentDescription = "Toggle Daily Reminder",
+                                                tint = if (isNotificationEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
                                         IconButton(onClick = { isSelectionMode = true }) {
                                             Icon(Icons.Rounded.Add, contentDescription = "Create Manual Memory")
                                         }

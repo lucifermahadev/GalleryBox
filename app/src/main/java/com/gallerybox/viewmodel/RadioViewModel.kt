@@ -198,11 +198,13 @@ class RadioViewModel @Inject constructor(private val app: Application) : Android
     }
 
     fun toggleSpeaker() {
+        if (!_isHeadsetConnected.value) return
         _isSpeakerEnabled.value = !_isSpeakerEnabled.value
         musicService?.fmRadioEngine?.setSpeakerEnabled(_isSpeakerEnabled.value)
     }
 
     fun toggleMute() {
+        if (!_isHeadsetConnected.value) return
         _isMuted.value = !_isMuted.value
         musicService?.fmRadioEngine?.setMute(_isMuted.value)
     }
@@ -210,8 +212,12 @@ class RadioViewModel @Inject constructor(private val app: Application) : Android
     fun tuneToFrequency(freq: Float) {
         val engine = musicService?.fmRadioEngine ?: return
         engine.tune(freq)
-        if (!engine.isPlaying.value && engine.isHeadsetConnected.value) {
-            engine.start(freq)
+        if (!engine.isPlaying.value) {
+            if (engine.isHeadsetConnected.value) {
+                engine.start(freq)
+            } else {
+                _error.value = "Connect wired headphones to play FM radio"
+            }
         }
     }
 
