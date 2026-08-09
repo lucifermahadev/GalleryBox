@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.ContentUris
 import android.net.Uri
 import android.provider.MediaStore
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gallerybox.data.GalleryDao
@@ -20,9 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
-import java.io.File
 import java.util.Calendar
-import java.util.Locale
 import java.util.UUID
 import javax.inject.Inject
 import kotlin.math.*
@@ -36,6 +36,7 @@ class StoryViewModel @Inject constructor(
     private val _events = Channel<GalleryEvent>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
 
+    // Now securely holds the COMPLETE gallery metadata, independent of the Paging UI
     private val _mediaMap = MutableStateFlow<Map<Long, MediaItem>>(emptyMap())
 
     private val _isGenerating = MutableStateFlow(false)
@@ -73,7 +74,7 @@ class StoryViewModel @Inject constructor(
                             entity.id,
                             entity.title,
                             entity.subtitle ?: "",
-                            Uri.parse(entity.coverUri),
+                            entity.coverUri.toUri(), // Fixed: KTX String.toUri()
                             items
                         )
                     }
@@ -91,15 +92,29 @@ class StoryViewModel @Inject constructor(
             )
 
     init {
+        // 1. Initial metadata fetch independent of UI
+        loadStoryMedia()
+        // 2. Start the watcher for background daily refreshes
         startPeriodicMemoryWatcher()
+    }
+
+    private fun loadStoryMedia() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val items = scanMediaStoreMetadata()
+            _mediaMap.value = items.associateBy { it.id }
+
+            if (items.size > 20) {
+                triggerOfflineStoryGeneration(items, force = false)
+            }
+        }
     }
 
     private fun startPeriodicMemoryWatcher() {
         viewModelScope.launch(Dispatchers.IO) {
             while (true) {
-                val currentMedia = _mediaMap.value.values.toList()
+                delay(PERIODIC_CHECK_MS)
 
-                if (currentMedia.size > 20 && !_isGenerating.value) {
+                if (!_isGenerating.value) {
                     val prefs = getApplication<Application>()
                         .getSharedPreferences(
                             "gallery_engine_prefs",
@@ -112,24 +127,113 @@ class StoryViewModel @Inject constructor(
                     )
 
                     if (System.currentTimeMillis() - lastScanned >= DAILY_REFRESH_MS) {
+                        // Fetch fresh metadata before daily refresh
+                        val items = scanMediaStoreMetadata()
+                        _mediaMap.value = items.associateBy { it.id }
                         triggerOfflineStoryGeneration(
-                            currentMedia,
+                            items,
                             force = true
                         )
                     }
                 }
-
-                delay(PERIODIC_CHECK_MS)
             }
         }
     }
 
-    fun updateMediaMap(map: Map<Long, MediaItem>) {
-        _mediaMap.value = map
+    /**
+     * Lightweight scanner for Story generation.
+     * Extracts only the metadata needed to build memories completely offline.
+     */
+    private fun scanMediaStoreMetadata(): List<MediaItem> {
+        val items = mutableListOf<MediaItem>()
+        val context = getApplication<Application>()
 
-        if (map.size > 20) {
-            triggerOfflineStoryGeneration(map.values.toList())
+        val uri = MediaStore.Files.getContentUri("external")
+
+        // Fixed: Removed SDK_INT checks because app minSdk >= 31
+        val projection = arrayOf(
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.DATA,
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.MIME_TYPE,
+            MediaStore.Files.FileColumns.DATE_ADDED,
+            MediaStore.Files.FileColumns.WIDTH,
+            MediaStore.Files.FileColumns.HEIGHT,
+            MediaStore.Files.FileColumns.SIZE,
+            MediaStore.Files.FileColumns.BUCKET_ID,
+            MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME, // Fixed: added bucket name
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            MediaStore.MediaColumns.DURATION,
+            MediaStore.MediaColumns.IS_FAVORITE
+        )
+
+        val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ? OR ${MediaStore.Files.FileColumns.MEDIA_TYPE} = ?"
+        val selectionArgs = arrayOf(
+            MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+            MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
+        )
+        val sortOrder = "${MediaStore.Files.FileColumns.DATE_ADDED} DESC"
+
+        try {
+            context.contentResolver.query(uri, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+                val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATA)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
+                val dateAddedCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_ADDED)
+                val widthCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.WIDTH)
+                val heightCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.HEIGHT)
+                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+                val bucketIdCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_ID)
+                val bucketNameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME)
+                val relPathCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+                val durationCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DURATION)
+                val favCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.IS_FAVORITE)
+
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    val mimeType = cursor.getString(mimeCol) ?: ""
+                    val isVideo = mimeType.startsWith("video")
+                    val contentUri = if (isVideo) {
+                        ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+                    } else {
+                        ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                    }
+
+                    items.add(
+                        MediaItem(
+                            id = id,
+                            uri = contentUri,
+                            path = cursor.getString(dataCol) ?: "",
+                            name = cursor.getString(nameCol) ?: "",
+                            bucketId = cursor.getString(bucketIdCol) ?: "",
+                            bucketName = cursor.getString(bucketNameCol) ?: "", // Fixed
+                            mimeType = mimeType,
+                            dateAdded = cursor.getLong(dateAddedCol),
+                            // Fixed: Removed missing dateModified param
+                            width = cursor.getInt(widthCol),
+                            height = cursor.getInt(heightCol),
+                            size = cursor.getLong(sizeCol),
+                            duration = cursor.getLong(durationCol),
+                            isVideo = isVideo,
+                            isFavorite = cursor.getInt(favCol) == 1,
+                            relativePath = cursor.getString(relPathCol) ?: ""
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
+        return items
+    }
+
+    /**
+     * Preserved in case the UI is still calling it, but it no longer
+     * intercepts the Paging snapshot and overrides the global media map.
+     */
+    fun updateMediaMap(map: Map<Long, MediaItem>) {
+        // Ignored. StoryViewModel manages its own complete metadata map.
     }
 
     fun createManualStory(
@@ -198,12 +302,16 @@ class StoryViewModel @Inject constructor(
                         Context.MODE_PRIVATE
                     )
 
-                prefs.edit()
-                    .putLong("last_memory_scan_time", 0L)
-                    .apply()
+                // Fixed: KTX SharedPreferences.edit
+                prefs.edit {
+                    putLong("last_memory_scan_time", 0L)
+                }
+
+                val items = scanMediaStoreMetadata()
+                _mediaMap.value = items.associateBy { it.id }
 
                 triggerOfflineStoryGeneration(
-                    _mediaMap.value.values.toList(),
+                    items,
                     force = true
                 )
             } catch (_: Exception) {}
@@ -248,293 +356,185 @@ class StoryViewModel @Inject constructor(
                     return@launch
                 }
 
-                // ---------------------------------------------------------
-                // 2. Determine whether there are multiple meaningful sources.
-                // ---------------------------------------------------------
-                val sourceKeys = uniqueMedia
-                    .map { storySourceKey(it) }
-                    .filter { it.isNotBlank() }
-                    .distinct()
+                val chronologicalMedia = uniqueMedia.sortedBy { it.dateAdded }
 
-                val useSourceBoundary = sourceKeys.size > 1
-
-                // ---------------------------------------------------------
-                // 3. FIRST: create natural TIME clusters.
-                //
-                // Time is the PRIMARY Story event.
-                // Do not split clusters because of media count.
-                // ---------------------------------------------------------
-                val chronologicalMedia =
-                    uniqueMedia.sortedBy { it.dateAdded }
-
-                val timeClusters =
-                    mutableListOf<List<MediaItem>>()
-
-                var currentTimeCluster =
-                    mutableListOf<MediaItem>()
+                val naturalClusters = mutableListOf<List<MediaItem>>()
+                var currentCluster = mutableListOf<MediaItem>()
 
                 var lastItemTime = 0L
                 var lastItemDay = -1
                 var lastItemYear = -1
 
-                val calendar =
-                    Calendar.getInstance()
+                val calendar = Calendar.getInstance()
 
                 for (item in chronologicalMedia) {
 
-                    val timeMs =
-                        item.dateAdded * 1000L
-
+                    val timeMs = item.dateAdded * 1000L
                     calendar.timeInMillis = timeMs
 
-                    val currentDay =
-                        calendar.get(Calendar.DAY_OF_YEAR)
+                    val currentDay = calendar.get(Calendar.DAY_OF_YEAR)
+                    val currentYear = calendar.get(Calendar.YEAR)
 
-                    val currentYear =
-                        calendar.get(Calendar.YEAR)
-
-                    if (currentTimeCluster.isEmpty()) {
-
-                        currentTimeCluster.add(item)
-
+                    if (currentCluster.isEmpty()) {
+                        currentCluster.add(item)
                         lastItemTime = timeMs
                         lastItemDay = currentDay
                         lastItemYear = currentYear
-
                         continue
                     }
 
-                    val timeDiff =
-                        abs(timeMs - lastItemTime)
+                    val timeDiff = abs(timeMs - lastItemTime)
+                    val sameDay = currentDay == lastItemDay && currentYear == lastItemYear
 
-                    val isSameDay =
-                        currentDay == lastItemDay &&
-                                currentYear == lastItemYear
-
-                    if (
-                        isSameDay &&
-                        timeDiff <= EVENT_THRESHOLD_MS
-                    ) {
-
-                        currentTimeCluster.add(item)
+                    if (sameDay && timeDiff <= EVENT_THRESHOLD_MS) {
+                        currentCluster.add(item)
                         lastItemTime = timeMs
-
                     } else {
+                        if (currentCluster.isNotEmpty()) {
+                            naturalClusters.add(currentCluster.distinctBy { it.id })
+                        }
 
-                        timeClusters.add(
-                            currentTimeCluster
-                                .distinctBy { it.id }
-                        )
-
-                        currentTimeCluster =
-                            mutableListOf(item)
-
+                        currentCluster = mutableListOf(item)
                         lastItemTime = timeMs
                         lastItemDay = currentDay
                         lastItemYear = currentYear
                     }
                 }
 
-                if (currentTimeCluster.isNotEmpty()) {
-
-                    timeClusters.add(
-                        currentTimeCluster
-                            .distinctBy { it.id }
-                    )
+                if (currentCluster.isNotEmpty()) {
+                    naturalClusters.add(currentCluster.distinctBy { it.id })
                 }
 
                 // ---------------------------------------------------------
-                // 4. Refine each natural time cluster.
+                // Convert natural events into Story-sized chunks.
                 //
-                // IMPORTANT:
+                // Every automatic Story:
+                // MIN = 10 media
+                // MAX = 50 media
                 //
-                // Album/source is only used to PREVENT unrelated albums
-                // from being mixed into the same Story.
-                //
-                // It does NOT globally group all Disha Stories together.
-                //
-                // Name is only used when it actually forms a repeated
-                // name inside the natural time event.
-                //
-                // Random/single names remain normal time-based media.
+                // Never create a 1/2/3-item Story.
+                // Never create a 100/119/257-item Story.
                 // ---------------------------------------------------------
-                val refinedClusters =
-                    mutableListOf<List<MediaItem>>()
+                val storyClusters = mutableListOf<List<MediaItem>>()
+                var pendingSmall = mutableListOf<MediaItem>()
 
-                for (timeCluster in timeClusters) {
+                for (naturalCluster in naturalClusters) {
+                    val items = naturalCluster.distinctBy { it.id }
 
-                    if (timeCluster.isEmpty()) {
+                    if (items.isEmpty()) {
                         continue
                     }
 
-                    // -----------------------------------------------------
-                    // If there is only one common source, keep the entire
-                    // natural time cluster exactly as it is.
-                    // -----------------------------------------------------
+                    /*
+                     * Add small clusters to pending media.
+                     *
+                     * This prevents Stories with 1–9 items.
+                     */
+                    if (items.size < MIN_ITEMS_PER_STORY) {
+                        pendingSmall.addAll(items)
+                        continue
+                    }
 
-                    if (!useSourceBoundary) {
+                    /*
+                     * First use pending items to make a valid Story.
+                     */
+                    if (pendingSmall.isNotEmpty()) {
+                        val combined = pendingSmall + items
 
-                        refinedClusters.add(
-                            timeCluster
+                        if (combined.size >= MIN_ITEMS_PER_STORY) {
+                            var offset = 0
+
+                            while (combined.size - offset >= MIN_ITEMS_PER_STORY) {
+                                val remaining = combined.size - offset
+
+                                val chunkSize = when {
+                                    remaining >= MAX_ITEMS_PER_STORY -> MAX_ITEMS_PER_STORY
+                                    remaining >= MIN_ITEMS_PER_STORY -> remaining
+                                    else -> break
+                                }
+
+                                val chunk = combined.subList(offset, offset + chunkSize)
+
+                                storyClusters.add(chunk.distinctBy { it.id })
+                                offset += chunkSize
+                            }
+
+                            pendingSmall = if (offset < combined.size) {
+                                combined.subList(offset, combined.size).toMutableList()
+                            } else {
+                                mutableListOf()
+                            }
+
+                        } else {
+                            pendingSmall = combined.toMutableList()
+                        }
+
+                        continue
+                    }
+
+                    /*
+                     * Normal cluster.
+                     *
+                     * Split large natural events into
+                     * chronological 10–50 item Stories.
+                     */
+                    var offset = 0
+
+                    while (offset < items.size) {
+                        val remaining = items.size - offset
+
+                        if (remaining < MIN_ITEMS_PER_STORY) {
+                            pendingSmall.addAll(items.subList(offset, items.size))
+                            break
+                        }
+
+                        val chunkSize = min(MAX_ITEMS_PER_STORY, remaining)
+
+                        storyClusters.add(
+                            items
+                                .subList(offset, offset + chunkSize)
                                 .distinctBy { it.id }
                         )
 
-                        continue
-                    }
-
-                    // -----------------------------------------------------
-                    // Multiple sources exist.
-                    //
-                    // Split THIS natural time event by source only.
-                    //
-                    // This prevents:
-                    //
-                    // Disha + Bhakti + Sharma
-                    //
-                    // from entering one Story.
-                    //
-                    // But Disha Stories remain globally interleaved later.
-                    // -----------------------------------------------------
-
-                    val sourceGroups =
-                        timeCluster.groupBy {
-                            storySourceKey(it)
-                        }
-
-                    for ((_, sourceItems) in sourceGroups) {
-
-                        if (sourceItems.isEmpty()) {
-                            continue
-                        }
-
-                        // -------------------------------------------------
-                        // Count names ONLY inside this source + time event.
-                        // -------------------------------------------------
-
-                        val nameCounts =
-                            sourceItems
-                                .map {
-                                    normalizeStoryName(it.name)
-                                }
-                                .filter {
-                                    it.isNotBlank()
-                                }
-                                .groupingBy {
-                                    it
-                                }
-                                .eachCount()
-
-                        val repeatedNames =
-                            nameCounts
-                                .filterValues {
-                                    it >= MIN_NAME_OCCURRENCES
-                                }
-                                .keys
-
-                        // -------------------------------------------------
-                        // If there is NO repeated name, keep the complete
-                        // source/time cluster.
-                        //
-                        // This is the important fallback.
-                        // -------------------------------------------------
-
-                        if (repeatedNames.isEmpty()) {
-
-                            refinedClusters.add(
-                                sourceItems
-                                    .distinctBy { it.id }
-                            )
-
-                            continue
-                        }
-
-                        // -------------------------------------------------
-                        // Repeated names exist.
-                        //
-                        // Keep matching names together, but DO NOT split
-                        // every random/singleton filename into separate
-                        // Stories.
-                        // -------------------------------------------------
-
-                        val repeatedNameItems =
-                            sourceItems.filter {
-                                repeatedNames.contains(
-                                    normalizeStoryName(it.name)
-                                )
-                            }
-
-                        val normalTimeItems =
-                            sourceItems.filter {
-                                !repeatedNames.contains(
-                                    normalizeStoryName(it.name)
-                                )
-                            }
-
-                        // Each repeated name becomes a refined group.
-                        repeatedNameItems
-                            .groupBy {
-                                normalizeStoryName(it.name)
-                            }
-                            .values
-                            .forEach { nameItems ->
-
-                                if (nameItems.isNotEmpty()) {
-
-                                    refinedClusters.add(
-                                        nameItems
-                                            .distinctBy { it.id }
-                                    )
-                                }
-                            }
-
-                        // Random/non-repeated files remain together.
-                        if (normalTimeItems.isNotEmpty()) {
-
-                            refinedClusters.add(
-                                normalTimeItems
-                                    .distinctBy { it.id }
-                            )
-                        }
+                        offset += chunkSize
                     }
                 }
 
-                // ---------------------------------------------------------
-                // 5. Validate final clusters.
-                // ---------------------------------------------------------
-                val validClusters =
-                    refinedClusters
-                        .map { cluster ->
-                            cluster
-                                .filter { it.id > 0 }
+                /*
+                 * Try to make one final Story from leftovers.
+                 *
+                 * Only create it if it reaches 10 items.
+                 */
+                if (pendingSmall.size >= MIN_ITEMS_PER_STORY) {
+                    var offset = 0
+
+                    while (pendingSmall.size - offset >= MIN_ITEMS_PER_STORY) {
+                        val remaining = pendingSmall.size - offset
+                        val chunkSize = min(MAX_ITEMS_PER_STORY, remaining)
+
+                        storyClusters.add(
+                            pendingSmall
+                                .subList(offset, offset + chunkSize)
                                 .distinctBy { it.id }
-                        }
-                        .filter {
-                            it.isNotEmpty()
-                        }
+                        )
 
-                _generationProgress.value =
-                    uniqueMedia.size
+                        offset += chunkSize
+                    }
+                }
 
+                /*
+                 * Only valid 10–50 item Stories survive.
+                 */
+                val validClusters = storyClusters
+                    .map { it.distinctBy { item -> item.id } }
+                    .filter { it.size in MIN_ITEMS_PER_STORY..MAX_ITEMS_PER_STORY }
+
+                _generationProgress.value = uniqueMedia.size
                 yield()
 
-                // ---------------------------------------------------------
-                // 6. Maximum 30 STORIES.
-                //
-                // This is NOT a media limit.
-                //
-                // If there are:
-                // 5 clusters  -> 5 Stories
-                // 20 clusters -> 20 Stories
-                // 30 clusters -> 30 Stories
-                // 100 clusters -> 30 Stories
-                //
-                // A cluster itself can contain:
-                // 1, 3, 7, 19, 97, 257, etc.
-                // ---------------------------------------------------------
-                val selectedClusters =
-                    validClusters
-                        .shuffled()
-                        .take(MAX_AUTO_STORIES)
+                val selectedClusters = validClusters
+                    .shuffled()
+                    .take(MAX_AUTO_STORIES)
 
                 val finalClustersToSave = selectedClusters
                     .sortedByDescending { cluster ->
@@ -566,9 +566,10 @@ class StoryViewModel @Inject constructor(
                     } catch (_: Exception) {}
                 }
 
-                prefs.edit()
-                    .putLong("last_memory_scan_time", System.currentTimeMillis())
-                    .apply()
+                // Fixed: KTX SharedPreferences.edit
+                prefs.edit {
+                    putLong("last_memory_scan_time", System.currentTimeMillis())
+                }
 
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -576,54 +577,6 @@ class StoryViewModel @Inject constructor(
                 _isGenerating.value = false
             }
         }
-    }
-
-    private fun storySourceKey(item: MediaItem): String {
-        if (item.bucketId.isNotBlank()) {
-            return "BUCKET:${item.bucketId}"
-        }
-
-        val relativePath = item.relativePath
-            .trim()
-            .lowercase(Locale.ROOT)
-
-        if (relativePath.isNotBlank()) {
-            return "PATH:$relativePath"
-        }
-
-        val parent = try {
-            File(item.path)
-                .parent
-                ?.trim()
-                ?.lowercase(Locale.ROOT)
-                ?: ""
-        } catch (_: Exception) {
-            ""
-        }
-
-        if (parent.isNotBlank()) {
-            return "PARENT:$parent"
-        }
-
-        return "UNKNOWN_SOURCE"
-    }
-
-    private fun normalizeStoryName(name: String): String {
-        if (name.isBlank()) {
-            return ""
-        }
-
-        var baseName = name.trim()
-        val lastDot = baseName.lastIndexOf('.')
-
-        if (lastDot > 0) {
-            baseName = baseName.substring(0, lastDot)
-        }
-
-        baseName = baseName.replace(Regex("""\s*\(\d+\)\s*$"""), "")
-        baseName = baseName.replace(Regex("""\s*-\s*copy(?:\s*\(\d+\))?\s*$"""), "")
-
-        return baseName.trim().lowercase(Locale.ROOT)
     }
 
     private fun buildEntity(
@@ -683,10 +636,10 @@ class StoryViewModel @Inject constructor(
 
     companion object {
         const val MAX_AUTO_STORIES = 30
+        const val MIN_ITEMS_PER_STORY = 10
+        const val MAX_ITEMS_PER_STORY = 50
         const val EVENT_THRESHOLD_MS = 60L * 60L * 1000L
         const val DAILY_REFRESH_MS = 24L * 60L * 60L * 1000L
         const val PERIODIC_CHECK_MS = 60L * 60L * 1000L
-        const val MIN_NAME_OCCURRENCES = 2
-        const val COMMON_SOURCE_KEY = "COMMON_SOURCE"
     }
 }

@@ -520,8 +520,11 @@ fun BottomNavigationBar(
                         ) {
                             if (!selected) {
                                 nav.navigate(tab.route) {
-                                    popUpTo(nav.graph.findStartDestination().id) { inclusive = false }
+                                    popUpTo(nav.graph.findStartDestination().id) {
+                                        saveState = true
+                                    }
                                     launchSingleTop = true
+                                    restoreState = true
                                 }
                             }
                         }

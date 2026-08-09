@@ -96,12 +96,9 @@ fun StoriesScreen(
     storyViewModel: StoryViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
-    val mediaMap by viewModel.mediaMap.collectAsState()
 
-    // Sync media map changes securely to the StoryViewModel
-    LaunchedEffect(mediaMap) {
-        storyViewModel.updateMediaMap(mediaMap)
-    }
+    // We no longer sync media map to story viewmodel automatically.
+    // StoryViewModel fetches its own metadata independently for offline generation.
 
     LaunchedEffect(Unit) {
         storyViewModel.events.collect { event ->
@@ -139,7 +136,6 @@ fun StoriesScreen(
         onDispose { sharedExoPlayer.release() }
     }
 
-    // Notification State & Permission setup
     val prefs = remember { context.getSharedPreferences("app_settings", Context.MODE_PRIVATE) }
     var isNotificationEnabled by remember { mutableStateOf(prefs.getBoolean("daily_notification", false)) }
 
@@ -432,12 +428,15 @@ fun StoryCard(
                 }
         ) {
             Box(Modifier.fillMaxSize()) {
+                // Using exact specs for lightweight cached thumbnails
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(story.coverUri)
                         .size(320)
+                        .precision(Precision.INEXACT)
                         .bitmapConfig(Bitmap.Config.RGB_565)
-                        .crossfade(true)
+                        .allowHardware(true)
+                        .crossfade(false)
                         .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,

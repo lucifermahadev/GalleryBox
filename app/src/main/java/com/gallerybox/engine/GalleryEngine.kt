@@ -11,11 +11,12 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Log
 import androidx.annotation.OptIn
 import androidx.core.app.NotificationCompat
 import androidx.core.content.edit
@@ -29,6 +30,8 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.paging.PagingSource
+import androidx.paging.PagingState
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
@@ -66,11 +69,20 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
 
     private val prefs = context.getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE)
 
-    suspend fun fetchAllMedia(): List<MediaItem> = fetchMedia(null)
+    /**
+     * Provides a robust PagingSource to load media directly from MediaStore in chunks.
+     * Use this in the ViewModel instead of `fetchAllMedia()` to prevent memory explosion on large galleries.
+     */
+    fun getMediaPagingSource(): PagingSource<Int, MediaItem> {
+        return GalleryPagingSource(context, this)
+    }
 
-    suspend fun fetchIncrementalMedia(lastGeneration: Long): List<MediaItem> = fetchMedia(lastGeneration)
+    @Deprecated("Loads entire gallery into memory. Use getMediaPagingSource() for UI displaying.")
+    suspend fun fetchAllMedia(): List<MediaItem> = fetchMedia(null, limit = null, offset = null)
 
-    private suspend fun fetchMedia(minGeneration: Long?): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun fetchIncrementalMedia(lastGeneration: Long): List<MediaItem> = fetchMedia(lastGeneration, limit = null, offset = null)
+
+    suspend fun fetchMedia(minGeneration: Long?, limit: Int?, offset: Int?): List<MediaItem> = withContext(Dispatchers.IO) {
         val mediaList = mutableListOf<MediaItem>()
         val resolver = context.contentResolver
 
@@ -114,86 +126,105 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
             args.add(minGeneration.toString())
         }
 
-        try {
-            resolver.query(uri, proj.toTypedArray(), sel, if (args.isEmpty()) null else args.toTypedArray(), "${MediaStore.Files.FileColumns.DATE_ADDED} DESC")?.use { c ->
-                val idC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
-                val nameC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
-                val dateC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_ADDED)
-                val sizeC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
-                val mimeC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
-                val typeC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
-                val bIdC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_ID)
-                val bNameC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME)
-                val durC = c.getColumnIndex(MediaStore.MediaColumns.DURATION)
-                val relC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH) else -1
-                val volC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME) else -1
-                val dataC = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.Files.FileColumns.DATA) else -1
-                val trashC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.IS_TRASHED) else -1
-                val wC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.WIDTH) else -1
-                val hC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.HEIGHT) else -1
-
-                val hiddenItemsSet = getHiddenItems()
-
-                while (c.moveToNext()) {
-                    if (trashC != -1 && c.getInt(trashC) == 1) continue
-                    if (mediaList.size % 200 == 0) coroutineContext.ensureActive()
-
-                    val type = c.getInt(typeC)
-                    val isImg = type == MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
-                    val isV = type == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
-
-                    if (!isImg && !isV) continue
-
-                    val name = c.getString(nameC) ?: "Unknown"
-                    val mimeType = c.getString(mimeC)?.lowercase(Locale.ROOT) ?: ""
-                    val id = c.getLong(idC)
-
-                    val path = if (dataC != -1) c.getString(dataC) ?: "" else ""
-                    val relP = if (relC != -1 && c.getString(relC) != null) {
-                        c.getString(relC)!!
-                    } else {
-                        path.substringBeforeLast('/', "")
-                    }
-
-                    val isFileHidden = name.startsWith(".") || relP.split("/").any { it.startsWith(".") }
-                    if (isFileHidden) continue
-
-                    if (hiddenItemsSet.contains(id.toString())) continue
-
-                    val cUri = when {
-                        isImg -> ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-                        isV -> ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
-                        else -> continue
-                    }
-
-                    val dSec = c.getLong(dateC)
-
-                    mediaList.add(
-                        MediaItem(
-                            id = id,
-                            uri = cUri,
-                            path = path,
-                            relativePath = relP,
-                            name = name,
-                            mimeType = mimeType,
-                            size = c.getLong(sizeC),
-                            dateAdded = dSec,
-                            isVideo = isV,
-                            isHidden = false,
-                            isFavorite = false,
-                            bucketId = c.getString(bIdC) ?: "unknown",
-                            bucketName = c.getString(bNameC) ?: "Internal",
-                            duration = if (isV && durC != -1) c.getLong(durC) else 0L,
-                            width = if (wC != -1) c.getInt(wC) else 0,
-                            height = if (hC != -1) c.getInt(hC) else 0,
-                            volumeName = if (volC != -1) c.getString(volC) ?: "" else ""
-                        )
-                    )
-                }
+        val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && limit != null && offset != null) {
+            val bundle = Bundle().apply {
+                putInt(android.content.ContentResolver.QUERY_ARG_LIMIT, limit)
+                putInt(android.content.ContentResolver.QUERY_ARG_OFFSET, offset)
+                putStringArray(android.content.ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Files.FileColumns.DATE_ADDED))
+                putInt(android.content.ContentResolver.QUERY_ARG_SORT_DIRECTION, android.content.ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
+                putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, sel)
+                putStringArray(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args.toTypedArray())
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+            resolver.query(uri, proj.toTypedArray(), bundle, null)
+        } else {
+            val sortOrder = if (limit != null && offset != null) {
+                "${MediaStore.Files.FileColumns.DATE_ADDED} DESC LIMIT $limit OFFSET $offset"
+            } else {
+                "${MediaStore.Files.FileColumns.DATE_ADDED} DESC"
+            }
+            resolver.query(uri, proj.toTypedArray(), sel, if (args.isEmpty()) null else args.toTypedArray(), sortOrder)
         }
+
+        cursor?.use { c ->
+            val idC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+            val nameC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            val dateC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_ADDED)
+            val sizeC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+            val mimeC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
+            val typeC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
+            val bIdC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_ID)
+            val bNameC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME)
+            val durC = c.getColumnIndex(MediaStore.MediaColumns.DURATION)
+            val relC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH) else -1
+            val volC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME) else -1
+            val dataC = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.Files.FileColumns.DATA) else -1
+            val trashC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.IS_TRASHED) else -1
+            val favC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE) else -1
+            val wC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.WIDTH) else -1
+            val hC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.HEIGHT) else -1
+
+            val hiddenItemsSet = getHiddenItems()
+
+            while (c.moveToNext()) {
+                if (trashC != -1 && c.getInt(trashC) == 1) continue
+                if (mediaList.size % 200 == 0) coroutineContext.ensureActive()
+
+                val type = c.getInt(typeC)
+                val isImg = type == MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
+                val isV = type == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+
+                if (!isImg && !isV) continue
+
+                val name = c.getString(nameC) ?: "Unknown"
+                val mimeType = c.getString(mimeC)?.lowercase(Locale.ROOT) ?: ""
+                val id = c.getLong(idC)
+                val volumeName = if (volC != -1) c.getString(volC) ?: "" else ""
+
+                val path = if (dataC != -1) c.getString(dataC) ?: "" else ""
+                val relP = if (relC != -1 && c.getString(relC) != null) {
+                    c.getString(relC)!!
+                } else {
+                    path.substringBeforeLast('/', "")
+                }
+
+                val isFileHidden = name.startsWith(".") || relP.split("/").any { it.startsWith(".") }
+                if (isFileHidden) continue
+                if (hiddenItemsSet.contains(id.toString())) continue
+
+                // Proper multi-volume URI support
+                val baseUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && volumeName.isNotBlank()) {
+                    if (isImg) MediaStore.Images.Media.getContentUri(volumeName) else MediaStore.Video.Media.getContentUri(volumeName)
+                } else {
+                    if (isImg) MediaStore.Images.Media.EXTERNAL_CONTENT_URI else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                }
+
+                val cUri = ContentUris.withAppendedId(baseUri, id)
+                val dSec = c.getLong(dateC)
+
+                mediaList.add(
+                    MediaItem(
+                        id = id,
+                        uri = cUri,
+                        path = path,
+                        relativePath = relP,
+                        name = name,
+                        mimeType = mimeType,
+                        size = c.getLong(sizeC),
+                        dateAdded = dSec,
+                        isVideo = isV,
+                        isHidden = false,
+                        isFavorite = if (favC != -1) c.getInt(favC) == 1 else false,
+                        bucketId = c.getString(bIdC) ?: "unknown",
+                        bucketName = c.getString(bNameC) ?: "Internal",
+                        duration = if (isV && durC != -1) c.getLong(durC) else 0L,
+                        width = if (wC != -1) c.getInt(wC) else 0,
+                        height = if (hC != -1) c.getInt(hC) else 0,
+                        volumeName = volumeName
+                    )
+                )
+            }
+        } ?: throw IOException("MediaStore query returned null cursor")
+
         return@withContext mediaList
     }
 
@@ -214,44 +245,102 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
         return Math.pow(2.0, floor(log2(ratio.toDouble()))).toInt().coerceAtLeast(1)
     }
 
+    private fun getQuickHash(item: MediaItem): String {
+        return try {
+            val md = MessageDigest.getInstance("MD5")
+            context.contentResolver.openInputStream(item.uri)?.use { inp ->
+                val buf = ByteArray(4096)
+                val read = inp.read(buf)
+                if (read != -1) md.update(buf, 0, read)
+            }
+            md.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    private fun getFullHash(item: MediaItem): String {
+        return try {
+            val md = MessageDigest.getInstance("SHA-256")
+            context.contentResolver.openInputStream(item.uri)?.use { inp ->
+                val buf = ByteArray(8192)
+                var read: Int
+                while (inp.read(buf).also { read = it } != -1) {
+                    md.update(buf, 0, read)
+                }
+            }
+            md.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
     suspend fun findDuplicates(media: List<MediaItem>): List<List<MediaItem>> = withContext(Dispatchers.IO) {
         val bySize = media.groupBy { it.size }.filter { it.value.size > 1 }.values
         val byRes = bySize.flatMap { group -> group.groupBy { "${it.width}x${it.height}" }.filter { it.value.size > 1 }.values }
-        val duplicates = mutableListOf<List<MediaItem>>()
 
+        val duplicates = mutableListOf<List<MediaItem>>()
         val cores = Runtime.getRuntime().availableProcessors()
         val activeThreads = maxOf(1, cores - 1)
         val dispatcher = Dispatchers.IO.limitedParallelism(activeThreads)
 
         byRes.forEach { group ->
-            val byHash = ConcurrentHashMap<String, MutableList<MediaItem>>()
-
+            // Staged duplicate detection: Pass 1 - Quick hash (first 4KB)
+            val byQuickHash = ConcurrentHashMap<String, MutableList<MediaItem>>()
             withContext(dispatcher) {
                 group.map { item ->
                     async {
-                        try {
-                            val md = MessageDigest.getInstance("SHA-256")
-                            val resolver = context.contentResolver
-
-                            resolver.openInputStream(item.uri)?.use { inp ->
-                                val buf = ByteArray(8192)
-                                var read: Int
-                                while (inp.read(buf).also { read = it } != -1) {
-                                    md.update(buf, 0, read)
-                                }
-                                val hash = md.digest().joinToString("") { "%02x".format(it) }
-                                byHash.getOrPut(hash) { mutableListOf() }.add(item)
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
+                        val qHash = getQuickHash(item)
+                        if (qHash.isNotEmpty()) {
+                            byQuickHash.getOrPut(qHash) { mutableListOf() }.add(item)
                         }
                     }
                 }.awaitAll()
             }
 
-            duplicates.addAll(byHash.values.filter { it.size > 1 })
+            // Staged duplicate detection: Pass 2 - Full hash only for quick-hash collisions
+            byQuickHash.values.filter { it.size > 1 }.forEach { collisionGroup ->
+                val byFullHash = ConcurrentHashMap<String, MutableList<MediaItem>>()
+                withContext(dispatcher) {
+                    collisionGroup.map { item ->
+                        async {
+                            val hash = getFullHash(item)
+                            if (hash.isNotEmpty()) {
+                                byFullHash.getOrPut(hash) { mutableListOf() }.add(item)
+                            }
+                        }
+                    }.awaitAll()
+                }
+                duplicates.addAll(byFullHash.values.filter { it.size > 1 })
+            }
         }
         return@withContext duplicates
+    }
+}
+
+class GalleryPagingSource(
+    private val context: Context,
+    private val engine: GalleryEngine
+) : PagingSource<Int, MediaItem>() {
+    override suspend fun load(params: LoadParams<Int>): LoadResult<Int, MediaItem> {
+        val offset = params.key ?: 0
+        return try {
+            val media = engine.fetchMedia(minGeneration = null, limit = params.loadSize, offset = offset)
+            LoadResult.Page(
+                data = media,
+                prevKey = if (offset == 0) null else maxOf(0, offset - params.loadSize),
+                nextKey = if (media.isEmpty()) null else offset + params.loadSize
+            )
+        } catch (e: Exception) {
+            LoadResult.Error(e)
+        }
+    }
+
+    override fun getRefreshKey(state: PagingState<Int, MediaItem>): Int? {
+        return state.anchorPosition?.let { anchorPosition ->
+            val anchorPage = state.closestPageToPosition(anchorPosition)
+            anchorPage?.prevKey?.plus(state.config.pageSize) ?: anchorPage?.nextKey?.minus(state.config.pageSize)
+        }
     }
 }
 
@@ -434,10 +523,13 @@ class MediaOperationEngine @Inject constructor(@ApplicationContext private val c
     }
 
     suspend fun createAlbum(targetAlbum: TargetAlbum): MediaOpResult = withContext(Dispatchers.IO) {
+        val safePath = getResolvedRelativePath(targetAlbum, false)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Android Q+: Relies on MediaStore relative path mapping during media insertion.
             return@withContext MediaOpResult.Success()
         }
-        val safePath = getResolvedRelativePath(targetAlbum, false)
+
         val root = Environment.getExternalStorageDirectory()
         val albumDir = File(root, safePath)
 
@@ -544,11 +636,13 @@ class MediaOperationEngine @Inject constructor(@ApplicationContext private val c
 
                 val originalItem = items[index]
 
-                resolver.openInputStream(destUri)?.use { input ->
-                    if (input.read() == -1 && originalItem.size > 0) {
-                        throw IOException("Copied file is empty or unreadable")
+                // Rigorous File Size Verification
+                resolver.openFileDescriptor(destUri, "r")?.use { pfd ->
+                    val copiedSize = pfd.statSize
+                    if (copiedSize == 0L || (originalItem.size > 0 && copiedSize != originalItem.size)) {
+                        throw IOException("Copied file size mismatch or unreadable: expected ${originalItem.size}, got $copiedSize")
                     }
-                } ?: throw IOException("Failed to open InputStream for newly copied file verification")
+                } ?: throw IOException("Failed to open file descriptor for newly copied file verification")
             }
 
         } catch (e: CancellationException) {
@@ -815,7 +909,6 @@ class NotificationDisplayWorker(
             notificationManager.createNotificationChannel(channel)
         }
 
-        // Dynamically launches the main activity for the app
         val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }

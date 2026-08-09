@@ -23,6 +23,7 @@ import android.os.PowerManager
 import android.provider.MediaStore
 import android.util.Log
 import android.util.LruCache
+import androidx.annotation.RequiresApi
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
@@ -125,7 +126,7 @@ enum class MergeMode { MOVE, COPY, MOVE_AND_DELETE }
 
 data class ExportAdvanced(val bitrate: Int = 10000000, val fps: Int = 30, val codec: String = "video/avc")
 data class MediaIndexes(val all: List<MediaItem> = emptyList(), val photos: List<MediaItem> = emptyList(), val videos: List<MediaItem> = emptyList(), val gifs: List<MediaItem> = emptyList(), val recent: List<MediaItem> = emptyList())
-private data class FilterState(val f: MediaTypeFilter, val q: String, val s: List<Long>, val t: List<TrashEntity>, val h: Set<String>)
+private data class FilterState(val f: MediaTypeFilter, val q: String, val s: List<Long>, val t: List<TrashEntity>, val h: Set<String>, val albumId: String? = null)
 
 data class VideoPlaybackState(
     val uri: String? = null,
@@ -284,6 +285,7 @@ class GalleryViewModel @Inject constructor(
 
     private var positionUpdateJob: Job? = null
 
+    @RequiresApi(Build.VERSION_CODES.KITKAT)
     private fun findPersistedSdCardTreeUri(): Uri? {
         val resolver = getApplication<Application>().contentResolver
         return resolver.persistedUriPermissions.firstOrNull { perm ->
@@ -768,6 +770,42 @@ class GalleryViewModel @Inject constructor(
                 }
         }
     }.cachedIn(viewModelScope)
+
+    fun getPagedMediaForAlbumStream(albumId: String, filter: MediaTypeFilter, query: String): Flow<PagingData<GalleryGridItem>> {
+        return combine(secureIds, trashBin, _hiddenAlbums) { sec, trash, hidden ->
+            FilterState(filter, query, sec, trash, hidden, albumId)
+        }.distinctUntilChanged().flatMapLatest { state ->
+            val pageSize = currentPageSize
+            val prefetch = maxOf(20, (pageSize * 0.25 * getThermalFactor()).toInt())
+            activePagingSources.removeAll { it.invalid }
+
+            val effectiveAlbumId = when (albumId) {
+                ID_RECENT, ID_FAVORITES, ID_VIDEOS, ID_SCREENSHOTS, ID_DOWNLOADS, ID_WHATSAPP, ID_INSTAGRAM, ID_HIDDEN -> albumId
+                else -> albumId
+            }
+
+            Pager(PagingConfig(pageSize = pageSize, prefetchDistance = prefetch, enablePlaceholders = false, initialLoadSize = pageSize, maxSize = pageSize * 4)) {
+                MediaPagingSource(
+                    contentResolver = getApplication<Application>().contentResolver,
+                    filter = state.f,
+                    query = state.q,
+                    albumId = effectiveAlbumId,
+                    hiddenAlbums = state.h,
+                    favoriteIds = favoriteIds.value
+                ).also { activePagingSources.add(it) }
+            }.flow.map { pd ->
+                val secSet = state.s.toHashSet()
+                val trashSet = state.t.map { it.contentUri }.toHashSet()
+                pd.filter { item -> item.uri != Uri.EMPTY && !secSet.contains(item.id) && !trashSet.contains(item.uri.toString()) }
+                    .map { GalleryGridItem.Media(it) }
+                    .insertSeparators { b, a ->
+                        if (a == null) null
+                        else if (b == null || !sameDay(b.item.dateAdded, a.item.dateAdded)) GalleryGridItem.Header("header_${a.item.dateAdded}", a.item.dateHeader, 0)
+                        else null
+                    }
+            }
+        }.cachedIn(viewModelScope)
+    }
 
     private var reloadJob: Job? = null
     private val mediaObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
@@ -1287,21 +1325,6 @@ class GalleryViewModel @Inject constructor(
 
     fun getMediaItemById(id: Long): MediaItem? = _mediaMap.value[id]
 
-    fun openViewer(mediaId: Long) {
-        val item = getMediaItemById(mediaId) ?: return
-        viewModelScope.launch(Dispatchers.IO) { dao.incrementUsageStats(mediaId, System.currentTimeMillis()) }
-        if (item.uri == Uri.EMPTY) { _events.trySend(GalleryEvent.ShowToast("Media file is unavailable.")); return }
-
-        val current = _viewerState.value
-        if (current !is GalleryViewerState.Open || current.mediaId != mediaId) {
-            _viewerState.value = GalleryViewerState.Open(
-                mediaId = item.id,
-                isVideo = item.isVideo,
-                uri = item.uri
-            )
-        }
-    }
-
     fun closeViewer() { _viewerState.value = GalleryViewerState.Closed }
 
     private fun clearPendingOperationStates() {
@@ -1441,7 +1464,51 @@ class GalleryViewModel @Inject constructor(
         } catch (e: Exception) { Log.e(TAG, "Failed to resolve volume for $bucketId", e) }
         null
     }
+    fun openViewer(mediaId: Long) {
+        val item = _mediaMap.value[mediaId]
 
+        if (item == null) {
+            _events.trySend(
+                GalleryEvent.ShowToast("Media item is not loaded.")
+            )
+            return
+        }
+
+        openViewer(item)
+    }
+
+    fun openViewer(item: MediaItem) {
+
+        if (item.uri == Uri.EMPTY) {
+            _events.trySend(
+                GalleryEvent.ShowToast("Media file is unavailable.")
+            )
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                dao.incrementUsageStats(
+                    item.id,
+                    System.currentTimeMillis()
+                )
+            }
+        }
+
+        val current = _viewerState.value
+
+        if (
+            current !is GalleryViewerState.Open ||
+            current.mediaId != item.id
+        ) {
+            _viewerState.value =
+                GalleryViewerState.Open(
+                    mediaId = item.id,
+                    isVideo = item.isVideo,
+                    uri = item.uri
+                )
+        }
+    }
     fun moveData(ids: List<Long>, targetAlbumId: String) {
         if (!tryBeginFileOperation()) {
             _events.trySend(GalleryEvent.ShowToast("An operation is already in progress"))
@@ -1625,6 +1692,7 @@ class GalleryViewModel @Inject constructor(
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.FROYO)
     fun renameAlbum(album: Album, newName: String) {
         val trimmed = newName.trim()
         if (trimmed.isBlank() || trimmed == album.name) return
@@ -2072,7 +2140,8 @@ class MediaPagingSource(
     private val filter: MediaTypeFilter,
     private val query: String,
     private val albumId: String? = null,
-    private val hiddenAlbums: Set<String> = emptySet()
+    private val hiddenAlbums: Set<String> = emptySet(),
+    private val favoriteIds: List<Long> = emptyList()
 ) : PagingSource<Int, MediaItem>() {
 
     override fun getRefreshKey(state: PagingState<Int, MediaItem>): Int? = state.anchorPosition?.let {
@@ -2093,9 +2162,34 @@ class MediaPagingSource(
             }
 
             val selectionArgsList = mutableListOf<String>()
+
             when (albumId) {
                 ID_RECENT -> {}
-                else -> if (albumId != null && !albumId.startsWith("virtual_")) {
+                ID_VIDEOS -> {
+                    selection += " AND ${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO}"
+                }
+                ID_FAVORITES -> {
+                    if (favoriteIds.isEmpty()) {
+                        return@withContext LoadResult.Page(emptyList(), if (position == 0) null else position - pageSize, null)
+                    }
+                    val placeholders = favoriteIds.joinToString(",") { "?" }
+                    selection += " AND ${MediaStore.Files.FileColumns._ID} IN ($placeholders)"
+                    selectionArgsList.addAll(favoriteIds.map { it.toString() })
+                }
+                ID_SCREENSHOTS -> {
+                    selection += " AND (${MediaStore.Files.FileColumns.DATA} LIKE '%Screenshot%' OR ${MediaStore.Files.FileColumns.DATA} LIKE '%Screenshots%')"
+                }
+                ID_DOWNLOADS -> {
+                    selection += " AND ${MediaStore.Files.FileColumns.DATA} LIKE '%Download%'"
+                }
+                ID_WHATSAPP -> {
+                    selection += " AND ${MediaStore.Files.FileColumns.DATA} LIKE '%WhatsApp%'"
+                }
+                ID_INSTAGRAM -> {
+                    selection += " AND ${MediaStore.Files.FileColumns.DATA} LIKE '%Instagram%'"
+                }
+                null -> {}
+                else -> {
                     selection += " AND ${MediaStore.Files.FileColumns.BUCKET_ID} = ?"
                     selectionArgsList.add(albumId)
                 }

@@ -101,6 +101,7 @@ import com.gallerybox.viewmodel.PhotoSort
 import com.gallerybox.viewmodel.TrashViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -200,104 +201,179 @@ fun SamsungFastScrollbar(
     deviceTier: DeviceTier = DeviceTier.HIGH,
     modifier: Modifier = Modifier
 ) {
-    if (pagedMedia.itemCount < 300) return
+    if (pagedMedia.itemCount < 20) return
 
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+
     var isDragging by remember { mutableStateOf(false) }
+    var visible by remember { mutableStateOf(false) }
     var trackHeightPx by remember { mutableFloatStateOf(0f) }
     var thumbOffsetPx by remember { mutableFloatStateOf(0f) }
     var bubbleLabel by remember { mutableStateOf("") }
-    var scrollJob by remember { mutableStateOf<Job?>(null) }
-    var visible by remember { mutableStateOf(false) }
 
-    LaunchedEffect(gridState.isScrollInProgress, isDragging) {
-        if (gridState.isScrollInProgress || isDragging) visible = true
-        else { delay(1200); visible = false }
-    }
+    val thumbHeightDp = 48.dp
+    val thumbHeightPx = with(density) { thumbHeightDp.toPx() }
 
-    LaunchedEffect(gridState) {
-        snapshotFlow { gridState.firstVisibleItemIndex }.collect { index ->
-            if (!isDragging && trackHeightPx > 0f) {
-                val safeCount = pagedMedia.itemCount.coerceAtLeast(1)
-                val adjusted = (index - indexOffset).coerceIn(0, safeCount - 1)
-                thumbOffsetPx = (adjusted.toFloat() / safeCount).coerceIn(0f, 1f) * trackHeightPx
+    val scrollChannel = remember { Channel<Int>(Channel.CONFLATED) }
+
+    LaunchedEffect(Unit) {
+        for (targetIndex in scrollChannel) {
+            runCatching {
+                val maxLoaded = (gridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                val safeTarget = targetIndex.coerceIn(0, maxLoaded)
+                gridState.scrollToItem(index = safeTarget, scrollOffset = 0)
             }
         }
     }
 
-    val thumbHeightDp = 44.dp
-    val density = LocalDensity.current
+    LaunchedEffect(gridState.isScrollInProgress, isDragging) {
+        if (gridState.isScrollInProgress || isDragging) {
+            visible = true
+        } else {
+            delay(1000)
+            visible = false
+        }
+    }
+
+    LaunchedEffect(gridState) {
+        snapshotFlow {
+            gridState.firstVisibleItemIndex
+        }.collect { index ->
+            if (!isDragging && trackHeightPx > 0f) {
+                val count = pagedMedia.itemCount.coerceAtLeast(1)
+                val adjusted = (index - indexOffset).coerceIn(0, count - 1)
+
+                val maxThumbOffset = (trackHeightPx - thumbHeightPx).coerceAtLeast(0f)
+                val fraction = if (count > 1) adjusted.toFloat() / (count - 1).toFloat() else 0f
+
+                thumbOffsetPx = (fraction * maxThumbOffset).coerceIn(0f, maxThumbOffset)
+            }
+        }
+    }
+
+    var lastDragUpdateMs by remember { mutableLongStateOf(0L) }
 
     fun labelForIndex(index: Int): String {
         val safeIndex = index.coerceIn(0, (pagedMedia.itemCount - 1).coerceAtLeast(0))
-        for (i in safeIndex downTo maxOf(0, safeIndex - 60)) {
-            (runCatching { pagedMedia.peek(i) }.getOrNull() as? GalleryGridItem.Header)?.let { return it.title }
+        for (i in safeIndex downTo maxOf(0, safeIndex - 40)) {
+            val item = runCatching { pagedMedia.peek(i) }.getOrNull()
+            if (item is GalleryGridItem.Header) {
+                return item.title
+            }
         }
         return ""
     }
 
     fun jumpTo(offsetY: Float) {
-        val clamped = offsetY.coerceIn(0f, trackHeightPx)
+        if (trackHeightPx <= 0f) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastDragUpdateMs < 33L) return
+        lastDragUpdateMs = now
+
+        val maxThumbOffset = (trackHeightPx - thumbHeightPx).coerceAtLeast(0f)
+        val clamped = offsetY.coerceIn(0f, maxThumbOffset)
         thumbOffsetPx = clamped
-        val safeCount = pagedMedia.itemCount.coerceAtLeast(1)
-        val fraction = if (trackHeightPx > 0f) clamped / trackHeightPx else 0f
-        val targetIndex = (fraction * safeCount).toInt().coerceIn(0, (safeCount - 1).coerceAtLeast(0))
+
+        val fraction = if (maxThumbOffset > 0f) clamped / maxThumbOffset else 0f
+        val count = pagedMedia.itemCount.coerceAtLeast(1)
+        val targetIndex = (fraction * (count - 1)).toInt().coerceIn(0, count - 1)
+
         bubbleLabel = labelForIndex(targetIndex)
-        scrollJob?.cancel()
-        scrollJob = scope.launch {
-            runCatching {
-                val maxTotal = (gridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
-                gridState.scrollToItem((targetIndex + indexOffset).coerceIn(0, maxTotal))
-            }
-        }
+        scrollChannel.trySend(targetIndex + indexOffset)
     }
 
     AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(tween(if (deviceTier == DeviceTier.LOW) 60 else 120)),
-        exit = fadeOut(tween(if (deviceTier == DeviceTier.LOW) 120 else 300)),
-        modifier = modifier.zIndex(10f)
+        visible = visible || isDragging,
+        enter = fadeIn(tween(100)),
+        exit = fadeOut(tween(180)),
+        modifier = modifier.zIndex(20f)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxHeight()
-                .width(44.dp)
+                .width(52.dp)
                 .onGloballyPositioned { trackHeightPx = it.size.height.toFloat() }
                 .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { offset ->
                             isDragging = true
+                            lastDragUpdateMs = 0L
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             jumpTo(offset.y)
                         },
-                        onDrag = { change, _ -> change.consume(); jumpTo(change.position.y) },
-                        onDragEnd = { isDragging = false; bubbleLabel = "" },
-                        onDragCancel = { isDragging = false; bubbleLabel = "" }
+                        onDrag = { change, _ ->
+                            change.consume()
+                            jumpTo(change.position.y)
+                        },
+                        onDragEnd = {
+                            isDragging = false
+                            bubbleLabel = ""
+                        },
+                        onDragCancel = {
+                            isDragging = false
+                            bubbleLabel = ""
+                        }
                     )
                 }
         ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .width(5.dp)
+                    .fillMaxHeight()
+                    .padding(vertical = 8.dp)
+                    .background(
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
+                        RoundedCornerShape(4.dp)
+                    )
+            )
+
             if (isDragging && bubbleLabel.isNotEmpty()) {
                 Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset {
+                            IntOffset(
+                                x = with(density) { (-100.dp).roundToPx() },
+                                y = (thumbOffsetPx - with(density) { 24.dp.toPx() }).toInt().coerceAtLeast(0)
+                            )
+                        },
+                    shape = RoundedCornerShape(18.dp),
                     color = MaterialTheme.colorScheme.primary,
-                    shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp, topEnd = 4.dp, bottomEnd = 20.dp),
-                    modifier = Modifier.align(Alignment.TopStart).offset {
-                        IntOffset(
-                            x = -(with(density) { 96.dp.toPx() }).toInt(),
-                            y = (thumbOffsetPx - with(density) { 20.dp.toPx() }).toInt().coerceAtLeast(0)
-                        )
-                    }
+                    shadowElevation = 6.dp
                 ) {
-                    Text(bubbleLabel, color = MaterialTheme.colorScheme.onPrimary, fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                    Text(
+                        text = bubbleLabel,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
+                    )
                 }
             }
-            Box(Modifier.align(Alignment.CenterEnd).width(4.dp).fillMaxHeight().padding(vertical = 4.dp)
-                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f), RoundedCornerShape(3.dp)))
-            Box(Modifier.align(Alignment.TopEnd).offset {
-                IntOffset(0, thumbOffsetPx.toInt().coerceIn(0, (trackHeightPx - with(density) { thumbHeightDp.toPx() }).toInt().coerceAtLeast(0)))
-            }.padding(end = 3.dp).width(if (isDragging) 10.dp else 7.dp).height(thumbHeightDp)
-                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(6.dp)))
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset {
+                        val maxOffset = (trackHeightPx - thumbHeightPx).coerceAtLeast(0f)
+                        IntOffset(
+                            x = 0,
+                            y = thumbOffsetPx.coerceIn(0f, maxOffset).toInt()
+                        )
+                    }
+                    .padding(end = 2.dp)
+                    .width(if (isDragging) 12.dp else 8.dp)
+                    .height(thumbHeightDp)
+                    .background(
+                        MaterialTheme.colorScheme.primary,
+                        RoundedCornerShape(7.dp)
+                    )
+            )
         }
     }
 }
@@ -614,7 +690,7 @@ fun PictureScreen(
                     SamsungFastScrollbar(
                         gridState = gridState,
                         pagedMedia = pagedMedia,
-                        indexOffset = 1,
+                        indexOffset = 0,
                         deviceTier = deviceTier,
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
@@ -1746,25 +1822,28 @@ fun GalleryGridContent(
     var isScrollingFast by remember { mutableStateOf(false) }
 
     LaunchedEffect(gridState) {
-        var lastOffset = 0
-        var lastIndex = 0
-        var lastTime = 0L
-        snapshotFlow { gridState.firstVisibleItemScrollOffset to gridState.firstVisibleItemIndex }
-            .collect { (offset, index) ->
-                val now = System.currentTimeMillis()
-                val dt = (now - lastTime).coerceAtLeast(1)
-                val delta = kotlin.math.abs(offset - lastOffset) + kotlin.math.abs((index - lastIndex) * 1000)
-                val velocity = delta / dt.toFloat()
+        var lastTime = System.currentTimeMillis()
+        var lastIndex = gridState.firstVisibleItemIndex
 
-                isScrollingFast = when {
-                    velocity > 10f -> true
-                    velocity < 3f -> false
-                    else -> isScrollingFast
+        snapshotFlow { gridState.firstVisibleItemIndex to gridState.isScrollInProgress }
+            .collect { (index, isScrolling) ->
+                if (!isScrolling) {
+                    delay(180)
+                    isScrollingFast = false
+                } else {
+                    val now = System.currentTimeMillis()
+                    val dt = now - lastTime
+                    if (dt > 50) {
+                        val velocity = (kotlin.math.abs(index - lastIndex) * 1000f) / dt
+                        if (velocity > 15f) {
+                            isScrollingFast = true
+                        } else if (velocity < 5f) {
+                            isScrollingFast = false
+                        }
+                        lastTime = now
+                        lastIndex = index
+                    }
                 }
-
-                lastOffset = offset
-                lastIndex = index
-                lastTime = now
             }
     }
 
@@ -1970,7 +2049,7 @@ fun GalleryGridContent(
                     is GalleryGridItem.Media -> {
                         val mediaId = gridItem.item.id
                         val mediaItem = mediaMap[mediaId] ?: gridItem.item
-                        val baseModifier = if (deviceTier == DeviceTier.LOW) Modifier else Modifier.animateItem()
+                        val baseModifier = Modifier
 
                         ModernMediaGridTile(
                             modifier = baseModifier,
@@ -2011,18 +2090,8 @@ fun ModernMediaGridTile(
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
-    val animate = deviceTier != DeviceTier.LOW && !isScrollingFast
-    val animatedRadius = if (animate) {
-        animateDpAsState(if (isSelected) 16.dp else 12.dp, tween(120), label = "radius").value
-    } else {
-        if (isSelected) 16.dp else 12.dp
-    }
-
-    val scale = if (animate) {
-        animateFloatAsState(if (isSelected) 0.85f else 1f, tween(120), label = "scale").value
-    } else {
-        if (isSelected) 0.85f else 1f
-    }
+    val animatedRadius = if (isSelected) 16.dp else 12.dp
+    val scale = if (isSelected) 0.85f else 1f
 
     val context = LocalContext.current
 
@@ -2043,21 +2112,27 @@ fun ModernMediaGridTile(
                 }
             )
     ) {
-        val effectiveSize = if (isScrollingFast) (thumbSize * 0.6f).toInt().coerceAtLeast(120) else thumbSize
+        val effectiveSize = remember(thumbSize, isScrollingFast, deviceTier) {
+            if (isScrollingFast) {
+                (thumbSize * 0.55f).toInt().coerceIn(96, 240)
+            } else {
+                thumbSize.coerceIn(160, 480)
+            }
+        }
 
-        val request = remember(item.id, thumbSize, deviceTier) {
+        val request = remember(item.id, effectiveSize, deviceTier) {
             ImageRequest.Builder(context)
                 .data(item.uri)
                 .size(effectiveSize)
-                .memoryCacheKey("${item.id}_thumb_$thumbSize")
-                .diskCacheKey("${item.id}_thumb_$thumbSize")
+                .memoryCacheKey("${item.id}_thumb_$effectiveSize")
+                .diskCacheKey("${item.id}_thumb_$effectiveSize")
                 .bitmapConfig(if (deviceTier == DeviceTier.LOW) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
                 .memoryCachePolicy(CachePolicy.ENABLED)
                 .diskCachePolicy(if (isScrollingFast) CachePolicy.READ_ONLY else CachePolicy.ENABLED)
                 .networkCachePolicy(CachePolicy.DISABLED)
                 .precision(Precision.INEXACT)
                 .allowHardware(deviceTier != DeviceTier.LOW)
-                .crossfade(if (isScrollingFast) 0 else 80)
+                .crossfade(0)
                 .build()
         }
 
@@ -2641,7 +2716,6 @@ fun ZoomableImagePage(item: MediaItem, onTap: () -> Unit, onDismiss: () -> Unit)
                     .networkCachePolicy(CachePolicy.ENABLED)
                     .memoryCacheKey("full_${item.id}")
                     .memoryCachePolicy(CachePolicy.ENABLED)
-
                     .crossfade(false)
                     .error(android.R.drawable.ic_menu_report_image)
                     .build()

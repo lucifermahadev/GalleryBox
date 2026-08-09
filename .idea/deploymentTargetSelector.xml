@@ -48,7 +48,7 @@
       </SelectionState>
       <SelectionState runConfigName="main">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-08-08T08:46:39.824982400Z">
+        <DropdownSelection timestamp="2026-08-09T17:20:40.908009Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="Wireless" identifier="serviceName=adb-RZ8N619C0BZ-mX48Oa" />
