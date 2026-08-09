@@ -93,6 +93,7 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
         ).apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(MediaStore.MediaColumns.RELATIVE_PATH)
+                add(MediaStore.MediaColumns.VOLUME_NAME)
             } else {
                 add(MediaStore.Files.FileColumns.DATA)
             }
@@ -125,6 +126,7 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                 val bNameC = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.BUCKET_DISPLAY_NAME)
                 val durC = c.getColumnIndex(MediaStore.MediaColumns.DURATION)
                 val relC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH) else -1
+                val volC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME) else -1
                 val dataC = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) c.getColumnIndex(MediaStore.Files.FileColumns.DATA) else -1
                 val trashC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.IS_TRASHED) else -1
                 val wC = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.getColumnIndex(MediaStore.MediaColumns.WIDTH) else -1
@@ -183,7 +185,8 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
                             bucketName = c.getString(bNameC) ?: "Internal",
                             duration = if (isV && durC != -1) c.getLong(durC) else 0L,
                             width = if (wC != -1) c.getInt(wC) else 0,
-                            height = if (hC != -1) c.getInt(hC) else 0
+                            height = if (hC != -1) c.getInt(hC) else 0,
+                            volumeName = if (volC != -1) c.getString(volC) ?: "" else ""
                         )
                     )
                 }

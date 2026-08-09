@@ -14,6 +14,7 @@ import android.net.Uri
 import android.os.Build
 import android.text.format.Formatter
 import android.view.MotionEvent
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -372,8 +373,8 @@ fun rememberGridImageRequest(uri: Uri?, size: Int, isVideo: Boolean, deviceTier:
 fun SamsungFastScrollbar(
     gridState: LazyGridState,
     itemCount: Int,
-    labelForIndex: (Int) -> String,
     indexOffset: Int = 0,
+    deviceTier: DeviceTier = DeviceTier.HIGH,
     modifier: Modifier = Modifier
 ) {
     if (itemCount < 300) return
@@ -383,126 +384,73 @@ fun SamsungFastScrollbar(
     var isDragging by remember { mutableStateOf(false) }
     var trackHeightPx by remember { mutableFloatStateOf(0f) }
     var thumbOffsetPx by remember { mutableFloatStateOf(0f) }
-    var bubbleLabel by remember { mutableStateOf("") }
     var scrollJob by remember { mutableStateOf<Job?>(null) }
-
     var visible by remember { mutableStateOf(false) }
+    val currentItemCount by rememberUpdatedState(itemCount)
+
     LaunchedEffect(gridState.isScrollInProgress, isDragging) {
-        if (gridState.isScrollInProgress || isDragging) {
-            visible = true
-        } else {
-            delay(1200)
-            visible = false
-        }
+        if (gridState.isScrollInProgress || isDragging) visible = true
+        else { delay(1200); visible = false }
     }
 
-    LaunchedEffect(gridState, itemCount) {
+    LaunchedEffect(gridState) {
         snapshotFlow { gridState.firstVisibleItemIndex }.collect { index ->
             if (!isDragging && trackHeightPx > 0f) {
-                val adjusted = (index - indexOffset).coerceAtLeast(0)
-                val fraction = (adjusted.toFloat() / itemCount.coerceAtLeast(1)).coerceIn(0f, 1f)
-                thumbOffsetPx = fraction * trackHeightPx
+                val safeCount = currentItemCount.coerceAtLeast(1)
+                val adjusted = (index - indexOffset).coerceIn(0, safeCount - 1)
+                thumbOffsetPx = (adjusted.toFloat() / safeCount).coerceIn(0f, 1f) * trackHeightPx
             }
         }
     }
 
-    val thumbHeightDp = 40.dp
+    val thumbHeightDp = 44.dp
     val density = LocalDensity.current
 
     fun jumpTo(offsetY: Float) {
         val clamped = offsetY.coerceIn(0f, trackHeightPx)
         thumbOffsetPx = clamped
+        val safeCount = currentItemCount.coerceAtLeast(1)
         val fraction = if (trackHeightPx > 0f) clamped / trackHeightPx else 0f
-        val targetIndex = (fraction * itemCount).toInt().coerceIn(0, (itemCount - 1).coerceAtLeast(0))
-        bubbleLabel = labelForIndex(targetIndex)
+        val targetIndex = (fraction * safeCount).toInt().coerceIn(0, (safeCount - 1).coerceAtLeast(0))
         scrollJob?.cancel()
-        scrollJob = scope.launch { gridState.scrollToItem(targetIndex + indexOffset) }
+        scrollJob = scope.launch {
+            runCatching {
+                val maxTotal = (gridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                gridState.scrollToItem((targetIndex + indexOffset).coerceIn(0, maxTotal))
+            }
+        }
     }
 
-    AnimatedVisibility(visible = visible, enter = fadeIn(tween(120)), exit = fadeOut(tween(300)), modifier = modifier) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(if (deviceTier == DeviceTier.LOW) 60 else 120)),
+        exit = fadeOut(tween(if (deviceTier == DeviceTier.LOW) 120 else 300)),
+        modifier = modifier.zIndex(10f)
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxHeight()
-                .width(40.dp)
+                .width(44.dp)
                 .onGloballyPositioned { trackHeightPx = it.size.height.toFloat() }
-                .pointerInput(itemCount) {
+                .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { offset ->
                             isDragging = true
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             jumpTo(offset.y)
                         },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            jumpTo(change.position.y)
-                        },
-                        onDragEnd = {
-                            isDragging = false
-                            bubbleLabel = ""
-                        },
-                        onDragCancel = {
-                            isDragging = false
-                            bubbleLabel = ""
-                        }
+                        onDrag = { change, _ -> change.consume(); jumpTo(change.position.y) },
+                        onDragEnd = { isDragging = false },
+                        onDragCancel = { isDragging = false }
                     )
                 }
         ) {
-            if (isDragging && bubbleLabel.isNotEmpty()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.primary,
-                    shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp, topEnd = 4.dp, bottomEnd = 20.dp),
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .offset {
-                            IntOffset(
-                                x = -(with(density) { 96.dp.toPx() }).toInt(),
-                                y = (thumbOffsetPx - with(density) { 20.dp.toPx() })
-                                    .toInt()
-                                    .coerceAtLeast(0)
-                            )
-                        }
-                ) {
-                    Text(
-                        text = bubbleLabel,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    )
-                }
-            }
-
-            Box(
-                Modifier
-                    .align(Alignment.CenterEnd)
-                    .width(3.dp)
-                    .fillMaxHeight()
-                    .padding(vertical = 4.dp)
-                    .background(Color.Gray.copy(alpha = 0.15f), RoundedCornerShape(2.dp))
-            )
-
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .offset {
-                        IntOffset(
-                            x = 0,
-                            y = thumbOffsetPx
-                                .toInt()
-                                .coerceIn(
-                                    0,
-                                    (trackHeightPx - with(density) { thumbHeightDp.toPx() })
-                                        .toInt()
-                                        .coerceAtLeast(0)
-                                )
-                        )
-                    }
-                    .padding(end = 4.dp)
-                    .width(if (isDragging) 8.dp else 5.dp)
-                    .height(thumbHeightDp)
-                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(4.dp))
-            )
+            Box(Modifier.align(Alignment.CenterEnd).width(4.dp).fillMaxHeight().padding(vertical = 4.dp)
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f), RoundedCornerShape(3.dp)))
+            Box(Modifier.align(Alignment.TopEnd).offset {
+                IntOffset(0, thumbOffsetPx.toInt().coerceIn(0, (trackHeightPx - with(density) { thumbHeightDp.toPx() }).toInt().coerceAtLeast(0)))
+            }.padding(end = 3.dp).width(if (isDragging) 10.dp else 7.dp).height(thumbHeightDp)
+                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(6.dp)))
         }
     }
 }
@@ -612,11 +560,16 @@ fun AlbumScreen(
         }
         (sortedVirtualAlbums + sortedUserAlbums).toImmutableList()
     }
-
     val sdCardAlbums = remember(allMedia) {
-        allMedia.filter { it.path.startsWith("/storage/") && !it.path.startsWith("/storage/emulated/") && !it.path.startsWith("/storage/self/") }
-            .map { it.bucketId }
-            .toSet()
+        allMedia.filter { item ->
+            if (item.volumeName.isNotBlank()) {
+                item.volumeName != MediaStore.VOLUME_EXTERNAL_PRIMARY && item.volumeName != "external"
+            } else {
+                item.path.startsWith("/storage/") &&
+                        !item.path.startsWith("/storage/emulated/") &&
+                        !item.path.startsWith("/storage/self/")
+            }
+        }.map { it.bucketId }.toSet()
     }
 
     val dynamicList = remember { mutableStateListOf<Album>() }
@@ -765,8 +718,8 @@ fun AlbumScreen(
             bottomBar = {
                 AnimatedVisibility(
                     visible = isSelectionMode,
-                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                    exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+                    enter = if (deviceTier == DeviceTier.LOW) fadeIn(tween(80)) else slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                    exit = if (deviceTier == DeviceTier.LOW) fadeOut(tween(80)) else slideOutVertically(targetOffsetY = { it }) + fadeOut()
                 ) {
                     Surface(
                         modifier = Modifier
@@ -1482,8 +1435,8 @@ fun AlbumDetailScreen(
             bottomBar = {
                 AnimatedVisibility(
                     visible = isSelectionMode,
-                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                    exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+                    enter = if (deviceTier == DeviceTier.LOW) fadeIn(tween(80)) else slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                    exit = if (deviceTier == DeviceTier.LOW) fadeOut(tween(80)) else slideOutVertically(targetOffsetY = { it }) + fadeOut()
                 ) {
                     Surface(
                         modifier = Modifier
@@ -2079,7 +2032,7 @@ fun StatelessAlbumGrid(
         SamsungFastScrollbar(
             gridState = gridState,
             itemCount = dynamicList.size,
-            labelForIndex = { index -> dynamicList.getOrNull(index)?.name?.take(1)?.uppercase() ?: "" },
+            deviceTier = deviceTier,
             modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
         )
     }
@@ -2302,11 +2255,7 @@ fun StatelessMediaGrid(
             gridState = gridState,
             itemCount = mediaList.size,
             indexOffset = 1,
-            labelForIndex = { index ->
-                mediaList.getOrNull(index)?.let {
-                    monthYearFormatter.format(Date(it.dateAdded * 1000L))
-                } ?: ""
-            },
+            deviceTier = deviceTier,
             modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
         )
     }

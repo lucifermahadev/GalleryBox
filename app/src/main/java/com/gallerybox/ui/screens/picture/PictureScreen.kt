@@ -55,7 +55,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -77,6 +76,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -93,7 +93,6 @@ import coil.request.ImageRequest
 import coil.size.Precision
 import coil.size.Size
 import com.gallerybox.data.MediaItem
-import com.gallerybox.ui.screens.album.formatDuration
 import com.gallerybox.viewmodel.GalleryEvent
 import com.gallerybox.viewmodel.GalleryViewModel
 import com.gallerybox.viewmodel.GalleryViewerState
@@ -110,7 +109,6 @@ import java.util.ArrayList
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 enum class UiMediaFilter(val label: String) {
     ALL("All"),
@@ -156,6 +154,27 @@ fun getDeviceTier(context: Context): DeviceTier {
     }
 }
 
+fun formatDuration(durationMs: Long): String {
+    val t = durationMs / 1000
+    val m = (t / 60) % 60
+    val h = t / 3600
+    val s = t % 60
+    return if (h > 0) {
+        String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+    } else {
+        String.format(Locale.US, "%d:%02d", m, s)
+    }
+}
+
+fun Context.findActivity(): Activity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is Activity) return context
+        context = context.baseContext
+    }
+    return null
+}
+
 private val metadataFormatter by lazy { SimpleDateFormat("EEEE, MMMM dd, yyyy 'at' hh a", Locale.getDefault()) }
 private val shortDateFormatter by lazy { SimpleDateFormat("MMMM dd, yyyy", Locale.getDefault()) }
 
@@ -178,10 +197,10 @@ fun SamsungFastScrollbar(
     gridState: LazyGridState,
     pagedMedia: LazyPagingItems<GalleryGridItem>,
     indexOffset: Int = 0,
+    deviceTier: DeviceTier = DeviceTier.HIGH,
     modifier: Modifier = Modifier
 ) {
-    val itemCount = pagedMedia.itemCount
-    if (itemCount < 300) return
+    if (pagedMedia.itemCount < 300) return
 
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
@@ -190,34 +209,30 @@ fun SamsungFastScrollbar(
     var thumbOffsetPx by remember { mutableFloatStateOf(0f) }
     var bubbleLabel by remember { mutableStateOf("") }
     var scrollJob by remember { mutableStateOf<Job?>(null) }
-
     var visible by remember { mutableStateOf(false) }
 
     LaunchedEffect(gridState.isScrollInProgress, isDragging) {
-        if (gridState.isScrollInProgress || isDragging) {
-            visible = true
-        } else {
-            delay(1200)
-            visible = false
-        }
+        if (gridState.isScrollInProgress || isDragging) visible = true
+        else { delay(1200); visible = false }
     }
 
-    LaunchedEffect(gridState, itemCount) {
+    LaunchedEffect(gridState) {
         snapshotFlow { gridState.firstVisibleItemIndex }.collect { index ->
             if (!isDragging && trackHeightPx > 0f) {
-                val adjusted = (index - indexOffset).coerceAtLeast(0)
-                val fraction = (adjusted.toFloat() / itemCount.coerceAtLeast(1)).coerceIn(0f, 1f)
-                thumbOffsetPx = fraction * trackHeightPx
+                val safeCount = pagedMedia.itemCount.coerceAtLeast(1)
+                val adjusted = (index - indexOffset).coerceIn(0, safeCount - 1)
+                thumbOffsetPx = (adjusted.toFloat() / safeCount).coerceIn(0f, 1f) * trackHeightPx
             }
         }
     }
 
-    val thumbHeightDp = 40.dp
+    val thumbHeightDp = 44.dp
     val density = LocalDensity.current
 
     fun labelForIndex(index: Int): String {
-        for (i in index downTo maxOf(0, index - 60)) {
-            (pagedMedia.peek(i) as? GalleryGridItem.Header)?.let { return it.title }
+        val safeIndex = index.coerceIn(0, (pagedMedia.itemCount - 1).coerceAtLeast(0))
+        for (i in safeIndex downTo maxOf(0, safeIndex - 60)) {
+            (runCatching { pagedMedia.peek(i) }.getOrNull() as? GalleryGridItem.Header)?.let { return it.title }
         }
         return ""
     }
@@ -225,98 +240,64 @@ fun SamsungFastScrollbar(
     fun jumpTo(offsetY: Float) {
         val clamped = offsetY.coerceIn(0f, trackHeightPx)
         thumbOffsetPx = clamped
+        val safeCount = pagedMedia.itemCount.coerceAtLeast(1)
         val fraction = if (trackHeightPx > 0f) clamped / trackHeightPx else 0f
-        val targetIndex = (fraction * itemCount).toInt().coerceIn(0, (itemCount - 1).coerceAtLeast(0))
+        val targetIndex = (fraction * safeCount).toInt().coerceIn(0, (safeCount - 1).coerceAtLeast(0))
         bubbleLabel = labelForIndex(targetIndex)
         scrollJob?.cancel()
-        scrollJob = scope.launch { gridState.scrollToItem(targetIndex + indexOffset) }
+        scrollJob = scope.launch {
+            runCatching {
+                val maxTotal = (gridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                gridState.scrollToItem((targetIndex + indexOffset).coerceIn(0, maxTotal))
+            }
+        }
     }
 
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(120)),
-        exit = fadeOut(tween(300)),
-        modifier = modifier
+        enter = fadeIn(tween(if (deviceTier == DeviceTier.LOW) 60 else 120)),
+        exit = fadeOut(tween(if (deviceTier == DeviceTier.LOW) 120 else 300)),
+        modifier = modifier.zIndex(10f)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxHeight()
-                .width(40.dp)
+                .width(44.dp)
                 .onGloballyPositioned { trackHeightPx = it.size.height.toFloat() }
-                .pointerInput(itemCount) {
+                .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { offset ->
                             isDragging = true
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             jumpTo(offset.y)
                         },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            jumpTo(change.position.y)
-                        },
-                        onDragEnd = {
-                            isDragging = false
-                            bubbleLabel = ""
-                        },
-                        onDragCancel = {
-                            isDragging = false
-                            bubbleLabel = ""
-                        }
+                        onDrag = { change, _ -> change.consume(); jumpTo(change.position.y) },
+                        onDragEnd = { isDragging = false; bubbleLabel = "" },
+                        onDragCancel = { isDragging = false; bubbleLabel = "" }
                     )
                 }
         ) {
             if (isDragging && bubbleLabel.isNotEmpty()) {
                 Surface(
                     color = MaterialTheme.colorScheme.primary,
-                    shape = RoundedCornerShape(
-                        topStart = 20.dp,
-                        bottomStart = 20.dp,
-                        topEnd = 4.dp,
-                        bottomEnd = 20.dp
-                    ),
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .offset {
-                            IntOffset(
-                                x = -(with(density) { 96.dp.toPx() }).toInt(),
-                                y = (thumbOffsetPx - with(density) { 20.dp.toPx() }).toInt().coerceAtLeast(0)
-                            )
-                        }
-                ) {
-                    Text(
-                        text = bubbleLabel,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    )
-                }
-            }
-
-            Box(
-                Modifier
-                    .align(Alignment.CenterEnd)
-                    .width(3.dp)
-                    .fillMaxHeight()
-                    .padding(vertical = 4.dp)
-                    .background(Color.Gray.copy(alpha = 0.15f), RoundedCornerShape(2.dp))
-            )
-
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .offset {
+                    shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp, topEnd = 4.dp, bottomEnd = 20.dp),
+                    modifier = Modifier.align(Alignment.TopStart).offset {
                         IntOffset(
-                            x = 0,
-                            y = thumbOffsetPx.toInt().coerceIn(0, (trackHeightPx - with(density) { thumbHeightDp.toPx() }).toInt().coerceAtLeast(0))
+                            x = -(with(density) { 96.dp.toPx() }).toInt(),
+                            y = (thumbOffsetPx - with(density) { 20.dp.toPx() }).toInt().coerceAtLeast(0)
                         )
                     }
-                    .padding(end = 4.dp)
-                    .width(if (isDragging) 8.dp else 5.dp)
-                    .height(thumbHeightDp)
-                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(4.dp))
-            )
+                ) {
+                    Text(bubbleLabel, color = MaterialTheme.colorScheme.onPrimary, fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                }
+            }
+            Box(Modifier.align(Alignment.CenterEnd).width(4.dp).fillMaxHeight().padding(vertical = 4.dp)
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f), RoundedCornerShape(3.dp)))
+            Box(Modifier.align(Alignment.TopEnd).offset {
+                IntOffset(0, thumbOffsetPx.toInt().coerceIn(0, (trackHeightPx - with(density) { thumbHeightDp.toPx() }).toInt().coerceAtLeast(0)))
+            }.padding(end = 3.dp).width(if (isDragging) 10.dp else 7.dp).height(thumbHeightDp)
+                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(6.dp)))
         }
     }
 }
@@ -546,8 +527,8 @@ fun PictureScreen(
                 if (!isSelectionMode && showScrollToTop) {
                     AnimatedVisibility(
                         visible = true,
-                        enter = fadeIn() + scaleIn(),
-                        exit = fadeOut() + scaleOut()
+                        enter = if (deviceTier == DeviceTier.LOW) fadeIn(tween(80)) else fadeIn() + scaleIn(),
+                        exit = if (deviceTier == DeviceTier.LOW) fadeOut(tween(80)) else fadeOut() + scaleOut()
                     ) {
                         FloatingActionButton(
                             onClick = { scope.launch { gridState.scrollToItem(0) } },
@@ -573,7 +554,14 @@ fun PictureScreen(
                 } else if (pagedMedia.itemCount == 0) {
                     EmptyMediaOverlay(onCameraClick = onNavigateToCamera, onScanClick = onNavigateToScan)
                 } else {
-                    AnimatedContent(targetState = activeFilter, label = "filter_transition") { targetFilter: UiMediaFilter ->
+                    AnimatedContent(
+                        targetState = activeFilter,
+                        transitionSpec = {
+                            if (deviceTier == DeviceTier.LOW) fadeIn(tween(0)) togetherWith fadeOut(tween(0))
+                            else fadeIn() togetherWith fadeOut()
+                        },
+                        label = "filter_transition"
+                    ) { targetFilter: UiMediaFilter ->
                         GalleryGridContent(
                             pagedMedia = pagedMedia,
                             gridState = gridState,
@@ -627,6 +615,7 @@ fun PictureScreen(
                         gridState = gridState,
                         pagedMedia = pagedMedia,
                         indexOffset = 1,
+                        deviceTier = deviceTier,
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
                             .fillMaxHeight()
@@ -700,8 +689,8 @@ fun PictureScreen(
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             AnimatedVisibility(
                 visible = isSelectionMode,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+                enter = if (deviceTier == DeviceTier.LOW) fadeIn(tween(80)) else slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = if (deviceTier == DeviceTier.LOW) fadeOut(tween(80)) else slideOutVertically(targetOffsetY = { it }) + fadeOut()
             ) {
                 Surface(
                     modifier = Modifier
@@ -827,6 +816,751 @@ fun BottomBarActionItem(
                 maxLines = 1
             )
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shadowElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilledIconButton(
+                onClick = onClose,
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Spacer(Modifier.width(14.dp))
+            Surface(
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    TextField(
+                        value = query,
+                        onValueChange = onQueryChange,
+                        modifier = Modifier.weight(1f),
+                        placeholder = {
+                            Text(
+                                "Search albums, photos...",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyLarge,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            cursorColor = MaterialTheme.colorScheme.primary
+                        )
+                    )
+                    if (query.isNotEmpty()) {
+                        FilledIconButton(
+                            onClick = { onQueryChange("") },
+                            modifier = Modifier.size(34.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Clear",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EmptyMediaOverlay(onCameraClick: () -> Unit = {}, onScanClick: () -> Unit = {}) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(112.dp)
+                    .clip(CircleShape)
+                    .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.PhotoLibrary,
+                    contentDescription = null,
+                    modifier = Modifier.size(58.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(Modifier.height(28.dp))
+            Text(
+                text = "No Photos Yet",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "Capture moments or scan your device.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(34.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onCameraClick,
+                    modifier = Modifier
+                        .height(58.dp)
+                        .padding(horizontal = 8.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    elevation = ButtonDefaults.buttonElevation(4.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CameraAlt,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Open Camera", fontWeight = FontWeight.Bold)
+                }
+                FilledTonalButton(
+                    onClick = onScanClick,
+                    modifier = Modifier
+                        .height(58.dp)
+                        .padding(horizontal = 8.dp),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Scan Device", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ModernSortSheet(activeSort: PhotoSort, onDismiss: () -> Unit, onSortSelected: (PhotoSort) -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = {
+            BottomSheetDefaults.DragHandle(
+                width = 48.dp,
+                height = 4.dp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+            )
+        }
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 34.dp)) {
+            Row(
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Sort,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = "Sort Media",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Arrange photos and videos",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            PhotoSort.entries.forEach { option ->
+                val isSelected = activeSort == option
+                val sortLabel = when (option) {
+                    PhotoSort.DateDesc -> "Newest First"
+                    PhotoSort.DateAsc -> "Oldest First"
+                    PhotoSort.NameAsc -> "Name (A → Z)"
+                    PhotoSort.NameDesc -> "Name (Z → A)"
+                    PhotoSort.SizeDesc -> "Largest First"
+                }
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { onSortSelected(option) },
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    tonalElevation = if (isSelected) 2.dp else 0.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Text(
+                            text = sortLabel,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.weight(1f))
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Rounded.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ModernGridSheet(currentColumns: Int, max: Int = 8, onDismiss: () -> Unit, onUpdate: (Int) -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp, top = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.GridView,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = "Grid Layout",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Choose columns per row",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(4),
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(max) { index ->
+                    val col = index + 1
+                    val isSelected = currentColumns == col
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .aspectRatio(1f)
+                            .clickable {
+                                onUpdate(col)
+                                onDismiss()
+                            }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = col.toString(),
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ModernMoveToTrashSheet(count: Int, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.error.copy(alpha=0.2f), MaterialTheme.colorScheme.error.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Delete,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = "Move to Trash",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "$count item(s) selected",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = "Items will be moved to the Trash. You can restore them within 30 days.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+            Spacer(Modifier.height(32.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Cancel", fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = onConfirm,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Move to Trash", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ModernTopBar(title: String, scrollBehavior: TopAppBarScrollBehavior, onSearchClick: () -> Unit, onMenuAction: (String) -> Unit) {
+    var showMenu by remember { mutableStateOf(false) }
+    CenterAlignedTopAppBar(
+        title = {
+            Text(
+                text = title,
+                maxLines = 1,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        },
+        actions = {
+            IconButton(onClick = onSearchClick) {
+                Icon(
+                    imageVector = Icons.Outlined.Search,
+                    contentDescription = "Search",
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Box {
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(
+                        imageVector = Icons.Rounded.MoreVert,
+                        contentDescription = "More",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    modifier = Modifier.clip(RoundedCornerShape(12.dp))
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Select All", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("select_all"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.SelectAll, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Launch Camera", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("camera"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.PhotoCamera, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Scan Library", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("scan"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.ImageSearch, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Start Slideshow", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("slideshow"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.Slideshow, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("View Duplicates", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("duplicates"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.ContentCopy, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Grid Size", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("grid"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Rounded.GridView, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Sort", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("sort"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Trash", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("trash"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.Delete, contentDescription = null) }
+                    )
+                }
+            }
+        },
+        scrollBehavior = scrollBehavior,
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = Color.Transparent)
+    )
+}
+
+@Composable
+fun ModernDateHeader(modifier: Modifier = Modifier, title: String, onSelectAllForDate: () -> Unit = {}) {
+    Text(
+        text = title,
+        fontSize = 16.sp,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onSurface,
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { onSelectAllForDate() }
+            .padding(horizontal = 14.dp, vertical = 14.dp)
+    )
+}
+
+@Composable
+fun ModernFilterRow(filters: List<UiMediaFilter>, activeFilter: UiMediaFilter, onFilterSelected: (UiMediaFilter) -> Unit) {
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        itemsIndexed(items = filters, key = { _, filter -> filter.name }) { _, filter ->
+            val isSelected = activeFilter == filter
+            Surface(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .clickable { onFilterSelected(filter) },
+                shape = RoundedCornerShape(50),
+                color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = if (isSelected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface
+            ) {
+                Text(
+                    text = filter.label,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val dateStr = remember(item) { metadataFormatter.format(Date(item.dateAdded * 1000)) }
+    val formattedSize = remember(item) { Formatter.formatFileSize(context, item.size) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = {
+            BottomSheetDefaults.DragHandle(
+                width = 48.dp,
+                height = 4.dp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+            )
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = "Media Details",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Information & metadata",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    MetadataRow(icon = Icons.Outlined.Title, label = "Name", value = item.name)
+                    MetadataRow(icon = Icons.Outlined.Folder, label = "Path", value = item.path)
+                    MetadataRow(icon = Icons.Outlined.CalendarToday, label = "Date", value = dateStr)
+                    MetadataRow(icon = Icons.Outlined.Storage, label = "Size", value = formattedSize)
+                    if (item.width > 0 && item.height > 0) {
+                        MetadataRow(icon = Icons.Outlined.AspectRatio, label = "Resolution", value = "${item.width} × ${item.height}")
+                    }
+                    if (item.isVideo && item.duration > 0L) {
+                        MetadataRow(icon = Icons.Outlined.Timer, label = "Duration", value = formatDuration(item.duration))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MetadataRow(icon: ImageVector, label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+fun ActionItem(icon: ImageVector, label: String, isDestructive: Boolean = false, onClick: () -> Unit) {
+    val contentColor = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+    ElevatedCard(
+        modifier = Modifier
+            .width(86.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(20.dp),
+        elevation = CardDefaults.elevatedCardElevation(3.dp),
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(CircleShape)
+                    .background(contentColor.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = contentColor,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = contentColor,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
+fun SamsungFilterChip(selected: Boolean, label: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = if (selected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 
@@ -1907,6 +2641,7 @@ fun ZoomableImagePage(item: MediaItem, onTap: () -> Unit, onDismiss: () -> Unit)
                     .networkCachePolicy(CachePolicy.ENABLED)
                     .memoryCacheKey("full_${item.id}")
                     .memoryCachePolicy(CachePolicy.ENABLED)
+
                     .crossfade(false)
                     .error(android.R.drawable.ic_menu_report_image)
                     .build()
@@ -1916,790 +2651,5 @@ fun ZoomableImagePage(item: MediaItem, onTap: () -> Unit, onDismiss: () -> Unit)
             contentScale = ContentScale.Fit,
             modifier = Modifier.fillMaxSize()
         )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    val dateStr = remember(item) { metadataFormatter.format(Date(item.dateAdded * 1000)) }
-    val formattedSize = remember(item) { Formatter.formatFileSize(context, item.size) }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        dragHandle = {
-            BottomSheetDefaults.DragHandle(
-                width = 48.dp,
-                height = 4.dp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-            )
-        }
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 32.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Info,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text(
-                        text = "Media Details",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "Information & metadata",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            Spacer(Modifier.height(24.dp))
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    MetadataRow(icon = Icons.Outlined.Title, label = "Name", value = item.name)
-                    MetadataRow(icon = Icons.Outlined.Folder, label = "Path", value = item.path)
-                    MetadataRow(icon = Icons.Outlined.CalendarToday, label = "Date", value = dateStr)
-                    MetadataRow(icon = Icons.Outlined.Storage, label = "Size", value = formattedSize)
-                    if (item.width > 0 && item.height > 0) {
-                        MetadataRow(icon = Icons.Outlined.AspectRatio, label = "Resolution", value = "${item.width} × ${item.height}")
-                    }
-                    if (item.isVideo && item.duration > 0L) {
-                        MetadataRow(icon = Icons.Outlined.Timer, label = "Duration", value = formatDuration(item.duration))
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun MetadataRow(icon: ImageVector, label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.Top
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp)
-            )
-        }
-        Spacer(Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = value,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.Medium
-            )
-        }
-    }
-}
-
-@Composable
-fun ActionItem(icon: ImageVector, label: String, isDestructive: Boolean = false, onClick: () -> Unit) {
-    val contentColor = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-    ElevatedCard(
-        modifier = Modifier
-            .width(86.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(20.dp),
-        elevation = CardDefaults.elevatedCardElevation(3.dp),
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(46.dp)
-                    .clip(CircleShape)
-                    .background(contentColor.copy(alpha = 0.12f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = label,
-                    tint = contentColor,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = contentColor,
-                maxLines = 1
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ModernSortSheet(activeSort: PhotoSort, onDismiss: () -> Unit, onSortSelected: (PhotoSort) -> Unit) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        dragHandle = {
-            BottomSheetDefaults.DragHandle(
-                width = 48.dp,
-                height = 4.dp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-            )
-        }
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 34.dp)) {
-            Row(
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Sort,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text(
-                        text = "Sort Media",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "Arrange photos and videos",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-            PhotoSort.entries.forEach { option ->
-                val isSelected = activeSort == option
-                val sortLabel = when (option) {
-                    PhotoSort.DateDesc -> "Newest First"
-                    PhotoSort.DateAsc -> "Oldest First"
-                    PhotoSort.NameAsc -> "Name (A → Z)"
-                    PhotoSort.NameDesc -> "Name (Z → A)"
-                    PhotoSort.SizeDesc -> "Largest First"
-                }
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .clickable { onSortSelected(option) },
-                    shape = RoundedCornerShape(20.dp),
-                    color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
-                    tonalElevation = if (isSelected) 2.dp else 0.dp
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(CircleShape)
-                                .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked,
-                                contentDescription = null,
-                                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        Spacer(Modifier.width(16.dp))
-                        Text(
-                            text = sortLabel,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(Modifier.weight(1f))
-                        if (isSelected) {
-                            Icon(
-                                imageVector = Icons.Rounded.CheckCircle,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ModernGridSheet(currentColumns: Int, max: Int = 8, onDismiss: () -> Unit, onUpdate: (Int) -> Unit) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        dragHandle = {
-            BottomSheetDefaults.DragHandle(
-                width = 48.dp,
-                height = 4.dp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-            )
-        }
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 32.dp, top = 8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.GridView,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text(
-                        text = "Grid Layout",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "Choose columns per row",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            Spacer(Modifier.height(24.dp))
-
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(4),
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(max) { index ->
-                    val col = index + 1
-                    val isSelected = currentColumns == col
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
-                        contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier
-                            .aspectRatio(1f)
-                            .clickable {
-                                onUpdate(col)
-                                onDismiss()
-                            }
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text(
-                                text = col.toString(),
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ModernDateHeader(modifier: Modifier = Modifier, title: String, onSelectAllForDate: () -> Unit = {}) {
-    Text(
-        text = title,
-        fontSize = 16.sp,
-        fontWeight = FontWeight.Bold,
-        color = MaterialTheme.colorScheme.onSurface,
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable { onSelectAllForDate() }
-            .padding(horizontal = 14.dp, vertical = 14.dp)
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ModernTopBar(title: String, scrollBehavior: TopAppBarScrollBehavior, onSearchClick: () -> Unit, onMenuAction: (String) -> Unit) {
-    var showMenu by remember { mutableStateOf(false) }
-    CenterAlignedTopAppBar(
-        title = {
-            Text(
-                text = title,
-                maxLines = 1,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        },
-        actions = {
-            IconButton(onClick = onSearchClick) {
-                Icon(
-                    imageVector = Icons.Outlined.Search,
-                    contentDescription = "Search",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Box {
-                IconButton(onClick = { showMenu = true }) {
-                    Icon(
-                        imageVector = Icons.Rounded.MoreVert,
-                        contentDescription = "More",
-                        tint = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-                DropdownMenu(
-                    expanded = showMenu,
-                    onDismissRequest = { showMenu = false },
-                    modifier = Modifier.clip(RoundedCornerShape(12.dp))
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Select All", color = MaterialTheme.colorScheme.onSurface) },
-                        onClick = { onMenuAction("select_all"); showMenu = false },
-                        leadingIcon = { Icon(imageVector = Icons.Outlined.SelectAll, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Launch Camera", color = MaterialTheme.colorScheme.onSurface) },
-                        onClick = { onMenuAction("camera"); showMenu = false },
-                        leadingIcon = { Icon(imageVector = Icons.Outlined.PhotoCamera, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Scan Library", color = MaterialTheme.colorScheme.onSurface) },
-                        onClick = { onMenuAction("scan"); showMenu = false },
-                        leadingIcon = { Icon(imageVector = Icons.Outlined.ImageSearch, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Start Slideshow", color = MaterialTheme.colorScheme.onSurface) },
-                        onClick = { onMenuAction("slideshow"); showMenu = false },
-                        leadingIcon = { Icon(imageVector = Icons.Outlined.Slideshow, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("View Duplicates", color = MaterialTheme.colorScheme.onSurface) },
-                        onClick = { onMenuAction("duplicates"); showMenu = false },
-                        leadingIcon = { Icon(imageVector = Icons.Outlined.ContentCopy, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Grid Size", color = MaterialTheme.colorScheme.onSurface) },
-                        onClick = { onMenuAction("grid"); showMenu = false },
-                        leadingIcon = { Icon(imageVector = Icons.Rounded.GridView, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Sort", color = MaterialTheme.colorScheme.onSurface) },
-                        onClick = { onMenuAction("sort"); showMenu = false },
-                        leadingIcon = { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Trash", color = MaterialTheme.colorScheme.onSurface) },
-                        onClick = { onMenuAction("trash"); showMenu = false },
-                        leadingIcon = { Icon(imageVector = Icons.Outlined.Delete, contentDescription = null) }
-                    )
-                }
-            }
-        },
-        scrollBehavior = scrollBehavior,
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, scrolledContainerColor = Color.Transparent)
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shadowElevation = 2.dp,
-        color = MaterialTheme.colorScheme.surface
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            FilledIconButton(
-                onClick = onClose,
-                colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
-            }
-            Spacer(Modifier.width(14.dp))
-            Surface(
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(28.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    TextField(
-                        value = query,
-                        onValueChange = onQueryChange,
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("Search photos...", color = MaterialTheme.colorScheme.onSurfaceVariant) },
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyLarge,
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
-                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
-                            cursorColor = MaterialTheme.colorScheme.primary
-                        )
-                    )
-                    if (query.isNotEmpty()) {
-                        FilledIconButton(
-                            onClick = { onQueryChange("") },
-                            modifier = Modifier.size(34.dp),
-                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Close,
-                                contentDescription = "Clear",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun MediaSelectionTopBar(selectedCount: Int, isAllSelected: Boolean, onClose: () -> Unit, onSelectAll: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shadowElevation = 2.dp,
-        color = MaterialTheme.colorScheme.surface
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(vertical = 12.dp)
-        ) {
-            Box(modifier = Modifier.fillMaxWidth()) {
-                IconButton(
-                    onClick = onClose,
-                    modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .padding(start = 8.dp)
-                ) {
-                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close")
-                }
-                Text(
-                    text = "$selectedCount selected",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-                TextButton(
-                    onClick = onSelectAll,
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .padding(end = 8.dp)
-                ) {
-                    Text(
-                        text = if (isAllSelected) "Deselect All" else "Select All",
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ModernFilterRow(filters: List<UiMediaFilter>, activeFilter: UiMediaFilter, onFilterSelected: (UiMediaFilter) -> Unit) {
-    LazyRow(
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        itemsIndexed(items = filters, key = { _, filter -> filter.name }) { _, filter ->
-            val isSelected = activeFilter == filter
-            Surface(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .clickable { onFilterSelected(filter) },
-                shape = RoundedCornerShape(50),
-                color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHigh,
-                contentColor = if (isSelected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface
-            ) {
-                Text(
-                    text = filter.label,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun EmptyMediaOverlay(onCameraClick: () -> Unit = {}, onScanClick: () -> Unit = {}) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .size(112.dp)
-                    .clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.PhotoLibrary,
-                    contentDescription = null,
-                    modifier = Modifier.size(58.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-            Spacer(Modifier.height(28.dp))
-            Text(
-                text = "No Photos Yet",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = "Capture moments or scan your device.",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
-            Spacer(Modifier.height(34.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
-                    onClick = onCameraClick,
-                    modifier = Modifier
-                        .height(58.dp)
-                        .padding(horizontal = 8.dp),
-                    shape = RoundedCornerShape(20.dp),
-                    elevation = ButtonDefaults.buttonElevation(4.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.CameraAlt,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Open Camera", fontWeight = FontWeight.Bold)
-                }
-                FilledTonalButton(
-                    onClick = onScanClick,
-                    modifier = Modifier
-                        .height(58.dp)
-                        .padding(horizontal = 8.dp),
-                    shape = RoundedCornerShape(20.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Scan Device", fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ModernMoveToTrashSheet(count: Int, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
-        dragHandle = {
-            BottomSheetDefaults.DragHandle(
-                width = 48.dp,
-                height = 4.dp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-            )
-        }
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 32.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.error.copy(alpha=0.2f), MaterialTheme.colorScheme.error.copy(alpha=0.05f)))),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Delete,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text(
-                        text = "Move to Trash",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "$count item(s) selected",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            Spacer(Modifier.height(24.dp))
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Info,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        text = "Items will be moved to the Trash. You can restore them within 30 days.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        lineHeight = 20.sp
-                    )
-                }
-            }
-            Spacer(Modifier.height(32.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                FilledTonalButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(52.dp),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Text("Cancel", fontWeight = FontWeight.Bold)
-                }
-                Button(
-                    onClick = onConfirm,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(52.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Move to Trash", fontWeight = FontWeight.Bold)
-                }
-            }
-        }
     }
 }

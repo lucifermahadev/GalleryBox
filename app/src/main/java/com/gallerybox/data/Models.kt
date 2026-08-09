@@ -108,7 +108,8 @@ data class MediaItem(
     val bucketId: String,
     val bucketName: String,
     val isFavorite: Boolean = false,
-    val isHidden: Boolean = false
+    val isHidden: Boolean = false,
+    val volumeName: String = ""
 ) {
     val dateHeader: String
         get() = try {
