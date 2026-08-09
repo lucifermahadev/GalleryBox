@@ -56,6 +56,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -2112,12 +2113,8 @@ fun ModernMediaGridTile(
                 }
             )
     ) {
-        val effectiveSize = remember(thumbSize, isScrollingFast, deviceTier) {
-            if (isScrollingFast) {
-                (thumbSize * 0.55f).toInt().coerceIn(96, 240)
-            } else {
-                thumbSize.coerceIn(160, 480)
-            }
+        val effectiveSize = remember(thumbSize, deviceTier) {
+            thumbSize.coerceIn(160, 480)
         }
 
         val request = remember(item.id, effectiveSize, deviceTier) {
@@ -2128,23 +2125,22 @@ fun ModernMediaGridTile(
                 .diskCacheKey("${item.id}_thumb_$effectiveSize")
                 .bitmapConfig(if (deviceTier == DeviceTier.LOW) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
                 .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(if (isScrollingFast) CachePolicy.READ_ONLY else CachePolicy.ENABLED)
+                .diskCachePolicy(CachePolicy.ENABLED)
                 .networkCachePolicy(CachePolicy.DISABLED)
                 .precision(Precision.INEXACT)
                 .allowHardware(deviceTier != DeviceTier.LOW)
-                .crossfade(0)
+                .crossfade(120)
                 .build()
         }
 
         AsyncImage(
             model = request,
-            placeholder = null,
+            placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceContainerHighest),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             filterQuality = FilterQuality.Low,
             modifier = Modifier.fillMaxSize()
         )
-
         if (item.isVideo) {
             Box(
                 modifier = Modifier

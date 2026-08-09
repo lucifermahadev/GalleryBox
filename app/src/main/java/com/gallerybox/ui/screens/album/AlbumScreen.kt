@@ -60,6 +60,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -2631,19 +2632,21 @@ private fun OptimizedAlbumTile(
                         }
                     }
                 } else {
-                    val request = remember(actualCoverUri, thumbSize, deviceTier) {
+                    val clampedSize = remember(thumbSize) { thumbSize.coerceIn(160, 480) }
+
+                    val request = remember(actualCoverUri, clampedSize, deviceTier) {
                         ImageRequest.Builder(context)
                             .data(actualCoverUri)
-                            .size(thumbSize.coerceIn(160, 480))
-                            .memoryCacheKey("${actualCoverUri}_thumb_$thumbSize")
-                            .diskCacheKey("${actualCoverUri}_thumb_$thumbSize")
+                            .size(clampedSize)
+                            .memoryCacheKey("${actualCoverUri}_thumb_$clampedSize")
+                            .diskCacheKey("${actualCoverUri}_thumb_$clampedSize")
                             .bitmapConfig(if (deviceTier == DeviceTier.LOW) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
                             .memoryCachePolicy(CachePolicy.ENABLED)
                             .diskCachePolicy(CachePolicy.ENABLED)
                             .networkCachePolicy(CachePolicy.DISABLED)
                             .precision(Precision.INEXACT)
                             .allowHardware(deviceTier != DeviceTier.LOW)
-                            .crossfade(0)
+                            .crossfade(120)
                             .build()
                     }
                     AsyncImage(
@@ -2651,6 +2654,7 @@ private fun OptimizedAlbumTile(
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         filterQuality = FilterQuality.Low,
+                        placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceContainerHighest),
                         modifier = Modifier.fillMaxSize()
                     )
                     Box(
