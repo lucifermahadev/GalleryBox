@@ -98,6 +98,7 @@ fun StoriesScreen(
     val context = LocalContext.current
     val mediaMap by viewModel.mediaMap.collectAsState()
 
+    // Sync media map changes securely to the StoryViewModel
     LaunchedEffect(mediaMap) {
         storyViewModel.updateMediaMap(mediaMap)
     }
@@ -185,7 +186,8 @@ fun StoriesScreen(
     }
 
     BackHandler(enabled = isSelectionMode) {
-        isSelectionMode = false; selectedIds = emptySet()
+        isSelectionMode = false
+        selectedIds = emptySet()
     }
 
     SharedTransitionLayout {
@@ -203,7 +205,11 @@ fun StoriesScreen(
                             Surface(shadowElevation = 2.dp, color = MaterialTheme.colorScheme.surface) {
                                 TopAppBar(
                                     title = { Text("${selectedIds.size} selected", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold) },
-                                    navigationIcon = { IconButton(onClick = { isSelectionMode = false; selectedIds = emptySet() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Close") } },
+                                    navigationIcon = {
+                                        IconButton(onClick = { isSelectionMode = false; selectedIds = emptySet() }) {
+                                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Close")
+                                        }
+                                    },
                                     actions = {
                                         TextButton(onClick = { if (selectedIds.isNotEmpty()) showNameDialog = true }) {
                                             Text("Create", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
@@ -223,7 +229,6 @@ fun StoriesScreen(
                                         }
                                     },
                                     actions = {
-                                        // Daily Notification Toggle Button
                                         IconButton(onClick = toggleNotification) {
                                             Icon(
                                                 imageVector = if (isNotificationEnabled) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
@@ -403,6 +408,7 @@ fun StoryCard(
         animationSpec = spring(dampingRatio = 0.7f, stiffness = 400f),
         label = "StoryCardScale"
     )
+
     val videoCount = story.items.count { it.isVideo }
     val daysAgo = ((System.currentTimeMillis() - story.items.first().dateAdded * 1000L) / 86400000L).coerceAtLeast(0)
     val timeStr = if (daysAgo == 0L) "Today" else if (daysAgo == 1L) "Yesterday" else "$daysAgo days ago"
@@ -495,8 +501,6 @@ fun StoryPlayer(
     var pressTime by remember { mutableLongStateOf(0L) }
     var pressPosition by remember { mutableStateOf(Offset.Zero) }
 
-    // Single source of truth for advancing/rewinding — protects against
-    // an auto-advance (onComplete) and a manual tap firing on the same beat.
     var lastAdvanceTime by remember { mutableLongStateOf(0L) }
     val ADVANCE_LOCK_MS = 350L
 
