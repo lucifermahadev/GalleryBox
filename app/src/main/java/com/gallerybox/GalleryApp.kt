@@ -137,6 +137,6 @@ class MediaStoreThumbnailFetcher(
 
     companion object {
         private const val DEFAULT_THUMB_SIZE = 256
-        private val thumbnailSemaphore = Semaphore(permits = 4)
+        private val thumbnailSemaphore = Semaphore(permits = 6)
     }
 }

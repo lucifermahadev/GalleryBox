@@ -23,7 +23,7 @@ android {
         applicationId = "com.gallerybox"
         minSdk = 31
         targetSdk = 35
-        versionCode = 84
+        versionCode = 86
 
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -33,7 +33,6 @@ android {
         multiDexEnabled = true
         resConfigs("en")
 
-        // Forces 16KB alignment for any local native code
         externalNativeBuild {
             cmake {
                 cppFlags += listOf("-Wl,-z,max-page-size=16384")

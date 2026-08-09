@@ -156,7 +156,7 @@ fun MusicScreen(
     }
 
     Scaffold(
-        containerColor = Color.Transparent, // Let the background brush show through
+        containerColor = Color.Transparent,
         modifier = Modifier.background(
             Brush.verticalGradient(
                 colors = listOf(
@@ -431,7 +431,6 @@ fun FolderList(songs: ImmutableList<AudioTrack>, vm: MusicViewModel, onTrashClic
                                     if (firstTrack != null) {
                                         AsyncImage(getArtRequest(firstTrack.albumId), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                                     }
-                                    // Always show gradient overlay for readable text
                                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(0.8f)))))
 
                                     Column(modifier = Modifier.align(Alignment.BottomStart).padding(16.dp)) {
@@ -541,7 +540,6 @@ fun AudioInfoItem(label: String, value: String) {
 @Composable
 fun PlayerScreen(onBack: () -> Unit, viewModel: MusicViewModel, currentTrack: AudioTrack?, isPlaying: Boolean, onShowQueue: () -> Unit, onShowAudioInfo: () -> Unit) {
     val ctx = LocalContext.current
-    val view = LocalView.current
 
     val favoriteIds by viewModel.favoriteIds.collectAsStateWithLifecycle()
     val isFavorite = remember(currentTrack?.id, favoriteIds) { favoriteIds.contains(currentTrack?.id) }
@@ -586,45 +584,40 @@ fun PlayerScreen(onBack: () -> Unit, viewModel: MusicViewModel, currentTrack: Au
                     .scale(artScale),
                 contentAlignment = Alignment.Center
             ) {
-                // Vinyl disc — slightly larger than the sleeve, peeking out from the right edge
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize(0.92f)
-                        .offset(x = 28.dp)
-                        .graphicsLayer { rotationZ = rotation.value }
-                        .clip(CircleShape)
-                        .background(Color(0xFF161616))
-                ) {
-                    // Grooves
-                    Box(Modifier.fillMaxSize().padding(10.dp).clip(CircleShape).border(1.dp, Color.White.copy(0.06f), CircleShape))
-                    Box(Modifier.fillMaxSize().padding(24.dp).clip(CircleShape).border(1.dp, Color.White.copy(0.06f), CircleShape))
-                    Box(Modifier.fillMaxSize().padding(38.dp).clip(CircleShape).border(1.dp, Color.White.copy(0.06f), CircleShape))
-                    // Label (album art) in the center
-                    AsyncImage(
-                        artworkReq, null, contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .fillMaxSize(0.42f)
-                            .clip(CircleShape)
-                            .border(2.dp, Color.White.copy(0.15f), CircleShape)
-                    )
-                    // Spindle hole
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.background)
-                    )
-                }
-
-                // Album sleeve, sitting behind/left of the disc
+                // A single, perfect spinning circle (Vinyl/CD style)
                 Surface(
-                    modifier = Modifier.fillMaxSize(0.94f).offset(x = (-14).dp).shadow(20.dp, RoundedCornerShape(12.dp)),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shadowElevation = 24.dp,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { rotationZ = rotation.value }
                 ) {
-                    AsyncImage(artworkReq, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        AsyncImage(
+                            model = artworkReq,
+                            contentDescription = "Album Art",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize().clip(CircleShape)
+                        )
+
+                        // Center cutout for physical record appearance
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.background) // Fixes bg issue with proper circle
+                                .border(1.dp, Color.White.copy(alpha = 0.1f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black)
+                            )
+                        }
+                    }
                 }
             }
 

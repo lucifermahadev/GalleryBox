@@ -169,13 +169,6 @@ class PlayerGestureState {
     var gestureText by mutableStateOf("")
 }
 
-@Stable
-class PlayerProgressState {
-    var currentMs by mutableLongStateOf(0L)
-    var bufferedMs by mutableLongStateOf(0L)
-    var durationMs by mutableLongStateOf(0L)
-}
-
 class PlayerGestureEngine(private val context: Context, private val activity: Activity?, private val totalDuration: () -> Long) {
     private var accumulatedX = 0f
     private var accumulatedY = 0f
@@ -257,7 +250,15 @@ class PlayerGestureEngine(private val context: Context, private val activity: Ac
 @Composable
 fun ScaleButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, content: @Composable () -> Unit) {
     var pressed by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (pressed && enabled) 0.92f else 1.0f, animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy), label = "scale")
+    val context = LocalContext.current
+    val isLowEnd = remember {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mi = android.app.ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        (mi.totalMem / (1024.0 * 1024 * 1024)) <= 3.0
+    }
+    val animSpec: AnimationSpec<Float> = if (isLowEnd) tween(90) else spring(dampingRatio = Spring.DampingRatioMediumBouncy)
+    val scale by animateFloatAsState(if (pressed && enabled) 0.92f else 1.0f, animationSpec = animSpec, label = "scale")
     Box(
         modifier = modifier
             .scale(scale)
@@ -330,14 +331,6 @@ fun VideoPlayerContent(
     val repeatMode by viewModel.repeatMode.collectAsState()
     val sleepTimerMs by viewModel.sleepTimerMs.collectAsState()
     val audioDelayMs by viewModel.audioDelayMs.collectAsState()
-
-    val progress = remember(currentPosition, bufferedPosition, duration) {
-        PlayerProgressState().apply {
-            this.currentMs = currentPosition
-            this.bufferedMs = bufferedPosition
-            this.durationMs = duration
-        }
-    }
 
     val gestureState = remember { PlayerGestureState() }
     val gestureEngine = remember(player) { PlayerGestureEngine(context, activity) { duration.coerceAtLeast(1L) } }
@@ -454,14 +447,77 @@ fun VideoPlayerContent(
         }
     }
 
-    val resetControlsTimer: () -> Unit = {
-        showControls = true
-        hideJob?.cancel()
-        hideJob = scope.launch {
-            delay(3000)
-            if (isPlaying && !isLocked && !isInPiPMode) {
-                showControls = false
+    val resetControlsTimer: () -> Unit = remember(scope, isPlaying, isLocked, isInPiPMode) {
+        {
+            showControls = true
+            hideJob?.cancel()
+            hideJob = scope.launch {
+                delay(3000)
+                if (isPlaying && !isLocked && !isInPiPMode) {
+                    showControls = false
+                }
             }
+        }
+    }
+
+    val onTogglePlay = remember(viewModel, haptic, resetControlsTimer) {
+        {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            viewModel.togglePlayPause()
+            resetControlsTimer()
+        }
+    }
+
+    val onNextClick = remember(viewModel, resetControlsTimer) {
+        {
+            viewModel.playNextVideo()
+            resetControlsTimer()
+        }
+    }
+
+    val onPrevClick = remember(viewModel, resetControlsTimer) {
+        {
+            viewModel.playPreviousVideo()
+            resetControlsTimer()
+        }
+    }
+
+    val onSeekAction: (Float) -> Unit = remember(gestureState, resetControlsTimer) {
+        {
+            gestureState.seekPosition = it
+            gestureState.isSeeking = true
+            resetControlsTimer()
+        }
+    }
+
+    val onSeekFinishedAction = remember(viewModel, gestureState, resetControlsTimer) {
+        {
+            viewModel.seekTo(gestureState.seekPosition.toLong())
+            gestureState.isSeeking = false
+            resetControlsTimer()
+        }
+    }
+
+    val onLockAction = remember {
+        {
+            isLocked = true
+            showControls = false
+        }
+    }
+
+    val onRotateAction = remember(resetControlsTimer) {
+        {
+            manualRotateOverride = !manualRotateOverride
+            resetControlsTimer()
+        }
+    }
+
+    val onAspectRatioAction = remember(resetControlsTimer) {
+        {
+            val modes = PremiumResizeMode.entries.toTypedArray()
+            resizeMode = modes[(resizeMode.ordinal + 1) % modes.size]
+            resizeModeToast = resizeMode.name.replace("_", " ")
+            resetControlsTimer()
         }
     }
 
@@ -675,7 +731,9 @@ fun VideoPlayerContent(
                 VideoBottomControls(
                     isPlaying = isPlaying,
                     playbackState = playbackState,
-                    progress = progress,
+                    currentMs = currentPosition,
+                    bufferedMs = bufferedPosition,
+                    durationMs = duration,
                     isSeeking = gestureState.isSeeking,
                     previewBitmap = previewBitmap,
                     seekPosition = gestureState.seekPosition,
@@ -683,43 +741,14 @@ fun VideoPlayerContent(
                     hasNext = viewModel.hasNextVideo(),
                     hasPrev = viewModel.hasPreviousVideo() || currentPosition > 3000L,
                     isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE,
-                    onTogglePlay = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        viewModel.togglePlayPause()
-                        resetControlsTimer()
-                    },
-                    onNext = {
-                        viewModel.playNextVideo()
-                        resetControlsTimer()
-                    },
-                    onPrev = {
-                        viewModel.playPreviousVideo()
-                        resetControlsTimer()
-                    },
-                    onSeek = {
-                        gestureState.seekPosition = it
-                        gestureState.isSeeking = true
-                        resetControlsTimer()
-                    },
-                    onSeekFinished = {
-                        viewModel.seekTo(gestureState.seekPosition.toLong())
-                        gestureState.isSeeking = false
-                        resetControlsTimer()
-                    },
-                    onLock = {
-                        isLocked = true
-                        showControls = false
-                    },
-                    onRotateToggle = {
-                        manualRotateOverride = !manualRotateOverride
-                        resetControlsTimer()
-                    },
-                    onAspectRatioToggle = {
-                        val modes = PremiumResizeMode.entries.toTypedArray()
-                        resizeMode = modes[(resizeMode.ordinal + 1) % modes.size]
-                        resizeModeToast = resizeMode.name.replace("_", " ")
-                        resetControlsTimer()
-                    }
+                    onTogglePlay = onTogglePlay,
+                    onNext = onNextClick,
+                    onPrev = onPrevClick,
+                    onSeek = onSeekAction,
+                    onSeekFinished = onSeekFinishedAction,
+                    onLock = onLockAction,
+                    onRotateToggle = onRotateAction,
+                    onAspectRatioToggle = onAspectRatioAction
                 )
             }
         }
@@ -821,7 +850,8 @@ fun VideoTopBar(title: String, format: Format?, onBack: () -> Unit, onMenu: () -
 
 @Composable
 fun VideoBottomControls(
-    isPlaying: Boolean, playbackState: Int, progress: PlayerProgressState,
+    isPlaying: Boolean, playbackState: Int,
+    currentMs: Long, bufferedMs: Long, durationMs: Long,
     isSeeking: Boolean, previewBitmap: Bitmap?, seekPosition: Float, gestureText: String,
     hasNext: Boolean, hasPrev: Boolean, isLandscape: Boolean,
     onTogglePlay: () -> Unit, onNext: () -> Unit, onPrev: () -> Unit,
@@ -841,7 +871,7 @@ fun VideoBottomControls(
                 }
             }
 
-            PlayerTimelineSection(progress, isSeeking, previewBitmap, seekPosition, gestureText, onSeek, onSeekFinished)
+            PlayerTimelineSection(currentMs, bufferedMs, durationMs, isSeeking, previewBitmap, seekPosition, gestureText, onSeek, onSeekFinished)
 
             Row(
                 Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
@@ -895,7 +925,9 @@ fun VolumeBrightnessBar(value: Float, icon: ImageVector) {
 
 @Composable
 private fun PlayerTimelineSection(
-    progress: PlayerProgressState,
+    currentMs: Long,
+    bufferedMs: Long,
+    durationMs: Long,
     isSeeking: Boolean,
     previewBitmap: Bitmap?,
     seekPosition: Float,
@@ -931,9 +963,9 @@ private fun PlayerTimelineSection(
                 }
             }
             SamsungSeekBar(
-                current = if (isSeeking) seekPosition else progress.currentMs.toFloat(),
-                buffered = progress.bufferedMs.toFloat(),
-                total = maxOf(1f, progress.durationMs.toFloat()),
+                current = if (isSeeking) seekPosition else currentMs.toFloat(),
+                buffered = bufferedMs.toFloat(),
+                total = maxOf(1f, durationMs.toFloat()),
                 modifier = Modifier.fillMaxWidth().height(24.dp).align(Alignment.BottomCenter),
                 onSeek = { pos, xOffset -> thumbXOffset = xOffset; onSeek(pos) },
                 onSeekFinished = onSeekFinished
@@ -941,8 +973,8 @@ private fun PlayerTimelineSection(
         }
 
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(formatTime(progress.currentMs), color = Color.White, style = MaterialTheme.typography.labelMedium)
-            Text(formatTime(progress.durationMs), color = Color.White.copy(0.7f), style = MaterialTheme.typography.labelMedium)
+            Text(formatTime(currentMs), color = Color.White, style = MaterialTheme.typography.labelMedium)
+            Text(formatTime(durationMs), color = Color.White.copy(0.7f), style = MaterialTheme.typography.labelMedium)
         }
     }
 }

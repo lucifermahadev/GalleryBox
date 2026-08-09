@@ -65,6 +65,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -74,6 +75,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -107,6 +109,7 @@ import com.gallerybox.viewmodel.TrashViewModel
 import kotlinx.collections.immutable.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -131,6 +134,8 @@ const val ID_HIDDEN = "virtual_hidden"
 
 enum class AlbumMediaFilter { ALL, PHOTOS, VIDEOS }
 enum class DeviceTier { LOW, MID, HIGH }
+
+private val monthYearFormatter by lazy { SimpleDateFormat("MMM yyyy", Locale.getDefault()) }
 
 @Stable
 data class AlbumActions(
@@ -210,7 +215,11 @@ fun getSmartName(item: MediaItem): String {
 }
 
 fun getFolderName(path: String): String {
-    return try { File(path).parentFile?.name ?: "Unknown Folder" } catch (e: Exception) { "Unknown Folder" }
+    return try {
+        File(path).parentFile?.name ?: "Unknown Folder"
+    } catch (e: Exception) {
+        "Unknown Folder"
+    }
 }
 
 fun getDeviceTier(context: Context): DeviceTier {
@@ -225,8 +234,15 @@ fun getDeviceTier(context: Context): DeviceTier {
 }
 
 fun formatDuration(durationMs: Long): String {
-    val t = durationMs / 1000; val m = (t / 60) % 60; val h = t / 3600; val s = t % 60
-    return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s) else String.format(Locale.US, "%d:%02d", m, s)
+    val t = durationMs / 1000
+    val m = (t / 60) % 60
+    val h = t / 3600
+    val s = t % 60
+    return if (h > 0) {
+        String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+    } else {
+        String.format(Locale.US, "%d:%02d", m, s)
+    }
 }
 
 fun albumMatchesQuery(album: Album, query: String): Boolean {
@@ -246,13 +262,21 @@ fun albumMatchesQuery(album: Album, query: String): Boolean {
 fun shareMediaItems(context: Context, items: List<MediaItem>) {
     if (items.isEmpty()) return
     val intent = Intent(if (items.size > 1) Intent.ACTION_SEND_MULTIPLE else Intent.ACTION_SEND).apply {
-        val hasImg = items.any { !it.isVideo }; val hasVid = items.any { it.isVideo }
+        val hasImg = items.any { !it.isVideo }
+        val hasVid = items.any { it.isVideo }
         type = if (hasVid && !hasImg) "video/*" else if (hasImg && !hasVid) "image/*" else "*/*"
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        if (items.size > 1) putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(items.map { it.uri }))
-        else putExtra(Intent.EXTRA_STREAM, items.first().uri)
+        if (items.size > 1) {
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(items.map { it.uri }))
+        } else {
+            putExtra(Intent.EXTRA_STREAM, items.first().uri)
+        }
     }
-    try { context.startActivity(Intent.createChooser(intent, "Share via")) } catch (e: Exception) { Toast.makeText(context, "No app found", Toast.LENGTH_SHORT).show() }
+    try {
+        context.startActivity(Intent.createChooser(intent, "Share via"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "No app found", Toast.LENGTH_SHORT).show()
+    }
 }
 
 fun toggleAppLock(
@@ -282,6 +306,7 @@ fun toggleAppLock(
                 onStateChanged(newState)
                 Toast.makeText(context, if (newState) "App Lock Enabled" else "App Lock Disabled", Toast.LENGTH_SHORT).show()
             }
+
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                 super.onAuthenticationError(errorCode, errString)
                 Toast.makeText(context, "Authentication error: $errString", Toast.LENGTH_SHORT).show()
@@ -321,27 +346,164 @@ private fun refreshAndClearCache(context: Context, viewModel: GalleryViewModel, 
 @Composable
 fun rememberGridImageRequest(uri: Uri?, size: Int, isVideo: Boolean, deviceTier: DeviceTier, isScrollingFast: Boolean): ImageRequest {
     val context = LocalContext.current
-    return remember(uri, size, isVideo, deviceTier, isScrollingFast) {
-        val target = if (isScrollingFast) (size * 0.6f).toInt().coerceAtLeast(120)
-        else if (deviceTier == DeviceTier.LOW) (size * 0.75f).toInt() else size
-        val cacheKeySuffix = if (isScrollingFast) "_fast" else ""
+    return remember(uri, size, isVideo, deviceTier) {
+        val target = if (deviceTier == DeviceTier.LOW) (size * 0.75f).toInt() else size
         val builder = ImageRequest.Builder(context)
             .data(uri)
             .size(target)
-            .memoryCacheKey("${uri}_thumb_${size}$cacheKeySuffix")
+            .memoryCacheKey("${uri}_thumb_$size")
             .diskCacheKey("${uri}_thumb_$size")
             .bitmapConfig(if (deviceTier == DeviceTier.LOW) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
             .memoryCachePolicy(CachePolicy.ENABLED)
-            .diskCachePolicy(if (isScrollingFast) CachePolicy.READ_ONLY else CachePolicy.ENABLED)
+            .diskCachePolicy(CachePolicy.ENABLED)
             .networkCachePolicy(CachePolicy.DISABLED)
             .precision(Precision.INEXACT)
             .allowHardware(deviceTier != DeviceTier.LOW)
             .error(android.R.drawable.ic_menu_report_image)
             .fallback(android.R.drawable.ic_menu_report_image)
-            .crossfade(false)
+            .crossfade(if (isScrollingFast) 0 else 80)
 
         if (isVideo) builder.decoderFactory(coil.decode.VideoFrameDecoder.Factory())
         builder.build()
+    }
+}
+
+@Composable
+fun SamsungFastScrollbar(
+    gridState: LazyGridState,
+    itemCount: Int,
+    labelForIndex: (Int) -> String,
+    indexOffset: Int = 0,
+    modifier: Modifier = Modifier
+) {
+    if (itemCount < 300) return
+
+    val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
+    var isDragging by remember { mutableStateOf(false) }
+    var trackHeightPx by remember { mutableFloatStateOf(0f) }
+    var thumbOffsetPx by remember { mutableFloatStateOf(0f) }
+    var bubbleLabel by remember { mutableStateOf("") }
+    var scrollJob by remember { mutableStateOf<Job?>(null) }
+
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(gridState.isScrollInProgress, isDragging) {
+        if (gridState.isScrollInProgress || isDragging) {
+            visible = true
+        } else {
+            delay(1200)
+            visible = false
+        }
+    }
+
+    LaunchedEffect(gridState, itemCount) {
+        snapshotFlow { gridState.firstVisibleItemIndex }.collect { index ->
+            if (!isDragging && trackHeightPx > 0f) {
+                val adjusted = (index - indexOffset).coerceAtLeast(0)
+                val fraction = (adjusted.toFloat() / itemCount.coerceAtLeast(1)).coerceIn(0f, 1f)
+                thumbOffsetPx = fraction * trackHeightPx
+            }
+        }
+    }
+
+    val thumbHeightDp = 40.dp
+    val density = LocalDensity.current
+
+    fun jumpTo(offsetY: Float) {
+        val clamped = offsetY.coerceIn(0f, trackHeightPx)
+        thumbOffsetPx = clamped
+        val fraction = if (trackHeightPx > 0f) clamped / trackHeightPx else 0f
+        val targetIndex = (fraction * itemCount).toInt().coerceIn(0, (itemCount - 1).coerceAtLeast(0))
+        bubbleLabel = labelForIndex(targetIndex)
+        scrollJob?.cancel()
+        scrollJob = scope.launch { gridState.scrollToItem(targetIndex + indexOffset) }
+    }
+
+    AnimatedVisibility(visible = visible, enter = fadeIn(tween(120)), exit = fadeOut(tween(300)), modifier = modifier) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(40.dp)
+                .onGloballyPositioned { trackHeightPx = it.size.height.toFloat() }
+                .pointerInput(itemCount) {
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            isDragging = true
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            jumpTo(offset.y)
+                        },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            jumpTo(change.position.y)
+                        },
+                        onDragEnd = {
+                            isDragging = false
+                            bubbleLabel = ""
+                        },
+                        onDragCancel = {
+                            isDragging = false
+                            bubbleLabel = ""
+                        }
+                    )
+                }
+        ) {
+            if (isDragging && bubbleLabel.isNotEmpty()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primary,
+                    shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp, topEnd = 4.dp, bottomEnd = 20.dp),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .offset {
+                            IntOffset(
+                                x = -(with(density) { 96.dp.toPx() }).toInt(),
+                                y = (thumbOffsetPx - with(density) { 20.dp.toPx() })
+                                    .toInt()
+                                    .coerceAtLeast(0)
+                            )
+                        }
+                ) {
+                    Text(
+                        text = bubbleLabel,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    )
+                }
+            }
+
+            Box(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .width(3.dp)
+                    .fillMaxHeight()
+                    .padding(vertical = 4.dp)
+                    .background(Color.Gray.copy(alpha = 0.15f), RoundedCornerShape(2.dp))
+            )
+
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .offset {
+                        IntOffset(
+                            x = 0,
+                            y = thumbOffsetPx
+                                .toInt()
+                                .coerceIn(
+                                    0,
+                                    (trackHeightPx - with(density) { thumbHeightDp.toPx() })
+                                        .toInt()
+                                        .coerceAtLeast(0)
+                                )
+                        )
+                    }
+                    .padding(end = 4.dp)
+                    .width(if (isDragging) 8.dp else 5.dp)
+                    .height(thumbHeightDp)
+                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(4.dp))
+            )
+        }
     }
 }
 
@@ -394,23 +556,60 @@ fun AlbumScreen(
     var showSelectionMenu by remember { mutableStateOf(false) }
     var optimisticallyRemovedAlbums by remember { mutableStateOf(persistentSetOf<String>()) }
 
-    LaunchedEffect(viewerState, isSelectionMode) { onViewerStateChanged(viewerState is GalleryViewerState.Open || isSelectionMode) }
+    LaunchedEffect(viewerState, isSelectionMode) {
+        onViewerStateChanged(viewerState is GalleryViewerState.Open || isSelectionMode)
+    }
 
-    val albumPreviews = remember(rawAlbumPreviews) { rawAlbumPreviews.mapValues { it.value.toImmutableList() }.toImmutableMap() }
+    val albumPreviews = remember(rawAlbumPreviews) {
+        rawAlbumPreviews.mapValues { it.value.toImmutableList() }.toImmutableMap()
+    }
 
     val displayAlbums = remember(vmAlbums, searchQuery, sortOption, favoriteIds, allMedia, optimisticallyRemovedAlbums) {
         val favMedia = allMedia.filter { favoriteIds.contains(it.id) }
         val virtualAlbumsMutable = vmAlbums.filter { it.id.startsWith("virtual_") && it.id != ID_FAVORITES && albumMatchesQuery(it, searchQuery) }.toMutableList()
         if (favMedia.isNotEmpty()) {
-            val updatedFavAlbum = vmAlbums.find { it.id == ID_FAVORITES }?.copy(mediaCount = favMedia.size, sizeBytes = favMedia.sumOf { it.size }, coverUri = favMedia.firstOrNull()?.uri ?: Uri.EMPTY) ?: Album(ID_FAVORITES, "Favorites", favMedia.firstOrNull()?.uri ?: Uri.EMPTY, favMedia.size, favMedia.sumOf { it.size }, true)
-            if (albumMatchesQuery(updatedFavAlbum, searchQuery)) virtualAlbumsMutable.add(updatedFavAlbum)
+            val updatedFavAlbum = vmAlbums.find { it.id == ID_FAVORITES }?.copy(
+                mediaCount = favMedia.size,
+                sizeBytes = favMedia.sumOf { it.size },
+                coverUri = favMedia.firstOrNull()?.uri ?: Uri.EMPTY
+            ) ?: Album(
+                ID_FAVORITES,
+                "Favorites",
+                favMedia.firstOrNull()?.uri ?: Uri.EMPTY,
+                favMedia.size,
+                favMedia.sumOf { it.size },
+                true
+            )
+            if (albumMatchesQuery(updatedFavAlbum, searchQuery)) {
+                virtualAlbumsMutable.add(updatedFavAlbum)
+            }
         }
-        val sortedVirtualAlbums = virtualAlbumsMutable.sortedBy { when (it.id) { ID_RECENT -> 0; ID_FAVORITES -> 1; ID_DOWNLOADS -> 2; else -> 99 } }
+        val sortedVirtualAlbums = virtualAlbumsMutable.sortedBy {
+            when (it.id) {
+                ID_RECENT -> 0
+                ID_FAVORITES -> 1
+                ID_DOWNLOADS -> 2
+                else -> 99
+            }
+        }
         val userAlbums = vmAlbums.filter { !it.id.startsWith("virtual_") && albumMatchesQuery(it, searchQuery) && !optimisticallyRemovedAlbums.contains(it.id) }
-        val sortedUserAlbums = if (sortOption == AlbumSort.Custom) userAlbums else userAlbums.sortedWith(Comparator { a, b ->
-            if (a.isPinned != b.isPinned) b.isPinned.compareTo(a.isPinned)
-            else when (sortOption.name) { "NameAsc" -> a.name.compareTo(b.name, ignoreCase = true); "NameDesc" -> b.name.compareTo(a.name, ignoreCase = true); "SizeDesc" -> b.sizeBytes.compareTo(a.sizeBytes); "CountDesc" -> b.mediaCount.compareTo(a.mediaCount); else -> 0 }
-        })
+        val sortedUserAlbums = if (sortOption == AlbumSort.Custom) {
+            userAlbums
+        } else {
+            userAlbums.sortedWith(Comparator { a, b ->
+                if (a.isPinned != b.isPinned) {
+                    b.isPinned.compareTo(a.isPinned)
+                } else {
+                    when (sortOption.name) {
+                        "NameAsc" -> a.name.compareTo(b.name, ignoreCase = true)
+                        "NameDesc" -> b.name.compareTo(a.name, ignoreCase = true)
+                        "SizeDesc" -> b.sizeBytes.compareTo(a.sizeBytes)
+                        "CountDesc" -> b.mediaCount.compareTo(a.mediaCount)
+                        else -> 0
+                    }
+                }
+            })
+        }
         (sortedVirtualAlbums + sortedUserAlbums).toImmutableList()
     }
 
@@ -455,20 +654,36 @@ fun AlbumScreen(
         trashViewModel.events.collect { event ->
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
-                is GalleryEvent.OperationSuccess -> { isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet(); Toast.makeText(context, "Moved to Trash", Toast.LENGTH_SHORT).show() }
+                is GalleryEvent.OperationSuccess -> {
+                    isSelectionMode = false
+                    selectedIds = persistentListOf<String>().toImmutableSet()
+                    Toast.makeText(context, "Moved to Trash", Toast.LENGTH_SHORT).show()
+                }
                 is GalleryEvent.ShowToast -> Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
                 else -> {}
             }
         }
     }
 
-    BackHandler(enabled = isSearchActive) { isSearchActive = false; searchQuery = "" }
-    BackHandler(enabled = isSelectionMode) { isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }
-    BackHandler(enabled = activeDialog != AlbumUiDialog.None) { activeDialog = AlbumUiDialog.None }
-    BackHandler(enabled = viewerState is GalleryViewerState.Open) { viewModel.closeViewer() }
+    BackHandler(enabled = isSearchActive) {
+        isSearchActive = false
+        searchQuery = ""
+    }
+
+    BackHandler(enabled = isSelectionMode) {
+        isSelectionMode = false
+        selectedIds = persistentListOf<String>().toImmutableSet()
+    }
+
+    BackHandler(enabled = activeDialog != AlbumUiDialog.None) {
+        activeDialog = AlbumUiDialog.None
+    }
+
+    BackHandler(enabled = viewerState is GalleryViewerState.Open) {
+        viewModel.closeViewer()
+    }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-
         Scaffold(
             modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
             containerColor = Color.Transparent,
@@ -487,9 +702,27 @@ fun AlbumScreen(
                                     Text(text = Formatter.formatFileSize(context, selectedSize), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             },
-                            navigationIcon = { IconButton(onClick = { isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close Selection") } },
+                            navigationIcon = {
+                                IconButton(onClick = {
+                                    isSelectionMode = false
+                                    selectedIds = persistentListOf<String>().toImmutableSet()
+                                }) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close Selection")
+                                }
+                            },
                             actions = {
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { selectedIds = if (isAllSelected) persistentListOf<String>().toImmutableSet() else dynamicList.map { it.id }.toImmutableSet() }.padding(horizontal = 8.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clickable {
+                                            selectedIds = if (isAllSelected) {
+                                                persistentListOf<String>().toImmutableSet()
+                                            } else {
+                                                dynamicList.map { it.id }.toImmutableSet()
+                                            }
+                                        }
+                                        .padding(horizontal = 8.dp)
+                                ) {
                                     Checkbox(checked = isAllSelected, onCheckedChange = null)
                                     Spacer(Modifier.width(4.dp))
                                     Text(text = "All", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
@@ -499,7 +732,14 @@ fun AlbumScreen(
                         )
                     }
                 } else if (isSearchActive) {
-                    SearchTopBar(query = searchQuery, onQueryChange = { searchQuery = it }, onClose = { isSearchActive = false; searchQuery = "" })
+                    SearchTopBar(
+                        query = searchQuery,
+                        onQueryChange = { searchQuery = it },
+                        onClose = {
+                            isSearchActive = false
+                            searchQuery = ""
+                        }
+                    )
                 } else {
                     Surface(shadowElevation = 2.dp, color = MaterialTheme.colorScheme.surface) {
                         ModernAlbumTopBar(
@@ -529,33 +769,85 @@ fun AlbumScreen(
                     exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
                 ) {
                     Surface(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp).navigationBarsPadding(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                            .navigationBarsPadding(),
                         shape = RoundedCornerShape(24.dp),
                         color = MaterialTheme.colorScheme.surface,
                         shadowElevation = 10.dp
                     ) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                            BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") { activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, true) }
-                            BottomBarActionItem(icon = Icons.Outlined.FileCopy, label = "Copy") { activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, false) }
-                            BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") { shareMediaItems(context, allMedia.filter { selectedIds.contains(it.bucketId) }); isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }
-                            BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Trash", isDestructive = true) { activeDialog = AlbumUiDialog.Delete(dynamicList.filter { selectedIds.contains(it.id) }) }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") {
+                                activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, true)
+                            }
+                            BottomBarActionItem(icon = Icons.Outlined.FileCopy, label = "Copy") {
+                                activeDialog = AlbumUiDialog.MoveCopy(dynamicList.filter { selectedIds.contains(it.id) }, false)
+                            }
+                            BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") {
+                                shareMediaItems(context, allMedia.filter { selectedIds.contains(it.bucketId) })
+                                isSelectionMode = false
+                                selectedIds = persistentListOf<String>().toImmutableSet()
+                            }
+                            BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Trash", isDestructive = true) {
+                                activeDialog = AlbumUiDialog.Delete(dynamicList.filter { selectedIds.contains(it.id) })
+                            }
                             Box {
-                                BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showSelectionMenu = true }
+                                BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") {
+                                    showSelectionMenu = true
+                                }
                                 DropdownMenu(expanded = showSelectionMenu, onDismissRequest = { showSelectionMenu = false }) {
                                     val allPinned = dynamicList.filter { selectedIds.contains(it.id) }.all { it.isPinned }
-                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Rename") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Rename(it) } }, leadingIcon = { Icon(Icons.Outlined.Edit, null) })
-                                    DropdownMenuItem(text = { Text(if (allPinned) "Unpin" else "Pin") }, onClick = { showSelectionMenu = false; dynamicList.filter { selectedIds.contains(it.id) }.forEach { viewModel.toggleAlbumPin(it) }; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() }, leadingIcon = { Icon(if (allPinned) Icons.Outlined.PushPin else Icons.Filled.PushPin, null) })
-                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Info") }, onClick = { showSelectionMenu = false; dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Info(it) } }, leadingIcon = { Icon(Icons.Outlined.Info, null) })
-                                    DropdownMenuItem(text = { Text("Hide Album") }, onClick = {
-                                        showSelectionMenu = false
-                                        val currentHidden = enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
-                                        val newHidden = currentHidden + selectedIds
-                                        enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
-                                        selectedIds.forEach { id -> viewModel.toggleHiddenAlbum(id) }
-                                        isSelectionMode = false
-                                        selectedIds = persistentListOf<String>().toImmutableSet()
-                                        Toast.makeText(context, "Albums hidden", Toast.LENGTH_SHORT).show()
-                                    }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
+                                    if (selectedIds.size == 1) {
+                                        DropdownMenuItem(
+                                            text = { Text("Rename") },
+                                            onClick = {
+                                                showSelectionMenu = false
+                                                dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Rename(it) }
+                                            },
+                                            leadingIcon = { Icon(Icons.Outlined.Edit, null) }
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text(if (allPinned) "Unpin" else "Pin") },
+                                        onClick = {
+                                            showSelectionMenu = false
+                                            dynamicList.filter { selectedIds.contains(it.id) }.forEach { viewModel.toggleAlbumPin(it) }
+                                            isSelectionMode = false
+                                            selectedIds = persistentListOf<String>().toImmutableSet()
+                                        },
+                                        leadingIcon = { Icon(if (allPinned) Icons.Outlined.PushPin else Icons.Filled.PushPin, null) }
+                                    )
+                                    if (selectedIds.size == 1) {
+                                        DropdownMenuItem(
+                                            text = { Text("Info") },
+                                            onClick = {
+                                                showSelectionMenu = false
+                                                dynamicList.find { it.id == selectedIds.first() }?.let { activeDialog = AlbumUiDialog.Info(it) }
+                                            },
+                                            leadingIcon = { Icon(Icons.Outlined.Info, null) }
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text("Hide Album") },
+                                        onClick = {
+                                            showSelectionMenu = false
+                                            val currentHidden = enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
+                                            val newHidden = currentHidden + selectedIds
+                                            enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
+                                            selectedIds.forEach { id -> viewModel.toggleHiddenAlbum(id) }
+                                            isSelectionMode = false
+                                            selectedIds = persistentListOf<String>().toImmutableSet()
+                                            Toast.makeText(context, "Albums hidden", Toast.LENGTH_SHORT).show()
+                                        },
+                                        leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) }
+                                    )
                                 }
                             }
                         }
@@ -564,7 +856,11 @@ fun AlbumScreen(
             }
         ) { padding ->
             val bottomPadding = if (isSelectionMode) padding.calculateBottomPadding() else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-            Column(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding(), bottom = bottomPadding)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = padding.calculateTopPadding(), bottom = bottomPadding)
+            ) {
                 if (dynamicList.isEmpty()) {
                     Box(modifier = Modifier.weight(1f)) {
                         EmptyAlbumsOverlay(onCreateClick = { activeDialog = AlbumUiDialog.CreateAlbum })
@@ -587,10 +883,16 @@ fun AlbumScreen(
                             onOrderSaved = { albums: List<Album> -> viewModel.saveCustomAlbumOrder(albums) },
                             onAlbumClick = { album ->
                                 if (isSelectionMode) {
-                                    val newSelection = if (selectedIds.contains(album.id)) (selectedIds - album.id).toImmutableSet() else (selectedIds + album.id).toImmutableSet()
+                                    val newSelection = if (selectedIds.contains(album.id)) {
+                                        (selectedIds - album.id).toImmutableSet()
+                                    } else {
+                                        (selectedIds + album.id).toImmutableSet()
+                                    }
                                     selectedIds = newSelection
                                     if (newSelection.isEmpty()) isSelectionMode = false
-                                } else actions.onAlbumClick(album)
+                                } else {
+                                    actions.onAlbumClick(album)
+                                }
                             },
                             onAlbumLongClick = { album ->
                                 isSelectionMode = true
@@ -611,12 +913,19 @@ fun AlbumScreen(
 
     when (val dialog = activeDialog) {
         is AlbumUiDialog.Info -> {
-            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
+            ModalBottomSheet(
+                onDismissRequest = { activeDialog = AlbumUiDialog.None },
+                containerColor = MaterialTheme.colorScheme.surface,
+                dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+            ) {
                 Column(Modifier.padding(24.dp).padding(bottom = 24.dp)) {
                     val albumItems = allMedia.filter { it.bucketId == dialog.album.id }
                     val oldestItem = albumItems.minByOrNull { it.dateAdded }
-                    val dateStr = oldestItem?.let { SimpleDateFormat("MMMM dd, yyyy 'at' hh:mm a", Locale.getDefault()).format(Date(it.dateAdded * 1000)) } ?: "Unknown"
+                    val dateStr = oldestItem?.let {
+                        SimpleDateFormat("MMMM dd, yyyy 'at' hh:mm a", Locale.getDefault()).format(Date(it.dateAdded * 1000))
+                    } ?: "Unknown"
                     val albumPath = oldestItem?.path?.let { File(it).parent } ?: "Unknown"
+
                     Text("Album Details", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(24.dp))
                     MetadataRow(icon = Icons.Outlined.Title, label = "Name", value = dialog.album.name)
@@ -628,19 +937,57 @@ fun AlbumScreen(
             }
         }
         is AlbumUiDialog.MoveCopy -> {
-            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
+            ModalBottomSheet(
+                onDismissRequest = { activeDialog = AlbumUiDialog.None },
+                containerColor = MaterialTheme.colorScheme.surface,
+                dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+            ) {
                 val allAlbumsState by viewModel.allAlbumsState.collectAsState(initial = emptyList())
-                Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-                    Text(text = if (dialog.isMove) "Move To..." else "Copy To...", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
-                    LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f, fill = false), contentPadding = PaddingValues(bottom = 12.dp)) {
-                        item { ListItem(headlineContent = { Text("Create New Album", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(Icons.Rounded.CreateNewFolder, null, tint = MaterialTheme.colorScheme.primary) }, modifier = Modifier.clickable { activeDialog = AlbumUiDialog.CreateAndMoveCopy(dialog.albums, dialog.isMove) }, colors = ListItemDefaults.colors(containerColor = Color.Transparent)) }
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 24.dp)
+                ) {
+                    Text(
+                        text = if (dialog.isMove) "Move To..." else "Copy To...",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)
+                    )
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
+                        contentPadding = PaddingValues(bottom = 12.dp)
+                    ) {
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Create New Album", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) },
+                                leadingContent = { Icon(Icons.Rounded.CreateNewFolder, null, tint = MaterialTheme.colorScheme.primary) },
+                                modifier = Modifier.clickable { activeDialog = AlbumUiDialog.CreateAndMoveCopy(dialog.albums, dialog.isMove) },
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                            )
+                        }
                         items(allAlbumsState.filter { !it.id.startsWith("virtual_") && dialog.albums.none { sel -> sel.id == it.id } }.sortedBy { it.name.lowercase() }) { targetAlbum ->
-                            ListItem(headlineContent = { Text(targetAlbum.name, fontWeight = FontWeight.Medium) }, leadingContent = { Icon(Icons.Outlined.Folder, null) }, modifier = Modifier.clickable {
-                                if (dialog.isMove) optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
-                                viewModel.mergeAlbums(sourceAlbumIds = dialog.albums.map { id -> id.id }, targetAlbumId = targetAlbum.id, mergeMode = if (dialog.isMove) MergeMode.MOVE_AND_DELETE else MergeMode.COPY)
-                                refreshAndClearCache(context, viewModel, allMedia.filter { dialog.albums.any { a -> a.id == it.bucketId } }.map { it.uri })
-                                activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
-                            }, colors = ListItemDefaults.colors(containerColor = Color.Transparent))
+                            ListItem(
+                                headlineContent = { Text(targetAlbum.name, fontWeight = FontWeight.Medium) },
+                                leadingContent = { Icon(Icons.Outlined.Folder, null) },
+                                modifier = Modifier.clickable {
+                                    if (dialog.isMove) {
+                                        optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
+                                    }
+                                    viewModel.mergeAlbums(
+                                        sourceAlbumIds = dialog.albums.map { id -> id.id },
+                                        targetAlbumId = targetAlbum.id,
+                                        mergeMode = if (dialog.isMove) MergeMode.MOVE_AND_DELETE else MergeMode.COPY
+                                    )
+                                    refreshAndClearCache(context, viewModel, allMedia.filter { dialog.albums.any { a -> a.id == it.bucketId } }.map { it.uri })
+                                    activeDialog = AlbumUiDialog.None
+                                    isSelectionMode = false
+                                    selectedIds = persistentListOf<String>().toImmutableSet()
+                                },
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                            )
                         }
                     }
                 }
@@ -648,42 +995,158 @@ fun AlbumScreen(
         }
         is AlbumUiDialog.CreateAndMoveCopy -> {
             val initialName = if (dialog.albums.size == 1) "${dialog.albums.first().name} Copy" else "New Album"
-            ModernInputSheet(title = if (dialog.isMove) "New Album & Move" else "New Album & Copy", initial = initialName, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String ->
-                val mediaIds = allMedia.filter { item -> dialog.albums.any { album -> album.id == item.bucketId } }.map { it.id }
-                if (dialog.isMove) viewModel.createAndMove(mediaIds, newName) else viewModel.createAndCopy(mediaIds, newName)
-                if (dialog.isMove) optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
-                refreshAndClearCache(context, viewModel, allMedia.filter { dialog.albums.any { a -> a.id == it.bucketId } }.map { it.uri })
-                activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
-            })
+            ModernInputSheet(
+                title = if (dialog.isMove) "New Album & Move" else "New Album & Copy",
+                initial = initialName,
+                onDismiss = { activeDialog = AlbumUiDialog.None },
+                onConfirm = { newName: String ->
+                    val mediaIds = allMedia.filter { item -> dialog.albums.any { album -> album.id == item.bucketId } }.map { it.id }
+                    if (dialog.isMove) {
+                        viewModel.createAndMove(mediaIds, newName)
+                    } else {
+                        viewModel.createAndCopy(mediaIds, newName)
+                    }
+                    if (dialog.isMove) {
+                        optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { id -> id.id })
+                    }
+                    refreshAndClearCache(context, viewModel, allMedia.filter { dialog.albums.any { a -> a.id == it.bucketId } }.map { it.uri })
+                    activeDialog = AlbumUiDialog.None
+                    isSelectionMode = false
+                    selectedIds = persistentListOf<String>().toImmutableSet()
+                }
+            )
         }
-        is AlbumUiDialog.Rename -> ModernInputSheet(title = "Rename Album", initial = dialog.album.name, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = { newName: String -> viewModel.renameAlbum(dialog.album, newName); refreshAndClearCache(context, viewModel, allMedia.filter { it.bucketId == dialog.album.id }.map { it.uri }); activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet() })
-        is AlbumUiDialog.Delete -> ModernMoveToTrashSheet(count = dialog.albums.size, onDismiss = { activeDialog = AlbumUiDialog.None }, onConfirm = {
-            optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { it.id })
-            trashViewModel.confirmPendingAlbumTrash(dialog.albums, allMedia.toList())
-            refreshAndClearCache(context, viewModel, allMedia.filter { dialog.albums.any { a -> a.id == it.bucketId } }.map { it.uri })
-            activeDialog = AlbumUiDialog.None; isSelectionMode = false; selectedIds = persistentListOf<String>().toImmutableSet()
-        })
-        is AlbumUiDialog.CreateAlbum -> ModernCreateAlbumSheet(onDismiss = { activeDialog = AlbumUiDialog.None }, onCreate = { name: String, sd: Boolean -> viewModel.createAlbum(name, sd); activeDialog = AlbumUiDialog.None })
-        is AlbumUiDialog.Sort -> ModernAlbumSortSheet(activeSort = sortOption, onDismiss = { activeDialog = AlbumUiDialog.None }, onSortSelected = { sort: AlbumSort -> viewModel.updateAlbumSort(sort); activeDialog = AlbumUiDialog.None })
-        is AlbumUiDialog.GridSize -> ModernGridSheet(currentColumns = columnCount, max = 8, onDismiss = { activeDialog = AlbumUiDialog.None }, onUpdate = { cols: Int -> columnCount = cols; prefs.edit().putInt("gallery_album_grid_columns", cols).apply(); activeDialog = AlbumUiDialog.None })
+        is AlbumUiDialog.Rename -> {
+            ModernInputSheet(
+                title = "Rename Album",
+                initial = dialog.album.name,
+                onDismiss = { activeDialog = AlbumUiDialog.None },
+                onConfirm = { newName: String ->
+                    viewModel.renameAlbum(dialog.album, newName)
+                    refreshAndClearCache(context, viewModel, allMedia.filter { it.bucketId == dialog.album.id }.map { it.uri })
+                    activeDialog = AlbumUiDialog.None
+                    isSelectionMode = false
+                    selectedIds = persistentListOf<String>().toImmutableSet()
+                }
+            )
+        }
+        is AlbumUiDialog.Delete -> {
+            ModernMoveToTrashSheet(
+                count = dialog.albums.size,
+                onDismiss = { activeDialog = AlbumUiDialog.None },
+                onConfirm = {
+                    optimisticallyRemovedAlbums = optimisticallyRemovedAlbums.addAll(dialog.albums.map { it.id })
+                    trashViewModel.confirmPendingAlbumTrash(dialog.albums, allMedia.toList())
+                    refreshAndClearCache(context, viewModel, allMedia.filter { dialog.albums.any { a -> a.id == it.bucketId } }.map { it.uri })
+                    activeDialog = AlbumUiDialog.None
+                    isSelectionMode = false
+                    selectedIds = persistentListOf<String>().toImmutableSet()
+                }
+            )
+        }
+        is AlbumUiDialog.CreateAlbum -> {
+            ModernCreateAlbumSheet(
+                onDismiss = { activeDialog = AlbumUiDialog.None },
+                onCreate = { name: String, sd: Boolean ->
+                    viewModel.createAlbum(name, sd)
+                    activeDialog = AlbumUiDialog.None
+                }
+            )
+        }
+        is AlbumUiDialog.Sort -> {
+            ModernAlbumSortSheet(
+                activeSort = sortOption,
+                onDismiss = { activeDialog = AlbumUiDialog.None },
+                onSortSelected = { sort: AlbumSort ->
+                    viewModel.updateAlbumSort(sort)
+                    activeDialog = AlbumUiDialog.None
+                }
+            )
+        }
+        is AlbumUiDialog.GridSize -> {
+            ModernGridSheet(
+                currentColumns = columnCount,
+                max = 8,
+                onDismiss = { activeDialog = AlbumUiDialog.None },
+                onUpdate = { cols: Int ->
+                    columnCount = cols
+                    prefs.edit().putInt("gallery_album_grid_columns", cols).apply()
+                    activeDialog = AlbumUiDialog.None
+                }
+            )
+        }
         is AlbumUiDialog.HiddenAlbums -> {
-            ModalBottomSheet(onDismissRequest = { activeDialog = AlbumUiDialog.None }, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
-                val allPossibleAlbums = remember(rawMedia) { rawMedia.groupBy { it.bucketId }.map { (id, items) -> val first = items.first(); Album(id = id, name = first.bucketName, coverUri = first.uri, mediaCount = items.size, sizeBytes = items.sumOf { it.size }, isPinned = false) }.filter { !it.id.startsWith("virtual_") }.sortedBy { it.name.lowercase() } }
+            ModalBottomSheet(
+                onDismissRequest = { activeDialog = AlbumUiDialog.None },
+                containerColor = MaterialTheme.colorScheme.surface,
+                dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+            ) {
+                val allPossibleAlbums = remember(rawMedia) {
+                    rawMedia.groupBy { it.bucketId }.map { (id, items) ->
+                        val first = items.first()
+                        Album(
+                            id = id,
+                            name = first.bucketName,
+                            coverUri = first.uri,
+                            mediaCount = items.size,
+                            sizeBytes = items.sumOf { it.size },
+                            isPinned = false
+                        )
+                    }.filter { !it.id.startsWith("virtual_") }.sortedBy { it.name.lowercase() }
+                }
+
                 Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-                    Text(text = "Hide or Unhide", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
-                    LazyColumn(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 12.dp)) {
+                    Text(
+                        text = "Hide or Unhide",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)
+                    )
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(bottom = 12.dp)
+                    ) {
                         items(allPossibleAlbums, key = { it.id }) { album ->
-                            Row(modifier = Modifier.fillMaxWidth().clickable {
-                                viewModel.toggleHiddenAlbum(album.id)
-                                val newHidden = if (hiddenAlbums.contains(album.id)) hiddenAlbums - album.id else hiddenAlbums + album.id
-                                enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
-                            }.padding(horizontal = 24.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                                Column(modifier = Modifier.weight(1f)) { Text(text = album.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium); Text(text = "${album.mediaCount} items", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                                Switch(checked = hiddenAlbums.contains(album.id), onCheckedChange = {
-                                    viewModel.toggleHiddenAlbum(album.id)
-                                    val newHidden = if (hiddenAlbums.contains(album.id)) hiddenAlbums - album.id else hiddenAlbums + album.id
-                                    enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
-                                })
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.toggleHiddenAlbum(album.id)
+                                        val newHidden = if (hiddenAlbums.contains(album.id)) {
+                                            hiddenAlbums - album.id
+                                        } else {
+                                            hiddenAlbums + album.id
+                                        }
+                                        enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
+                                    }
+                                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = album.name,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = "${album.mediaCount} items",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = hiddenAlbums.contains(album.id),
+                                    onCheckedChange = {
+                                        viewModel.toggleHiddenAlbum(album.id)
+                                        val newHidden = if (hiddenAlbums.contains(album.id)) {
+                                            hiddenAlbums - album.id
+                                        } else {
+                                            hiddenAlbums + album.id
+                                        }
+                                        enginePrefs.edit().putStringSet("hidden_albums", newHidden).apply()
+                                    }
+                                )
                             }
                         }
                     }
@@ -773,7 +1236,9 @@ fun AlbumDetailScreen(
         }
     }
 
-    LaunchedEffect(viewerState, isSelectionMode) { onViewerStateChanged(viewerState is GalleryViewerState.Open || isSelectionMode) }
+    LaunchedEffect(viewerState, isSelectionMode) {
+        onViewerStateChanged(viewerState is GalleryViewerState.Open || isSelectionMode)
+    }
 
     LaunchedEffect(isSelectionMode) {
         if (!isSelectionMode) {
@@ -807,7 +1272,8 @@ fun AlbumDetailScreen(
     var mediaFilter by remember { mutableStateOf(AlbumMediaFilter.ALL) }
     var showRenameSheet by remember { mutableStateOf(false) }
 
-    val configuration = LocalConfiguration.current; val density = LocalDensity.current
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
     val screenWidthPx = with(density) { configuration.screenWidthDp.dp.roundToPx() }
     val screenWidthDp = configuration.screenWidthDp.toFloat()
 
@@ -823,9 +1289,26 @@ fun AlbumDetailScreen(
 
     val filteredMedia by produceState(initialValue = persistentListOf<MediaItem>(), albumMedia, mediaFilter, debouncedSearchQuery, currentPhotoSort) {
         value = withContext(Dispatchers.Default) {
-            val base = albumMedia.filter { item -> when (mediaFilter) { AlbumMediaFilter.ALL -> true; AlbumMediaFilter.PHOTOS -> !item.isVideo; AlbumMediaFilter.VIDEOS -> item.isVideo } }
-            val searched = if (debouncedSearchQuery.isBlank()) base else { val q = debouncedSearchQuery.trim().lowercase(); base.filter { it.name.lowercase().contains(q) || getSmartName(it).lowercase().contains(q) } }
-            val comparator = when (currentPhotoSort) { PhotoSort.DateDesc -> Comparator<MediaItem> { a, b -> b.dateAdded.compareTo(a.dateAdded) }; PhotoSort.DateAsc -> Comparator<MediaItem> { a, b -> a.dateAdded.compareTo(b.dateAdded) }; PhotoSort.NameAsc -> Comparator<MediaItem> { a, b -> a.name.compareTo(b.name, ignoreCase = true) }; PhotoSort.NameDesc -> Comparator<MediaItem> { a, b -> b.name.compareTo(a.name, ignoreCase = true) }; PhotoSort.SizeDesc -> Comparator<MediaItem> { a, b -> b.size.compareTo(a.size) } }
+            val base = albumMedia.filter { item ->
+                when (mediaFilter) {
+                    AlbumMediaFilter.ALL -> true
+                    AlbumMediaFilter.PHOTOS -> !item.isVideo
+                    AlbumMediaFilter.VIDEOS -> item.isVideo
+                }
+            }
+            val searched = if (debouncedSearchQuery.isBlank()) {
+                base
+            } else {
+                val q = debouncedSearchQuery.trim().lowercase()
+                base.filter { it.name.lowercase().contains(q) || getSmartName(it).lowercase().contains(q) }
+            }
+            val comparator = when (currentPhotoSort) {
+                PhotoSort.DateDesc -> Comparator<MediaItem> { a, b -> b.dateAdded.compareTo(a.dateAdded) }
+                PhotoSort.DateAsc -> Comparator<MediaItem> { a, b -> a.dateAdded.compareTo(b.dateAdded) }
+                PhotoSort.NameAsc -> Comparator<MediaItem> { a, b -> a.name.compareTo(b.name, ignoreCase = true) }
+                PhotoSort.NameDesc -> Comparator<MediaItem> { a, b -> b.name.compareTo(a.name, ignoreCase = true) }
+                PhotoSort.SizeDesc -> Comparator<MediaItem> { a, b -> b.size.compareTo(a.size) }
+            }
             searched.sortedWith(comparator).toImmutableList() as PersistentList<MediaItem>
         }
     }
@@ -850,19 +1333,28 @@ fun AlbumDetailScreen(
                                     Text(text = Formatter.formatFileSize(context, selectedSize), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             },
-                            navigationIcon = { IconButton(onClick = { isSelectionMode = false }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close Selection") } },
+                            navigationIcon = {
+                                IconButton(onClick = { isSelectionMode = false }) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close Selection")
+                                }
+                            },
                             actions = {
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable {
-                                    if (isAllSelected) {
-                                        dragSelection.clear()
-                                        selectedSize = 0L
-                                    } else {
-                                        dragSelection.clear()
-                                        actuallyFilteredMedia.forEach { dragSelection.add(it.id) }
-                                        selectedSize = actuallyFilteredMedia.sumOf { it.size }
-                                    }
-                                    selectedIds = dragSelection.toImmutableSet()
-                                }.padding(horizontal = 8.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clickable {
+                                            if (isAllSelected) {
+                                                dragSelection.clear()
+                                                selectedSize = 0L
+                                            } else {
+                                                dragSelection.clear()
+                                                actuallyFilteredMedia.forEach { dragSelection.add(it.id) }
+                                                selectedSize = actuallyFilteredMedia.sumOf { it.size }
+                                            }
+                                            selectedIds = dragSelection.toImmutableSet()
+                                        }
+                                        .padding(horizontal = 8.dp)
+                                ) {
                                     Checkbox(checked = isAllSelected, onCheckedChange = null)
                                     Spacer(Modifier.width(4.dp))
                                     Text(text = "All", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
@@ -874,30 +1366,110 @@ fun AlbumDetailScreen(
                 } else {
                     Surface(shadowElevation = 2.dp, color = MaterialTheme.colorScheme.surface) {
                         CenterAlignedTopAppBar(
-                            title = { Text(text = albumTitle, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold) },
-                            navigationIcon = { IconButton(onClick = actions.onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                            title = {
+                                Text(
+                                    text = albumTitle,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            navigationIcon = {
+                                IconButton(onClick = actions.onBack) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                                }
+                            },
                             actions = {
                                 Box {
-                                    IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "More") }
-                                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.clip(RoundedCornerShape(12.dp))) {
-                                        DropdownMenuItem(text = { Text("Select items") }, onClick = { isSelectionMode = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Checklist, null) })
-                                        if (!isVirtual) DropdownMenuItem(text = { Text("Add Photos") }, onClick = { actions.onAddMediaToAlbum?.invoke(albumId); showMenu = false }, leadingIcon = { Icon(Icons.Rounded.AddPhotoAlternate, null) })
-                                        DropdownMenuItem(text = { Text("Sort Media") }, onClick = { activeDialog = DetailUiDialog.Sort; showMenu = false }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) })
-                                        DropdownMenuItem(text = { Text("Grid Size") }, onClick = { activeDialog = DetailUiDialog.GridSize; showMenu = false }, leadingIcon = { Icon(Icons.Default.Grid4x4, null) })
-                                        if (!isVirtual && album != null) {
-                                            DropdownMenuItem(text = { Text("Hide Album") }, onClick = {
-                                                viewModel.toggleHiddenAlbum(album.id)
-                                                val currentHidden = enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
-                                                enginePrefs.edit().putStringSet("hidden_albums", currentHidden + album.id).apply()
-                                                Toast.makeText(context, "Album Hidden", Toast.LENGTH_SHORT).show()
+                                    IconButton(onClick = { showMenu = true }) {
+                                        Icon(Icons.Default.MoreVert, "More")
+                                    }
+                                    DropdownMenu(
+                                        expanded = showMenu,
+                                        onDismissRequest = { showMenu = false },
+                                        modifier = Modifier.clip(RoundedCornerShape(12.dp))
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Select items") },
+                                            onClick = {
+                                                isSelectionMode = true
                                                 showMenu = false
-                                                actions.onBack()
-                                            }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
-                                            DropdownMenuItem(text = { Text(if (album.isPinned) "Unpin Album" else "Pin Album") }, onClick = { viewModel.toggleAlbumPin(album); showMenu = false }, leadingIcon = { Icon(if (album.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, null) })
-                                            DropdownMenuItem(text = { Text("Rename") }, onClick = { showRenameSheet = true; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Edit, null) })
-                                            DropdownMenuItem(text = { Text("Delete Album", color = MaterialTheme.colorScheme.error) }, onClick = { activeDialog = DetailUiDialog.DeleteAlbum; showMenu = false }, leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) })
+                                            },
+                                            leadingIcon = { Icon(Icons.Outlined.Checklist, null) }
+                                        )
+                                        if (!isVirtual) {
+                                            DropdownMenuItem(
+                                                text = { Text("Add Photos") },
+                                                onClick = {
+                                                    actions.onAddMediaToAlbum?.invoke(albumId)
+                                                    showMenu = false
+                                                },
+                                                leadingIcon = { Icon(Icons.Rounded.AddPhotoAlternate, null) }
+                                            )
                                         }
-                                        DropdownMenuItem(text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") }, onClick = { showMenu = false; toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it } }, leadingIcon = { Icon(if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, null) })
+                                        DropdownMenuItem(
+                                            text = { Text("Sort Media") },
+                                            onClick = {
+                                                activeDialog = DetailUiDialog.Sort
+                                                showMenu = false
+                                            },
+                                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Grid Size") },
+                                            onClick = {
+                                                activeDialog = DetailUiDialog.GridSize
+                                                showMenu = false
+                                            },
+                                            leadingIcon = { Icon(Icons.Default.Grid4x4, null) }
+                                        )
+                                        if (!isVirtual && album != null) {
+                                            DropdownMenuItem(
+                                                text = { Text("Hide Album") },
+                                                onClick = {
+                                                    viewModel.toggleHiddenAlbum(album.id)
+                                                    val currentHidden = enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
+                                                    enginePrefs.edit().putStringSet("hidden_albums", currentHidden + album.id).apply()
+                                                    Toast.makeText(context, "Album Hidden", Toast.LENGTH_SHORT).show()
+                                                    showMenu = false
+                                                    actions.onBack()
+                                                },
+                                                leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text(if (album.isPinned) "Unpin Album" else "Pin Album") },
+                                                onClick = {
+                                                    viewModel.toggleAlbumPin(album)
+                                                    showMenu = false
+                                                },
+                                                leadingIcon = { Icon(if (album.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, null) }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Rename") },
+                                                onClick = {
+                                                    showRenameSheet = true
+                                                    showMenu = false
+                                                },
+                                                leadingIcon = { Icon(Icons.Outlined.Edit, null) }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Delete Album", color = MaterialTheme.colorScheme.error) },
+                                                onClick = {
+                                                    activeDialog = DetailUiDialog.DeleteAlbum
+                                                    showMenu = false
+                                                },
+                                                leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) }
+                                            )
+                                        }
+                                        DropdownMenuItem(
+                                            text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") },
+                                            onClick = {
+                                                showMenu = false
+                                                toggleAppLock(context, securityViewModel, isAppLockEnabled) { isAppLockEnabled = it }
+                                            },
+                                            leadingIcon = { Icon(if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, null) }
+                                        )
                                     }
                                 }
                             },
@@ -914,32 +1486,75 @@ fun AlbumDetailScreen(
                     exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
                 ) {
                     Surface(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp).navigationBarsPadding(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                            .navigationBarsPadding(),
                         shape = RoundedCornerShape(24.dp),
                         color = MaterialTheme.colorScheme.surface,
                         shadowElevation = 10.dp
                     ) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                            BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") { actions.onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), albumId); isSelectionMode = false }
-                            BottomBarActionItem(icon = Icons.Outlined.FileCopy, label = "Copy") { actions.onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), albumId); isSelectionMode = false }
-                            BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") { shareMediaItems(context, selectedIds.mapNotNull { mediaMap[it] }) }
-                            BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Trash", isDestructive = true) { activeDialog = DetailUiDialog.Delete(selectedIds.toList()) }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            BottomBarActionItem(icon = Icons.AutoMirrored.Outlined.DriveFileMove, label = "Move") {
+                                actions.onNavigateToMoveCopy("MOVE", selectedIds.joinToString(","), albumId)
+                                isSelectionMode = false
+                            }
+                            BottomBarActionItem(icon = Icons.Outlined.FileCopy, label = "Copy") {
+                                actions.onNavigateToMoveCopy("COPY", selectedIds.joinToString(","), albumId)
+                                isSelectionMode = false
+                            }
+                            BottomBarActionItem(icon = Icons.Outlined.Share, label = "Share") {
+                                shareMediaItems(context, selectedIds.mapNotNull { mediaMap[it] })
+                            }
+                            BottomBarActionItem(icon = Icons.Outlined.Delete, label = "Trash", isDestructive = true) {
+                                activeDialog = DetailUiDialog.Delete(selectedIds.toList())
+                            }
                             Box {
-                                BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") { showMediaSelectionMenu = true }
+                                BottomBarActionItem(icon = Icons.Default.MoreVert, label = "More") {
+                                    showMediaSelectionMenu = true
+                                }
                                 DropdownMenu(expanded = showMediaSelectionMenu, onDismissRequest = { showMediaSelectionMenu = false }) {
-                                    if (selectedIds.size == 1) DropdownMenuItem(text = { Text("Details") }, onClick = { showMediaSelectionMenu = false; metadataItemToShow = mediaMap[selectedIds.first()] }, leadingIcon = { Icon(Icons.Outlined.Info, null) })
+                                    if (selectedIds.size == 1) {
+                                        DropdownMenuItem(
+                                            text = { Text("Details") },
+                                            onClick = {
+                                                showMediaSelectionMenu = false
+                                                metadataItemToShow = mediaMap[selectedIds.first()]
+                                            },
+                                            leadingIcon = { Icon(Icons.Outlined.Info, null) }
+                                        )
+                                    }
                                     if (albumId == ID_HIDDEN) {
-                                        DropdownMenuItem(text = { Text("Unhide") }, onClick = { showMediaSelectionMenu = false; viewModel.unhideMedia(selectedIds.toList()); Toast.makeText(context, "Items restored", Toast.LENGTH_SHORT).show(); isSelectionMode = false }, leadingIcon = { Icon(Icons.Outlined.Visibility, null) })
+                                        DropdownMenuItem(
+                                            text = { Text("Unhide") },
+                                            onClick = {
+                                                showMediaSelectionMenu = false
+                                                viewModel.unhideMedia(selectedIds.toList())
+                                                Toast.makeText(context, "Items restored", Toast.LENGTH_SHORT).show()
+                                                isSelectionMode = false
+                                            },
+                                            leadingIcon = { Icon(Icons.Outlined.Visibility, null) }
+                                        )
                                     } else {
-                                        DropdownMenuItem(text = { Text("Hide") }, onClick = {
-                                            showMediaSelectionMenu = false
-                                            viewModel.hideItems(selectedIds.toList())
-                                            Toast.makeText(context, "${selectedIds.size} items hidden", Toast.LENGTH_SHORT).show()
-                                            optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(selectedIds)
-                                            val itemsToHide = allMedia.filter { selectedIds.contains(it.id) }
-                                            refreshAndClearCache(context, viewModel, itemsToHide.map { it.uri })
-                                            isSelectionMode = false
-                                        }, leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) })
+                                        DropdownMenuItem(
+                                            text = { Text("Hide") },
+                                            onClick = {
+                                                showMediaSelectionMenu = false
+                                                viewModel.hideItems(selectedIds.toList())
+                                                Toast.makeText(context, "${selectedIds.size} items hidden", Toast.LENGTH_SHORT).show()
+                                                optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(selectedIds)
+                                                val itemsToHide = allMedia.filter { selectedIds.contains(it.id) }
+                                                refreshAndClearCache(context, viewModel, itemsToHide.map { it.uri })
+                                                isSelectionMode = false
+                                            },
+                                            leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null) }
+                                        )
                                     }
                                 }
                             }
@@ -949,20 +1564,61 @@ fun AlbumDetailScreen(
             }
         ) { padding ->
             val bottomPadding = if (isSelectionMode) padding.calculateBottomPadding() else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-            Column(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding(), bottom = bottomPadding)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = padding.calculateTopPadding(), bottom = bottomPadding)
+            ) {
                 if (actuallyFilteredMedia.isEmpty() && localSearchQuery.isBlank() && mediaFilter == AlbumMediaFilter.ALL) {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Box(modifier = Modifier.size(112.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Outlined.ImageNotSupported, contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary) }
+                            Box(
+                                modifier = Modifier
+                                    .size(112.dp)
+                                    .clip(CircleShape)
+                                    .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.ImageNotSupported,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(48.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
                             Spacer(Modifier.height(24.dp))
-                            Text(text = "No photos here", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            if (!isVirtual) { Spacer(Modifier.height(32.dp)); Button(onClick = { actions.onAddMediaToAlbum?.invoke(albumId) }, shape = RoundedCornerShape(20.dp), modifier = Modifier.height(52.dp).padding(horizontal = 24.dp)) { Icon(Icons.Rounded.AddPhotoAlternate, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("Add Photos") } }
+                            Text(
+                                text = "No photos here",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (!isVirtual) {
+                                Spacer(Modifier.height(32.dp))
+                                Button(
+                                    onClick = { actions.onAddMediaToAlbum?.invoke(albumId) },
+                                    shape = RoundedCornerShape(20.dp),
+                                    modifier = Modifier
+                                        .height(52.dp)
+                                        .padding(horizontal = 24.dp)
+                                ) {
+                                    Icon(Icons.Rounded.AddPhotoAlternate, contentDescription = null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Add Photos")
+                                }
+                            }
                         }
                     }
                 } else {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         StatelessMediaGrid(
-                            gridState = gridState, mediaList = actuallyFilteredMedia, columnCount = detailColumns, screenWidthPx = screenWidthPx, isSelectionMode = isSelectionMode, selectedIds = selectedIds, deviceTier = deviceTier,
+                            gridState = gridState,
+                            mediaList = actuallyFilteredMedia,
+                            columnCount = detailColumns,
+                            screenWidthPx = screenWidthPx,
+                            isSelectionMode = isSelectionMode,
+                            selectedIds = selectedIds,
+                            deviceTier = deviceTier,
                             onToggleSelection = { item ->
                                 if (dragSelection.contains(item.id)) {
                                     dragSelection.remove(item.id)
@@ -998,34 +1654,106 @@ fun AlbumDetailScreen(
                                 selectedIds = dragSelection.toImmutableSet()
                             },
                             onMediaClick = { item -> viewModel.openViewer(item.id) },
-                            onMediaLongClick = { if (!isSelectionMode) { isSelectionMode = true } },
+                            onMediaLongClick = {
+                                if (!isSelectionMode) {
+                                    isSelectionMode = true
+                                }
+                            },
                             onToggleFavorite = { viewModel.toggleFavorite(it) },
                             header = {
                                 Column(modifier = Modifier.padding(horizontal = 12.dp)) {
                                     BasicTextField(
-                                        value = localSearchQuery, onValueChange = { localSearchQuery = it },
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).height(48.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                                        singleLine = true, textStyle = LocalTextStyle.current.copy(fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface),
+                                        value = localSearchQuery,
+                                        onValueChange = { localSearchQuery = it },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp)
+                                            .height(48.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                                        singleLine = true,
+                                        textStyle = LocalTextStyle.current.copy(
+                                            fontSize = 15.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        ),
                                         decorationBox = { innerTextField ->
-                                            Row(modifier = Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                Icon(imageVector = Icons.Rounded.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f), modifier = Modifier.size(20.dp))
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 16.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Search,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                                    modifier = Modifier.size(20.dp)
+                                                )
                                                 Spacer(Modifier.width(8.dp))
-                                                Box(Modifier.weight(1f)) { if (localSearchQuery.isEmpty()) Text(text = "Search photos inside album...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f), fontSize = 15.sp); innerTextField() }
-                                                if (localSearchQuery.isNotEmpty()) IconButton(onClick = { localSearchQuery = "" }, modifier = Modifier.size(28.dp)) { Icon(imageVector = Icons.Rounded.Close, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp)) }
+                                                Box(Modifier.weight(1f)) {
+                                                    if (localSearchQuery.isEmpty()) {
+                                                        Text(
+                                                            text = "Search photos inside album...",
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                                            fontSize = 15.sp
+                                                        )
+                                                    }
+                                                    innerTextField()
+                                                }
+                                                if (localSearchQuery.isNotEmpty()) {
+                                                    IconButton(
+                                                        onClick = { localSearchQuery = "" },
+                                                        modifier = Modifier.size(28.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Close,
+                                                            contentDescription = null,
+                                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     )
-                                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.ALL, label = "All") { mediaFilter = AlbumMediaFilter.ALL }
                                             SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.PHOTOS, label = "Photos") { mediaFilter = AlbumMediaFilter.PHOTOS }
                                             SamsungFilterChip(selected = mediaFilter == AlbumMediaFilter.VIDEOS, label = "Videos") { mediaFilter = AlbumMediaFilter.VIDEOS }
                                         }
-                                        Surface(onClick = { activeDialog = DetailUiDialog.Sort }, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                                            Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                        Surface(
+                                            onClick = { activeDialog = DetailUiDialog.Sort },
+                                            shape = RoundedCornerShape(16.dp),
+                                            color = MaterialTheme.colorScheme.surfaceContainerHigh
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.AutoMirrored.Filled.Sort,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
                                                 Spacer(Modifier.width(6.dp))
-                                                Text(text = when (currentPhotoSort) { PhotoSort.DateDesc -> "Newest"; PhotoSort.DateAsc -> "Oldest"; PhotoSort.NameAsc -> "A-Z"; PhotoSort.NameDesc -> "Z-A"; PhotoSort.SizeDesc -> "Size" }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                                                Text(
+                                                    text = when (currentPhotoSort) {
+                                                        PhotoSort.DateDesc -> "Newest"
+                                                        PhotoSort.DateAsc -> "Oldest"
+                                                        PhotoSort.NameAsc -> "A-Z"
+                                                        PhotoSort.NameDesc -> "Z-A"
+                                                        PhotoSort.SizeDesc -> "Size"
+                                                    },
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
                                             }
                                         }
                                     }
@@ -1039,16 +1767,92 @@ fun AlbumDetailScreen(
     }
 
     when (val dialog = activeDialog) {
-        is DetailUiDialog.DeleteAlbum -> AlertDialog(onDismissRequest = { activeDialog = DetailUiDialog.None }, icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) }, title = { Text("Delete Album?") }, text = { Text("This will delete the manual album placeholder. Any physical media stored within this folder on your device will remain intact.") }, confirmButton = { Button(colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), onClick = { actions.onDeleteAlbum?.invoke(albumId); activeDialog = DetailUiDialog.None; actions.onBack() }) { Text("Delete") } }, dismissButton = { TextButton(onClick = { activeDialog = DetailUiDialog.None }) { Text("Cancel") } })
-        is DetailUiDialog.Delete -> ModernMoveToTrashSheet(count = dialog.mediaIds.size, onDismiss = { activeDialog = DetailUiDialog.None }, onConfirm = { val itemsToTrash = allMedia.filter { dialog.mediaIds.contains(it.id) }; if (itemsToTrash.isNotEmpty()) { trashViewModel.confirmPendingGalleryTrash(itemsToTrash); optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(dialog.mediaIds) }; refreshAndClearCache(context, viewModel, allMedia.filter { dialog.mediaIds.contains(it.id) }.map { it.uri }); activeDialog = DetailUiDialog.None; isSelectionMode = false; viewModel.closeViewer() })
-        is DetailUiDialog.GridSize -> ModernGridSheet(currentColumns = detailColumns, max = 8, onDismiss = { activeDialog = DetailUiDialog.None }, onUpdate = { cols: Int -> detailColumns = cols; prefs.edit().putInt("gallery_media_grid_columns", cols).apply(); activeDialog = DetailUiDialog.None })
-        is DetailUiDialog.Sort -> ModernMediaSortSheet(activeSort = currentPhotoSort, onDismiss = { activeDialog = DetailUiDialog.None }, onSortSelected = { sort: PhotoSort -> currentPhotoSort = sort; activeDialog = DetailUiDialog.None })
+        is DetailUiDialog.DeleteAlbum -> {
+            AlertDialog(
+                onDismissRequest = { activeDialog = DetailUiDialog.None },
+                icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
+                title = { Text("Delete Album?") },
+                text = { Text("This will delete the manual album placeholder. Any physical media stored within this folder on your device will remain intact.") },
+                confirmButton = {
+                    Button(
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        onClick = {
+                            actions.onDeleteAlbum?.invoke(albumId)
+                            activeDialog = DetailUiDialog.None
+                            actions.onBack()
+                        }
+                    ) {
+                        Text("Delete")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { activeDialog = DetailUiDialog.None }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+        is DetailUiDialog.Delete -> {
+            ModernMoveToTrashSheet(
+                count = dialog.mediaIds.size,
+                onDismiss = { activeDialog = DetailUiDialog.None },
+                onConfirm = {
+                    val itemsToTrash = allMedia.filter { dialog.mediaIds.contains(it.id) }
+                    if (itemsToTrash.isNotEmpty()) {
+                        trashViewModel.confirmPendingGalleryTrash(itemsToTrash)
+                        optimisticallyRemovedIds = optimisticallyRemovedIds.addAll(dialog.mediaIds)
+                    }
+                    refreshAndClearCache(context, viewModel, allMedia.filter { dialog.mediaIds.contains(it.id) }.map { it.uri })
+                    activeDialog = DetailUiDialog.None
+                    isSelectionMode = false
+                    viewModel.closeViewer()
+                }
+            )
+        }
+        is DetailUiDialog.GridSize -> {
+            ModernGridSheet(
+                currentColumns = detailColumns,
+                max = 8,
+                onDismiss = { activeDialog = DetailUiDialog.None },
+                onUpdate = { cols: Int ->
+                    detailColumns = cols
+                    prefs.edit().putInt("gallery_media_grid_columns", cols).apply()
+                    activeDialog = DetailUiDialog.None
+                }
+            )
+        }
+        is DetailUiDialog.Sort -> {
+            ModernMediaSortSheet(
+                activeSort = currentPhotoSort,
+                onDismiss = { activeDialog = DetailUiDialog.None },
+                onSortSelected = { sort: PhotoSort ->
+                    currentPhotoSort = sort
+                    activeDialog = DetailUiDialog.None
+                }
+            )
+        }
         else -> {}
     }
 
-    if (showRenameSheet && album != null) ModernInputSheet(title = "Rename Album", initial = album.name, onDismiss = { showRenameSheet = false }, onConfirm = { newName: String -> viewModel.renameAlbum(album, newName); refreshAndClearCache(context, viewModel, allMedia.filter { it.bucketId == album.id }.map { it.uri }); showRenameSheet = false })
+    if (showRenameSheet && album != null) {
+        ModernInputSheet(
+            title = "Rename Album",
+            initial = album.name,
+            onDismiss = { showRenameSheet = false },
+            onConfirm = { newName: String ->
+                viewModel.renameAlbum(album, newName)
+                refreshAndClearCache(context, viewModel, allMedia.filter { it.bucketId == album.id }.map { it.uri })
+                showRenameSheet = false
+            }
+        )
+    }
 
-    metadataItemToShow?.let { MediaMetadataSheet(item = it, onDismiss = { metadataItemToShow = null }) }
+    metadataItemToShow?.let {
+        MediaMetadataSheet(
+            item = it,
+            onDismiss = { metadataItemToShow = null }
+        )
+    }
 
     val openViewerState = viewerState as? GalleryViewerState.Open
     val viewerItemId = openViewerState?.mediaId
@@ -1065,12 +1869,28 @@ fun AlbumDetailScreen(
             onPageChanged = {},
             onClose = { viewModel.closeViewer() },
             onToggleFavorite = { id: Long -> viewModel.toggleFavorite(id) },
-            onEdit = { item: MediaItem -> viewModel.closeViewer(); if (item.isVideo) actions.onNavigateToVideoEditor(item.uri.toString(), item.id) else actions.onNavigateToPhotoEditor(item.uri.toString(), item.id) },
+            onEdit = { item: MediaItem ->
+                viewModel.closeViewer()
+                if (item.isVideo) {
+                    actions.onNavigateToVideoEditor(item.uri.toString(), item.id)
+                } else {
+                    actions.onNavigateToPhotoEditor(item.uri.toString(), item.id)
+                }
+            },
             onPlayVideo = { uri: String, playlist: List<String> -> actions.onNavigateToVideoPlayer(uri, playlist) },
             onDelete = { item: MediaItem -> activeDialog = DetailUiDialog.Delete(listOf(item.id)) },
-            onMove = { item: MediaItem -> viewModel.closeViewer(); actions.onNavigateToMoveCopy("MOVE", item.id.toString(), albumId) },
-            onCopy = { item: MediaItem -> viewModel.closeViewer(); actions.onNavigateToMoveCopy("COPY", item.id.toString(), albumId) },
-            onWallpaper = { item: MediaItem -> viewModel.closeViewer(); actions.onNavigateToWallpaper(item.uri.toString(), item.id) }
+            onMove = { item: MediaItem ->
+                viewModel.closeViewer()
+                actions.onNavigateToMoveCopy("MOVE", item.id.toString(), albumId)
+            },
+            onCopy = { item: MediaItem ->
+                viewModel.closeViewer()
+                actions.onNavigateToMoveCopy("COPY", item.id.toString(), albumId)
+            },
+            onWallpaper = { item: MediaItem ->
+                viewModel.closeViewer()
+                actions.onNavigateToWallpaper(item.uri.toString(), item.id)
+            }
         )
     }
 }
@@ -1082,7 +1902,10 @@ fun StatelessAlbumGrid(
     isSelectionMode: Boolean, selectedIds: ImmutableSet<String>, sortOption: AlbumSort, searchQuery: String, screenWidthDp: Float, deviceTier: DeviceTier, sdCardAlbums: Set<String>,
     onOrderSaved: (List<Album>) -> Unit, onAlbumClick: (Album) -> Unit, onAlbumLongClick: (Album) -> Unit, onDragStateChange: (Boolean) -> Unit
 ) {
-    val haptic = LocalHapticFeedback.current; var draggedIndex by remember { mutableIntStateOf(-1) }; var dragOffset by remember { mutableStateOf(Offset.Zero) }; var scrollVelocity by remember { mutableFloatStateOf(0f) }
+    val haptic = LocalHapticFeedback.current
+    var draggedIndex by remember { mutableIntStateOf(-1) }
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    var scrollVelocity by remember { mutableFloatStateOf(0f) }
     val actualColumns = columnCount.coerceAtLeast(1)
 
     var isScrollingFast by remember { mutableStateOf(false) }
@@ -1116,132 +1939,153 @@ fun StatelessAlbumGrid(
     }
 
     LaunchedEffect(scrollVelocity) {
-        if (scrollVelocity != 0f) { while (isActive) { val consumed = gridState.scrollBy(scrollVelocity); if (consumed != 0f) dragOffset += Offset(0f, consumed); delay(16) } }
-    }
-
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(columnCount), state = gridState, modifier = Modifier.fillMaxSize().padding(padding),
-        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 90.dp), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        itemsIndexed(items = dynamicList, key = { _, album -> album.id }, contentType = { _, _ -> "album" }) { index, album ->
-            val isBeingDragged = draggedIndex == index
-            val reorderEnabled = sortOption == AlbumSort.Custom && searchQuery.isBlank()
-            val isSelectedSolo = isSelectionMode && selectedIds.size == 1 && selectedIds.contains(album.id)
-            val canDrag = reorderEnabled && isSelectedSolo
-
-            fun checkAndPerformSwap() {
-                val layoutInfo = gridState.layoutInfo
-                val visibleItems = layoutInfo.visibleItemsInfo
-                val draggedItemInfo = visibleItems.find { it.index == draggedIndex } ?: return
-                val draggedCenterX = draggedItemInfo.offset.x + (draggedItemInfo.size.width / 2) + dragOffset.x.roundToInt()
-                val draggedCenterY = draggedItemInfo.offset.y + (draggedItemInfo.size.height / 2) + dragOffset.y.roundToInt()
-                scrollVelocity = when {
-                    draggedCenterY < layoutInfo.viewportStartOffset + 180 -> -15f
-                    draggedCenterY > layoutInfo.viewportEndOffset - 180 -> 15f
-                    else -> 0f
-                }
-                val targetItemInfo = visibleItems.find {
-                    it.index != draggedIndex && it.index < dynamicList.size &&
-                            draggedCenterX in it.offset.x..(it.offset.x + it.size.width) &&
-                            draggedCenterY in it.offset.y..(it.offset.y + it.size.height)
-                }
-                if (targetItemInfo != null) {
-                    val targetIndex = targetItemInfo.index
-                    dragOffset -= Offset(
-                        (targetItemInfo.offset.x - draggedItemInfo.offset.x).toFloat(),
-                        (targetItemInfo.offset.y - draggedItemInfo.offset.y).toFloat()
-                    )
-                    val item = dynamicList.removeAt(draggedIndex)
-                    dynamicList.add(targetIndex, item)
-                    draggedIndex = targetIndex
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                }
-            }
-
-            val dragModifier = if (canDrag) {
-                Modifier.pointerInput(album.id) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        if (draggedIndex != -1) return@awaitEachGesture
-
-                        val smoothThresholdPx = with(this) { 4.dp.toPx() }
-                        var accumulated = Offset.Zero
-                        var started = false
-                        var lastSwapCheckMs = 0L
-
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            if (!change.pressed) break
-                            val delta = change.positionChange()
-                            if (!started) {
-                                accumulated += delta
-                                if (accumulated.getDistance() > smoothThresholdPx) {
-                                    started = true
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    draggedIndex = index
-                                    dragOffset = accumulated
-                                    onDragStateChange(true)
-                                    change.consume()
-                                    checkAndPerformSwap()
-                                    lastSwapCheckMs = System.currentTimeMillis()
-                                }
-                            } else {
-                                change.consume()
-                                dragOffset += delta
-                                val now = System.currentTimeMillis()
-                                if (now - lastSwapCheckMs > 32) {
-                                    checkAndPerformSwap()
-                                    lastSwapCheckMs = now
-                                }
-                            }
-                            if (!event.changes.any { it.pressed }) break
-                        }
-
-                        if (started) {
-                            draggedIndex = -1
-                            dragOffset = Offset.Zero
-                            scrollVelocity = 0f
-                            onDragStateChange(false)
-                            onOrderSaved(dynamicList.toList())
-                        }
-                    }
-                }
-            } else Modifier
-
-            val itemModifier = if (deviceTier == DeviceTier.LOW) Modifier else Modifier.animateItem()
-
-            Box(modifier = itemModifier
-                .zIndex(if (isBeingDragged) 1f else 0f)
-                .graphicsLayer {
-                    if (isBeingDragged) {
-                        translationX = dragOffset.x; translationY = dragOffset.y
-                        if (deviceTier != DeviceTier.LOW) {
-                            scaleX = 1.04f; scaleY = 1.04f; shadowElevation = 16.dp.toPx()
-                        }
-                    }
-                }
-            ) {
-                OptimizedAlbumTile(
-                    album = album,
-                    previews = albumPreviews[album.id] ?: persistentListOf(),
-                    isSelected = selectedIds.contains(album.id),
-                    isSelectionMode = isSelectionMode,
-                    canDrag = canDrag,
-                    isSdCard = sdCardAlbums.contains(album.id),
-                    deviceTier = deviceTier,
-                    isScrollingFast = isScrollingFast,
-                    dragModifier = dragModifier,
-                    thumbSize = dynamicThumbSize,
-                    onClick = { onAlbumClick(album) },
-                    onLongClick = { onAlbumLongClick(album) }
-                )
+        if (scrollVelocity != 0f) {
+            while (isActive) {
+                val consumed = gridState.scrollBy(scrollVelocity)
+                if (consumed != 0f) dragOffset += Offset(0f, consumed)
+                delay(16)
             }
         }
     }
+
+    Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columnCount),
+            state = gridState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 90.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            itemsIndexed(items = dynamicList, key = { _, album -> album.id }, contentType = { _, _ -> "album" }) { index, album ->
+                val isBeingDragged = draggedIndex == index
+                val reorderEnabled = sortOption == AlbumSort.Custom && searchQuery.isBlank()
+                val isSelectedSolo = isSelectionMode && selectedIds.size == 1 && selectedIds.contains(album.id)
+                val canDrag = reorderEnabled && isSelectedSolo
+
+                fun checkAndPerformSwap() {
+                    val layoutInfo = gridState.layoutInfo
+                    val visibleItems = layoutInfo.visibleItemsInfo
+                    val draggedItemInfo = visibleItems.find { it.index == draggedIndex } ?: return
+                    val draggedCenterX = draggedItemInfo.offset.x + (draggedItemInfo.size.width / 2) + dragOffset.x.roundToInt()
+                    val draggedCenterY = draggedItemInfo.offset.y + (draggedItemInfo.size.height / 2) + dragOffset.y.roundToInt()
+                    scrollVelocity = when {
+                        draggedCenterY < layoutInfo.viewportStartOffset + 180 -> -15f
+                        draggedCenterY > layoutInfo.viewportEndOffset - 180 -> 15f
+                        else -> 0f
+                    }
+                    val targetItemInfo = visibleItems.find {
+                        it.index != draggedIndex && it.index < dynamicList.size &&
+                                draggedCenterX in it.offset.x..(it.offset.x + it.size.width) &&
+                                draggedCenterY in it.offset.y..(it.offset.y + it.size.height)
+                    }
+                    if (targetItemInfo != null) {
+                        val targetIndex = targetItemInfo.index
+                        dragOffset -= Offset(
+                            (targetItemInfo.offset.x - draggedItemInfo.offset.x).toFloat(),
+                            (targetItemInfo.offset.y - draggedItemInfo.offset.y).toFloat()
+                        )
+                        val item = dynamicList.removeAt(draggedIndex)
+                        dynamicList.add(targetIndex, item)
+                        draggedIndex = targetIndex
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    }
+                }
+
+                val dragModifier = if (canDrag) {
+                    Modifier.pointerInput(album.id) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            if (draggedIndex != -1) return@awaitEachGesture
+
+                            val smoothThresholdPx = with(this) { 4.dp.toPx() }
+                            var accumulated = Offset.Zero
+                            var started = false
+                            var lastSwapCheckMs = 0L
+
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) break
+                                val delta = change.positionChange()
+                                if (!started) {
+                                    accumulated += delta
+                                    if (accumulated.getDistance() > smoothThresholdPx) {
+                                        started = true
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        draggedIndex = index
+                                        dragOffset = accumulated
+                                        onDragStateChange(true)
+                                        change.consume()
+                                        checkAndPerformSwap()
+                                        lastSwapCheckMs = System.currentTimeMillis()
+                                    }
+                                } else {
+                                    change.consume()
+                                    dragOffset += delta
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastSwapCheckMs > 32) {
+                                        checkAndPerformSwap()
+                                        lastSwapCheckMs = now
+                                    }
+                                }
+                                if (!event.changes.any { it.pressed }) break
+                            }
+
+                            if (started) {
+                                draggedIndex = -1
+                                dragOffset = Offset.Zero
+                                scrollVelocity = 0f
+                                onDragStateChange(false)
+                                onOrderSaved(dynamicList.toList())
+                            }
+                        }
+                    }
+                } else Modifier
+
+                val itemModifier = if (deviceTier == DeviceTier.LOW) Modifier else Modifier.animateItem()
+
+                Box(modifier = itemModifier
+                    .zIndex(if (isBeingDragged) 1f else 0f)
+                    .graphicsLayer {
+                        if (isBeingDragged) {
+                            translationX = dragOffset.x
+                            translationY = dragOffset.y
+                            if (deviceTier != DeviceTier.LOW) {
+                                scaleX = 1.04f
+                                scaleY = 1.04f
+                                shadowElevation = 16.dp.toPx()
+                            }
+                        }
+                    }
+                ) {
+                    OptimizedAlbumTile(
+                        album = album,
+                        previews = albumPreviews[album.id] ?: persistentListOf(),
+                        isSelected = selectedIds.contains(album.id),
+                        isSelectionMode = isSelectionMode,
+                        canDrag = canDrag,
+                        isSdCard = sdCardAlbums.contains(album.id),
+                        deviceTier = deviceTier,
+                        isScrollingFast = isScrollingFast,
+                        dragModifier = dragModifier,
+                        thumbSize = dynamicThumbSize,
+                        onClick = { onAlbumClick(album) },
+                        onLongClick = { onAlbumLongClick(album) }
+                    )
+                }
+            }
+        }
+        SamsungFastScrollbar(
+            gridState = gridState,
+            itemCount = dynamicList.size,
+            labelForIndex = { index -> dynamicList.getOrNull(index)?.name?.take(1)?.uppercase() ?: "" },
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
+        )
+    }
 }
 
-
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun StatelessMediaGrid(
     gridState: LazyGridState, mediaList: ImmutableList<MediaItem>, columnCount: Int, screenWidthPx: Int, isSelectionMode: Boolean, selectedIds: ImmutableSet<Long>, deviceTier: DeviceTier,
@@ -1409,39 +2253,62 @@ fun StatelessMediaGrid(
         }
     }
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(columnCount), state = gridState, modifier = Modifier.fillMaxSize().then(slideModifier),
-        contentPadding = PaddingValues(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 90.dp), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        item(span = { GridItemSpan(maxLineSpan) }, contentType = "header") {
-            header()
-        }
-        if (mediaList.isEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Box(modifier = Modifier.fillMaxWidth().height(250.dp), contentAlignment = Alignment.Center) {
-                    Text(text = "No matching items found", color = Color.Gray, fontSize = 15.sp)
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columnCount),
+            state = gridState,
+            modifier = Modifier.fillMaxSize().then(slideModifier),
+            contentPadding = PaddingValues(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 90.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }, contentType = "header") {
+                header()
+            }
+            if (mediaList.isEmpty()) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Box(modifier = Modifier.fillMaxWidth().height(250.dp), contentAlignment = Alignment.Center) {
+                        Text(text = "No matching items found", color = Color.Gray, fontSize = 15.sp)
+                    }
+                }
+            } else {
+                items(count = mediaList.size, key = { i -> mediaList[i].id }, contentType = { if (mediaList[it].isVideo) "video" else "photo" }) { index ->
+                    val currentItem = mediaList[index]
+                    val itemSelected = selectedIds.contains(currentItem.id)
+
+                    val itemModifier = if (deviceTier == DeviceTier.LOW) Modifier else Modifier.animateItem()
+
+                    ModernMediaGridTile(
+                        modifier = itemModifier,
+                        item = currentItem,
+                        thumbSize = dynamicThumbSize,
+                        isSelected = itemSelected,
+                        isSelectionMode = isSelectionMode,
+                        deviceTier = deviceTier,
+                        isScrollingFast = isScrollingFast,
+                        onClick = {
+                            if (isSelectionMode) {
+                                onToggleSelection(currentItem)
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            } else onMediaClick(currentItem)
+                        },
+                        onToggleFavorite = { onToggleFavorite(currentItem.id) }
+                    )
                 }
             }
-        } else {
-            items(count = mediaList.size, key = { i -> mediaList[i].id }, contentType = { if (mediaList[it].isVideo) "video" else "photo" }) { index ->
-                val currentItem = mediaList[index]
-                val itemSelected = selectedIds.contains(currentItem.id)
-
-                val itemModifier = if (deviceTier == DeviceTier.LOW) Modifier else Modifier.animateItem()
-
-                ModernMediaGridTile(
-                    modifier = itemModifier, item = currentItem, thumbSize = dynamicThumbSize, isSelected = itemSelected, isSelectionMode = isSelectionMode, deviceTier = deviceTier,
-                    isScrollingFast = isScrollingFast,
-                    onClick = {
-                        if (isSelectionMode) {
-                            onToggleSelection(currentItem)
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        } else onMediaClick(currentItem)
-                    },
-                    onToggleFavorite = { onToggleFavorite(currentItem.id) }
-                )
-            }
         }
+
+        SamsungFastScrollbar(
+            gridState = gridState,
+            itemCount = mediaList.size,
+            indexOffset = 1,
+            labelForIndex = { index ->
+                mediaList.getOrNull(index)?.let {
+                    monthYearFormatter.format(Date(it.dateAdded * 1000L))
+                } ?: ""
+            },
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
+        )
     }
 }
 
@@ -1452,43 +2319,116 @@ private fun OptimizedAlbumTile(
     thumbSize: Int, dragModifier: Modifier = Modifier, onClick: () -> Unit, onLongClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
-    val clickModifier = if (canDrag) Modifier.then(dragModifier).clickable(interactionSource = interactionSource, indication = null, onClick = onClick) else Modifier.combinedClickable(interactionSource = interactionSource, indication = null, onClick = onClick, onLongClick = onLongClick)
+    val clickModifier = if (canDrag) {
+        Modifier.then(dragModifier).clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+    } else {
+        Modifier.combinedClickable(interactionSource = interactionSource, indication = null, onClick = onClick, onLongClick = onLongClick)
+    }
     val tileShape = RoundedCornerShape(20.dp)
 
     Column(modifier = Modifier.fillMaxWidth().then(clickModifier)) {
-        Surface(modifier = Modifier.aspectRatio(1f), shape = tileShape, color = MaterialTheme.colorScheme.surfaceContainerHigh, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))) {
-            val actualCoverUri = remember(album.coverUri, previews) { if (album.coverUri != Uri.EMPTY) album.coverUri else previews.firstOrNull() }
-            Box(modifier = Modifier.fillMaxSize()) {
+        Surface(
+            modifier = Modifier.aspectRatio(1f),
+            shape = tileShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        ) {
+            val actualCoverUri = remember(album.coverUri, previews) {
+                if (album.coverUri != Uri.EMPTY) album.coverUri else previews.firstOrNull()
+            }
+            Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHighest)) {
                 if (actualCoverUri == null) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Box(modifier = Modifier.size(56.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Outlined.PhotoAlbum, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp)) }
-                            Spacer(Modifier.height(8.dp)); Text(text = "Empty Album", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Box(
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(CircleShape)
+                                    .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.PhotoAlbum,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Empty Album",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 } else {
                     val request = rememberGridImageRequest(uri = actualCoverUri, size = thumbSize, isVideo = false, deviceTier = deviceTier, isScrollingFast = isScrollingFast)
-                    AsyncImage(model = request, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                    Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha=0.4f)))))
+                    AsyncImage(
+                        model = request,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha=0.4f))))
+                    )
                 }
                 if (isSelectionMode) {
-                    Box(modifier = Modifier.fillMaxSize().background(if (isSelected) Color.White.copy(alpha = 0.25f) else Color.Black.copy(alpha = 0.1f)))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(if (isSelected) Color.White.copy(alpha = 0.25f) else Color.Black.copy(alpha = 0.1f))
+                    )
                     Box(modifier = Modifier.padding(8.dp).align(Alignment.TopStart)) {
-                        if (isSelected) Icon(imageVector = Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp).shadow(4.dp, CircleShape).background(Color.White, CircleShape))
-                        else Icon(imageVector = Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.size(24.dp).shadow(2.dp, CircleShape))
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Filled.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp).shadow(4.dp, CircleShape).background(Color.White, CircleShape)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Outlined.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.9f),
+                                modifier = Modifier.size(24.dp).shadow(2.dp, CircleShape)
+                            )
+                        }
                     }
                 }
             }
         }
         Spacer(Modifier.height(8.dp))
         Row(modifier = Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(text = album.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f, fill = false))
+            Text(
+                text = album.name,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f, fill = false)
+            )
             if (isSdCard) {
                 Spacer(Modifier.width(4.dp))
-                Icon(imageVector = Icons.Rounded.SdStorage, contentDescription = "SD Card", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(
+                    imageVector = Icons.Rounded.SdStorage,
+                    contentDescription = "SD Card",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
-        Text(text = "${album.mediaCount} items", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 4.dp))
+        Text(
+            text = "${album.mediaCount} items",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
     }
 }
 
@@ -1500,46 +2440,111 @@ fun ModernMediaGridTile(
     val animate = deviceTier != DeviceTier.LOW && !isScrollingFast
     val animatedRadius = if (animate) {
         animateDpAsState(if (isSelected) 16.dp else 12.dp, tween(120), label = "radius").value
-    } else if (isSelected) 16.dp else 12.dp
+    } else {
+        if (isSelected) 16.dp else 12.dp
+    }
+
     val scale = if (animate) {
         animateFloatAsState(if (isSelected) 0.85f else 1f, tween(120), label = "scale").value
-    } else if (isSelected) 0.85f else 1f
+    } else {
+        if (isSelected) 0.85f else 1f
+    }
 
     val context = LocalContext.current
 
-    Box(modifier = modifier.aspectRatio(1f).graphicsLayer { scaleX = scale; scaleY = scale }.clip(RoundedCornerShape(animatedRadius)).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)) {
-
+    Box(
+        modifier = modifier
+            .aspectRatio(1f)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(animatedRadius))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
+    ) {
         val request = rememberGridImageRequest(uri = item.uri, size = thumbSize, isVideo = item.isVideo, deviceTier = deviceTier, isScrollingFast = isScrollingFast)
-        AsyncImage(model = request, placeholder = null, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low, modifier = Modifier.fillMaxSize())
+        AsyncImage(
+            model = request,
+            placeholder = null,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            filterQuality = FilterQuality.Low,
+            modifier = Modifier.fillMaxSize()
+        )
 
         if (item.isVideo) {
-            Box(modifier = Modifier.fillMaxSize().drawWithCache { val brush = Brush.verticalGradient(0.5f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.75f)); onDrawBehind { drawRect(brush) } })
-            Surface(modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp), shape = RoundedCornerShape(12.dp), color = Color.Black.copy(alpha = 0.6f)) {
-                Row(modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .drawWithCache {
+                        val brush = Brush.verticalGradient(0.5f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.75f))
+                        onDrawBehind { drawRect(brush) }
+                    }
+            )
+            Surface(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                shape = RoundedCornerShape(12.dp),
+                color = Color.Black.copy(alpha = 0.6f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Icon(Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(12.dp))
                     Spacer(Modifier.width(2.dp))
-                    Text(text = formatDuration(item.duration), fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = formatDuration(item.duration),
+                        fontSize = 11.sp,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
-        SelectionOverlay(isSelected = isSelected, isSelectionMode = isSelectionMode, cornerRadius = animatedRadius, deviceTier = deviceTier)
+        SelectionOverlay(
+            isSelected = isSelected,
+            isSelectionMode = isSelectionMode,
+            cornerRadius = animatedRadius,
+            deviceTier = deviceTier
+        )
     }
 }
 
 @Composable
 fun SelectionOverlay(isSelected: Boolean, isSelectionMode: Boolean, cornerRadius: Dp, deviceTier: DeviceTier) {
     if (isSelectionMode) {
-        Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(cornerRadius))) {
-            Box(modifier = Modifier.fillMaxSize().background(if (isSelected) Color.White.copy(alpha = 0.25f) else Color.Transparent))
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(cornerRadius))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(if (isSelected) Color.White.copy(alpha = 0.25f) else Color.Transparent)
+            )
 
             val enterAnim = if (deviceTier == DeviceTier.LOW) fadeIn(tween(80)) else scaleIn() + fadeIn()
             val exitAnim = if (deviceTier == DeviceTier.LOW) fadeOut(tween(80)) else scaleOut() + fadeOut()
 
-            AnimatedVisibility(visible = isSelected, enter = enterAnim, exit = exitAnim, modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
-                Icon(imageVector = Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp).shadow(4.dp, CircleShape).background(Color.White, CircleShape))
+            AnimatedVisibility(
+                visible = isSelected,
+                enter = enterAnim,
+                exit = exitAnim,
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp).shadow(4.dp, CircleShape).background(Color.White, CircleShape)
+                )
             }
             if (!isSelected) {
-                Icon(imageVector = Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = Color.White.copy(alpha = 0.9f), modifier = Modifier.align(Alignment.TopStart).padding(8.dp).size(24.dp).shadow(2.dp, CircleShape))
+                Icon(
+                    imageVector = Icons.Outlined.RadioButtonUnchecked,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.9f),
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp).size(24.dp).shadow(2.dp, CircleShape)
+                )
             }
         }
     }
@@ -1547,47 +2552,191 @@ fun SelectionOverlay(isSelected: Boolean, isSelectionMode: Boolean, cornerRadius
 
 @Composable
 fun SamsungFilterChip(selected: Boolean, label: String, onClick: () -> Unit) {
-    Surface(onClick = onClick, shape = CircleShape, color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHigh, contentColor = if (selected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface) {
-        Text(text = label, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = if (selected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 
 @Composable
 fun ActionItem(icon: ImageVector, label: String, isDestructive: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     val contentColor = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-    ElevatedCard(modifier = Modifier.width(86.dp).clip(RoundedCornerShape(20.dp)).clickable(enabled = enabled, onClick = onClick), shape = RoundedCornerShape(20.dp), elevation = CardDefaults.elevatedCardElevation(3.dp), colors = CardDefaults.elevatedCardColors(containerColor = if (enabled) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainerLowest)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(modifier = Modifier.size(46.dp).clip(CircleShape).background(contentColor.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Icon(imageVector = icon, contentDescription = label, tint = if (enabled) contentColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f), modifier = Modifier.size(24.dp)) }
-            if (label.isNotEmpty()) { Spacer(Modifier.height(10.dp)); Text(text = label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = if (enabled) contentColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f), maxLines = 1) }
-            else { Spacer(Modifier.height(10.dp)); Text(text = " ", style = MaterialTheme.typography.labelMedium) }
+    ElevatedCard(
+        modifier = Modifier
+            .width(86.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .clickable(enabled = enabled, onClick = onClick),
+        shape = RoundedCornerShape(20.dp),
+        elevation = CardDefaults.elevatedCardElevation(3.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = if (enabled) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainerLowest
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(CircleShape)
+                    .background(contentColor.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = if (enabled) contentColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            if (label.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (enabled) contentColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                    maxLines = 1
+                )
+            } else {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = " ",
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
         }
     }
 }
 
 @Composable
 fun BottomBarActionItem(icon: ImageVector, label: String, isDestructive: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
-    val contentColor = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface; val alphaColor = if (enabled) contentColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-    Column(modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(enabled = enabled, onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(alphaColor.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
-            Icon(imageVector = icon, contentDescription = label, tint = alphaColor, modifier = Modifier.size(20.dp))
+    val contentColor = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+    val alphaColor = if (enabled) contentColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(alphaColor.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = alphaColor,
+                modifier = Modifier.size(20.dp)
+            )
         }
-        if (label.isNotEmpty()) { Spacer(Modifier.height(6.dp)); Text(text = label, style = MaterialTheme.typography.labelMedium, color = alphaColor, maxLines = 1) }
+        if (label.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = alphaColor,
+                maxLines = 1
+            )
+        }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit) {
-    Surface(modifier = Modifier.fillMaxWidth(), shadowElevation = 2.dp, color = MaterialTheme.colorScheme.surface) {
-        Row(modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            FilledIconButton(onClick = onClose, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) { Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaterialTheme.colorScheme.onSurface) }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shadowElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilledIconButton(
+                onClick = onClose,
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
             Spacer(Modifier.width(14.dp))
-            Surface(modifier = Modifier.weight(1f), shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Rounded.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
+            Surface(
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
                     Spacer(Modifier.width(10.dp))
-                    TextField(value = query, onValueChange = onQueryChange, modifier = Modifier.weight(1f), placeholder = { Text("Search albums, photos...", color = MaterialTheme.colorScheme.onSurfaceVariant) }, singleLine = true, textStyle = MaterialTheme.typography.bodyLarge, colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, disabledContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, focusedTextColor = MaterialTheme.colorScheme.onSurface, unfocusedTextColor = MaterialTheme.colorScheme.onSurface, cursorColor = MaterialTheme.colorScheme.primary))
-                    if (query.isNotEmpty()) { FilledIconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(34.dp), colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))) { Icon(imageVector = Icons.Rounded.Close, contentDescription = "Clear", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp)) } }
+                    TextField(
+                        value = query,
+                        onValueChange = onQueryChange,
+                        modifier = Modifier.weight(1f),
+                        placeholder = {
+                            Text(
+                                "Search albums, photos...",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyLarge,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            cursorColor = MaterialTheme.colorScheme.primary
+                        )
+                    )
+                    if (query.isNotEmpty()) {
+                        FilledIconButton(
+                            onClick = { onQueryChange("") },
+                            modifier = Modifier.size(34.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Clear",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1598,9 +2747,55 @@ fun SearchTopBar(query: String, onQueryChange: (String) -> Unit, onClose: () -> 
 fun EmptyAlbumsOverlay(onCreateClick: () -> Unit) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(modifier = Modifier.size(112.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Outlined.PhotoAlbum, contentDescription = null, modifier = Modifier.size(58.dp), tint = MaterialTheme.colorScheme.primary) }
-            Spacer(Modifier.height(28.dp)); Text(text = "No Albums", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface); Spacer(Modifier.height(10.dp)); Text(text = "Create albums to organize your memories.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center); Spacer(Modifier.height(34.dp))
-            Button(onClick = onCreateClick, modifier = Modifier.height(58.dp).padding(horizontal = 24.dp), shape = RoundedCornerShape(20.dp), elevation = ButtonDefaults.buttonElevation(4.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)) { Icon(imageVector = Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Create Album", fontWeight = FontWeight.Bold) }
+            Box(
+                modifier = Modifier
+                    .size(112.dp)
+                    .clip(CircleShape)
+                    .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.PhotoAlbum,
+                    contentDescription = null,
+                    modifier = Modifier.size(58.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(Modifier.height(28.dp))
+            Text(
+                text = "No Albums",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "Create albums to organize your memories.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(34.dp))
+            Button(
+                onClick = onCreateClick,
+                modifier = Modifier
+                    .height(58.dp)
+                    .padding(horizontal = 24.dp),
+                shape = RoundedCornerShape(20.dp),
+                elevation = ButtonDefaults.buttonElevation(4.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Create Album",
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
@@ -1608,20 +2803,103 @@ fun EmptyAlbumsOverlay(onCreateClick: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernAlbumSortSheet(activeSort: AlbumSort, onDismiss: () -> Unit, onSortSelected: (AlbumSort) -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+    ) {
         Column(modifier = Modifier.fillMaxWidth().padding(bottom = 34.dp)) {
-            Row(modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp)) }
+            Row(
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Sort,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
                 Spacer(Modifier.width(16.dp))
-                Column { Text(text = "Sort Albums", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Choose album arrangement", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column {
+                    Text(
+                        text = "Sort Albums",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Choose album arrangement",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Spacer(Modifier.height(16.dp))
             AlbumSort.entries.forEach { option ->
-                val isSelected = activeSort == option; val sortLabel = when (option.name) { "DateDesc" -> "Newest First"; "DateAsc" -> "Oldest First"; "NameAsc" -> "A → Z"; "NameDesc" -> "Z → A"; "SizeDesc" -> "Largest First"; "CountDesc" -> "Most Items"; "Custom" -> "Manual Order"; else -> option.name }
-                Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).clip(RoundedCornerShape(20.dp)).clickable { onSortSelected(option) }, shape = RoundedCornerShape(20.dp), color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = if (isSelected) 2.dp else 0.dp) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.size(28.dp).clip(CircleShape).background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) { Icon(imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)) }
-                        Spacer(Modifier.width(16.dp)); Text(text = sortLabel, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface); Spacer(Modifier.weight(1f)); if (isSelected) { Icon(imageVector = Icons.Rounded.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
+                val isSelected = activeSort == option
+                val sortLabel = when (option.name) {
+                    "DateDesc" -> "Newest First"
+                    "DateAsc" -> "Oldest First"
+                    "NameAsc" -> "A → Z"
+                    "NameDesc" -> "Z → A"
+                    "SizeDesc" -> "Largest First"
+                    "CountDesc" -> "Most Items"
+                    "Custom" -> "Manual Order"
+                    else -> option.name
+                }
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { onSortSelected(option) },
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    tonalElevation = if (isSelected) 2.dp else 0.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Text(
+                            text = sortLabel,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.weight(1f))
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Rounded.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
             }
@@ -1632,20 +2910,100 @@ fun ModernAlbumSortSheet(activeSort: AlbumSort, onDismiss: () -> Unit, onSortSel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernMediaSortSheet(activeSort: PhotoSort, onDismiss: () -> Unit, onSortSelected: (PhotoSort) -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+    ) {
         Column(modifier = Modifier.fillMaxWidth().padding(bottom = 34.dp)) {
-            Row(modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.AutoMirrored.Filled.Sort, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp)) }
+            Row(
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Sort,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
                 Spacer(Modifier.width(16.dp))
-                Column { Text(text = "Sort Media", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Arrange photos and videos", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column {
+                    Text(
+                        text = "Sort Media",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Arrange photos and videos",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Spacer(Modifier.height(16.dp))
             PhotoSort.entries.forEach { option ->
-                val isSelected = activeSort == option; val sortLabel = when (option) { PhotoSort.DateDesc -> "Newest First"; PhotoSort.DateAsc -> "Oldest First"; PhotoSort.NameAsc -> "Name (A → Z)"; PhotoSort.NameDesc -> "Name (Z → A)"; PhotoSort.SizeDesc -> "Largest First" }
-                Surface(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).clip(RoundedCornerShape(20.dp)).clickable { onSortSelected(option) }, shape = RoundedCornerShape(20.dp), color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh, tonalElevation = if (isSelected) 2.dp else 0.dp) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.size(28.dp).clip(CircleShape).background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) { Icon(imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked, contentDescription = null, tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp)) }
-                        Spacer(Modifier.width(16.dp)); Text(text = sortLabel, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface); Spacer(Modifier.weight(1f)); if (isSelected) { Icon(imageVector = Icons.Rounded.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
+                val isSelected = activeSort == option
+                val sortLabel = when (option) {
+                    PhotoSort.DateDesc -> "Newest First"
+                    PhotoSort.DateAsc -> "Oldest First"
+                    PhotoSort.NameAsc -> "Name (A → Z)"
+                    PhotoSort.NameDesc -> "Name (Z → A)"
+                    PhotoSort.SizeDesc -> "Largest First"
+                }
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { onSortSelected(option) },
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    tonalElevation = if (isSelected) 2.dp else 0.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHighest),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isSelected) Icons.Rounded.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Text(
+                            text = sortLabel,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.weight(1f))
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Rounded.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
             }
@@ -1662,13 +3020,41 @@ fun ModernGridSheet(currentColumns: Int, max: Int = 8, onDismiss: () -> Unit, on
         dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp, top = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp, top = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Rounded.GridView, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp)) }
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.GridView,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
                 Spacer(Modifier.width(16.dp))
-                Column { Text(text = "Grid Layout", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Choose columns per row", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column {
+                    Text(
+                        text = "Grid Layout",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Choose columns per row",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Spacer(Modifier.height(24.dp))
 
@@ -1685,13 +3071,19 @@ fun ModernGridSheet(currentColumns: Int, max: Int = 8, onDismiss: () -> Unit, on
                         shape = RoundedCornerShape(16.dp),
                         color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
                         contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.aspectRatio(1f).clickable {
-                            onUpdate(col)
-                            onDismiss()
-                        }
+                        modifier = Modifier
+                            .aspectRatio(1f)
+                            .clickable {
+                                onUpdate(col)
+                                onDismiss()
+                            }
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Text(text = col.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = col.toString(),
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
@@ -1703,23 +3095,109 @@ fun ModernGridSheet(currentColumns: Int, max: Int = 8, onDismiss: () -> Unit, on
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernCreateAlbumSheet(onDismiss: () -> Unit, onCreate: (String, Boolean) -> Unit) {
-    var text by remember { mutableStateOf("") }; var useSdCard by remember { mutableStateOf(false) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+    var text by remember { mutableStateOf("") }
+    var useSdCard by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Rounded.CreateNewFolder, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp)) }
-                Spacer(Modifier.width(16.dp)); Column { Text(text = "Create Album", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Organize your memories", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            }
-            Spacer(Modifier.height(24.dp)); OutlinedTextField(value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(16.dp), label = { Text("Album Name") }, leadingIcon = { Icon(Icons.Rounded.Folder, null) }); Spacer(Modifier.height(16.dp))
-            Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                Row(modifier = Modifier.fillMaxWidth().clickable { useSdCard = !useSdCard }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = useSdCard, onCheckedChange = { useSdCard = it }); Spacer(Modifier.width(12.dp)); Column { Text("Create on SD Card", fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(2.dp)); Text(text = "Store album externally", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CreateNewFolder,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = "Create Album",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Organize your memories",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
             Spacer(Modifier.height(24.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilledTonalButton(onClick = onDismiss, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) { Text("Cancel", fontWeight = FontWeight.Bold) }
-                Button(onClick = { if (text.isNotBlank()) onCreate(text.trim(), useSdCard) }, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) { Text("Create Album", fontWeight = FontWeight.Bold) }
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = RoundedCornerShape(16.dp),
+                label = { Text("Album Name") },
+                leadingIcon = { Icon(Icons.Rounded.Folder, null) }
+            )
+            Spacer(Modifier.height(16.dp))
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { useSdCard = !useSdCard }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = useSdCard, onCheckedChange = { useSdCard = it })
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text("Create on SD Card", fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "Store album externally",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Cancel", fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = { if (text.isNotBlank()) onCreate(text.trim(), useSdCard) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Create Album", fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
@@ -1729,17 +3207,78 @@ fun ModernCreateAlbumSheet(onDismiss: () -> Unit, onCreate: (String, Boolean) ->
 @Composable
 fun ModernInputSheet(title: String, initial: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var text by remember { mutableStateOf(initial) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Outlined.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp)) }
-                Spacer(Modifier.width(16.dp)); Column { Text(text = title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Update the name", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Edit,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Update the name",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Spacer(Modifier.height(24.dp))
-            OutlinedTextField(value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(16.dp)); Spacer(Modifier.height(24.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilledTonalButton(onClick = onDismiss, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) { Text("Cancel", fontWeight = FontWeight.Bold) }
-                Button(onClick = { if (text.isNotBlank()) onConfirm(text.trim()) }, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) { Text("Save", fontWeight = FontWeight.Bold) }
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = RoundedCornerShape(16.dp)
+            )
+            Spacer(Modifier.height(24.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Cancel", fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = { if (text.isNotBlank()) onConfirm(text.trim()) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Save", fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
@@ -1748,20 +3287,94 @@ fun ModernInputSheet(title: String, initial: String, onDismiss: () -> Unit, onCo
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModernMoveToTrashSheet(count: Int, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.error.copy(alpha=0.2f), MaterialTheme.colorScheme.error.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Outlined.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(24.dp)) }
-                Spacer(Modifier.width(16.dp)); Column { Text(text = "Move to Trash", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "$count item(s) selected", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.error.copy(alpha=0.2f), MaterialTheme.colorScheme.error.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Delete,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = "Move to Trash",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "$count item(s) selected",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Spacer(Modifier.height(24.dp))
-            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(imageVector = Icons.Outlined.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.width(12.dp)); Text(text = "Items will be moved to the Trash. You can restore them within 30 days.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, lineHeight = 20.sp) }
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = "Items will be moved to the Trash. You can restore them within 30 days.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 20.sp
+                    )
+                }
             }
-            Spacer(Modifier.height(32.dp));
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilledTonalButton(onClick = onDismiss, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) { Text("Cancel", fontWeight = FontWeight.Bold) }
-                Button(onClick = onConfirm, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Move to Trash", fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.height(32.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Cancel", fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = onConfirm,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Move to Trash", fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
@@ -1777,20 +3390,72 @@ fun ModernAlbumTopBar(
 ) {
     var showMenu by remember { mutableStateOf(false) }
     CenterAlignedTopAppBar(
-        title = { Text(text = "Albums", maxLines = 1, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
+        title = {
+            Text(
+                text = "Albums",
+                maxLines = 1,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        },
         actions = {
-            IconButton(onClick = onSearchClick) { Icon(imageVector = Icons.Outlined.Search, contentDescription = "Search", tint = MaterialTheme.colorScheme.onSurface) }
+            IconButton(onClick = onSearchClick) {
+                Icon(
+                    imageVector = Icons.Outlined.Search,
+                    contentDescription = "Search",
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
             Box {
-                IconButton(onClick = { showMenu = true }) { Icon(imageVector = Icons.Rounded.MoreVert, contentDescription = "More", tint = MaterialTheme.colorScheme.onSurface) }
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(
+                        imageVector = Icons.Rounded.MoreVert,
+                        contentDescription = "More",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    DropdownMenuItem(text = { Text("Create Album") }, onClick = { onMenuAction("create"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Rounded.CreateNewFolder, contentDescription = null) })
-                    DropdownMenuItem(text = { Text("View Duplicates") }, onClick = { onMenuAction("duplicates"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.FileCopy, contentDescription = null) })
-                    DropdownMenuItem(text = { Text("Scan Library") }, onClick = { onMenuAction("scan"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.ImageSearch, contentDescription = null) })
-                    DropdownMenuItem(text = { Text("Grid Size") }, onClick = { onMenuAction("grid"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Rounded.GridView, contentDescription = null) })
-                    DropdownMenuItem(text = { Text("Sort") }, onClick = { onMenuAction("sort"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.Sort, contentDescription = null) })
-                    DropdownMenuItem(text = { Text("Trash") }, onClick = { onMenuAction("trash"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.Delete, contentDescription = null) })
-                    DropdownMenuItem(text = { Text("Hidden Albums") }, onClick = { onMenuAction("hidden"); showMenu = false }, leadingIcon = { Icon(imageVector = Icons.Outlined.VisibilityOff, contentDescription = null) })
-                    DropdownMenuItem(text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") }, onClick = { onMenuAction("toggle_lock"); showMenu = false }, leadingIcon = { Icon(imageVector = if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, contentDescription = null) })
+                    DropdownMenuItem(
+                        text = { Text("Create Album") },
+                        onClick = { onMenuAction("create"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Rounded.CreateNewFolder, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("View Duplicates") },
+                        onClick = { onMenuAction("duplicates"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.FileCopy, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Scan Library") },
+                        onClick = { onMenuAction("scan"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.ImageSearch, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Grid Size") },
+                        onClick = { onMenuAction("grid"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Rounded.GridView, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Sort") },
+                        onClick = { onMenuAction("sort"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.Sort, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Trash") },
+                        onClick = { onMenuAction("trash"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.Delete, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Hidden Albums") },
+                        onClick = { onMenuAction("hidden"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.VisibilityOff, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (isAppLockEnabled) "Disable App Lock" else "Enable App Lock") },
+                        onClick = { onMenuAction("toggle_lock"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = if (isAppLockEnabled) Icons.Outlined.LockOpen else Icons.Outlined.Lock, contentDescription = null) }
+                    )
                 }
             }
         },
@@ -1802,15 +3467,58 @@ fun ModernAlbumTopBar(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) {
-    val context = LocalContext.current; val ds = remember(item) { SimpleDateFormat("EEEE, MMMM dd, yyyy 'at' hh a", Locale.getDefault()).format(Date(item.dateAdded * 1000)) }; val sz = remember(item) { Formatter.formatFileSize(context, item.size) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }) {
-        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+    val context = LocalContext.current
+    val ds = remember(item) {
+        SimpleDateFormat("EEEE, MMMM dd, yyyy 'at' hh a", Locale.getDefault()).format(Date(item.dateAdded * 1000))
+    }
+    val sz = remember(item) { Formatter.formatFileSize(context, item.size) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle(width = 48.dp, height = 4.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Outlined.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp)) }
-                Spacer(Modifier.width(16.dp)); Column { Text(text = "Media Details", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Spacer(Modifier.height(4.dp)); Text(text = "Information & metadata", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = "Media Details",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Information & metadata",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Spacer(Modifier.height(24.dp))
-            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     MetadataRow(icon = Icons.Outlined.Title, label = "Name", value = item.name)
                     MetadataRow(icon = Icons.Outlined.Folder, label = "Path", value = item.path)
@@ -1827,9 +3535,41 @@ fun MediaMetadataSheet(item: MediaItem, onDismiss: () -> Unit) {
 
 @Composable
 fun MetadataRow(icon: ImageVector, label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.Top) {
-        Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) { Icon(imageVector = icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp)) }
-        Spacer(Modifier.width(16.dp)); Column(modifier = Modifier.weight(1f)) { Text(text = label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.height(4.dp)); Text(text = value, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Medium
+            )
+        }
     }
 }
 
@@ -1850,7 +3590,11 @@ fun FullscreenMediaPager(
     val act = remember { ctx.findActivity() }
     val vid = remember(mediaList) { mediaList.filter { it.isVideo } }
 
-    LaunchedEffect(initialIndex, mediaList.size) { if (st.currentPage != initialIndex && initialIndex in mediaList.indices) st.scrollToPage(initialIndex) }
+    LaunchedEffect(initialIndex, mediaList.size) {
+        if (st.currentPage != initialIndex && initialIndex in mediaList.indices) {
+            st.scrollToPage(initialIndex)
+        }
+    }
 
     val performClose = {
         sharedPlayer.playWhenReady = false
@@ -1861,8 +3605,13 @@ fun FullscreenMediaPager(
     }
 
     val currId = mediaList.getOrNull(st.currentPage.coerceIn(0, maxOf(mediaList.lastIndex, 0)))?.id
-    LaunchedEffect(currId) { if (currId == null && mediaList.isNotEmpty()) performClose() }
-    val curr = remember(currId, mediaMap, mediaList) { currId?.let { mediaMap[it] ?: mediaList.find { i -> i.id == it } } }
+    LaunchedEffect(currId) {
+        if (currId == null && mediaList.isNotEmpty()) performClose()
+    }
+
+    val curr = remember(currId, mediaMap, mediaList) {
+        currId?.let { mediaMap[it] ?: mediaList.find { i -> i.id == it } }
+    }
 
     LaunchedEffect(curr) {
         ctrl = true
@@ -1900,41 +3649,141 @@ fun FullscreenMediaPager(
     BackHandler(enabled = ctrl) { performClose() }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        HorizontalPager(state = st, pageSpacing = 18.dp, key = { mediaList[it].id }, modifier = Modifier.fillMaxSize()) { p ->
+        HorizontalPager(
+            state = st,
+            pageSpacing = 18.dp,
+            key = { mediaList[it].id },
+            modifier = Modifier.fillMaxSize()
+        ) { p ->
             val itm = mediaList[p]
             if (itm.isVideo) {
                 VideoPreviewPage(
-                    item = itm, videoItems = vid, isCurrentPage = st.currentPage == p, showControls = ctrl,
-                    sharedPlayer = sharedPlayer, onTap = { ctrl = !ctrl }, onPlay = { onPlayVideo(itm.uri.toString(), vid.map { it.uri.toString() }) }
+                    item = itm,
+                    videoItems = vid,
+                    isCurrentPage = st.currentPage == p,
+                    showControls = ctrl,
+                    sharedPlayer = sharedPlayer,
+                    onTap = { ctrl = !ctrl },
+                    onPlay = { onPlayVideo(itm.uri.toString(), vid.map { it.uri.toString() }) }
                 )
             } else {
                 ZoomableImagePage(
-                    item = itm, onTap = { ctrl = !ctrl }, onDismiss = { performClose() },
-                    onZoomChanged = {}, onControlsVisibilityChange = { ctrl = it }
+                    item = itm,
+                    onTap = { ctrl = !ctrl },
+                    onDismiss = { performClose() },
+                    onZoomChanged = {},
+                    onControlsVisibilityChange = { ctrl = it }
                 )
             }
         }
-        if (ctrl) Box(modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent))).statusBarsPadding().padding(horizontal = 18.dp, vertical = 16.dp)) { Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { FilledIconButton(onClick = { performClose() }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.White.copy(alpha = 0.16f))) { Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White) }; Spacer(Modifier.size(48.dp)) } }
+
+        if (ctrl) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent)))
+                    .statusBarsPadding()
+                    .padding(horizontal = 18.dp, vertical = 16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilledIconButton(
+                        onClick = { performClose() },
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.White.copy(alpha = 0.16f))
+                    ) {
+                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                    Spacer(Modifier.size(48.dp))
+                }
+            }
+        }
+
         if (ctrl && curr != null) {
-            Box(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 32.dp, start = 16.dp, end = 16.dp)) {
-                Surface(color = Color.Black.copy(alpha = 0.4f), shape = RoundedCornerShape(28.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) { PremiumViewerAction(icon = Icons.Outlined.Edit, label = "Edit") { onEdit(curr) }; PremiumViewerAction(icon = if (favoriteIds.contains(curr.id)) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, label = if (favoriteIds.contains(curr.id)) "Unfavorite" else "Favorite", tint = if (favoriteIds.contains(curr.id)) Color.Red else Color.White) { onToggleFavorite(curr.id) }; PremiumViewerAction(icon = Icons.Outlined.Share, label = "Share") { ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = if (curr.isVideo) "video/*" else "image/*"; putExtra(Intent.EXTRA_STREAM, curr.uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, "Share Media")) }; PremiumViewerAction(icon = Icons.Outlined.Delete, label = "Delete", tint = Color.Red) { onDelete(curr) }; PremiumViewerAction(icon = Icons.Default.MoreVert, label = "More") { more = true } }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = 32.dp, start = 16.dp, end = 16.dp)
+            ) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.4f),
+                    shape = RoundedCornerShape(28.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        PremiumViewerAction(icon = Icons.Outlined.Edit, label = "Edit") { onEdit(curr) }
+                        PremiumViewerAction(
+                            icon = if (favoriteIds.contains(curr.id)) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                            label = if (favoriteIds.contains(curr.id)) "Unfavorite" else "Favorite",
+                            tint = if (favoriteIds.contains(curr.id)) Color.Red else Color.White
+                        ) {
+                            onToggleFavorite(curr.id)
+                        }
+                        PremiumViewerAction(icon = Icons.Outlined.Share, label = "Share") {
+                            ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                                type = if (curr.isVideo) "video/*" else "image/*"
+                                putExtra(Intent.EXTRA_STREAM, curr.uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }, "Share Media"))
+                        }
+                        PremiumViewerAction(icon = Icons.Outlined.Delete, label = "Delete", tint = Color.Red) { onDelete(curr) }
+                        PremiumViewerAction(icon = Icons.Default.MoreVert, label = "More") { more = true }
+                    }
                 }
             }
         }
     }
-    if (meta && curr != null) MediaMetadataSheet(item = curr) { meta = false }
+
+    if (meta && curr != null) {
+        MediaMetadataSheet(item = curr) { meta = false }
+    }
+
     if (more && curr != null) {
         @OptIn(ExperimentalMaterial3Api::class)
         ModalBottomSheet(onDismissRequest = { more = false }, containerColor = MaterialTheme.colorScheme.surface) {
             Column(modifier = Modifier.padding(bottom = 32.dp)) {
-                ListItem(headlineContent = { Text("Details", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.Info, contentDescription = null) }, modifier = Modifier.clickable { more = false; meta = true })
-                ListItem(headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = null) }, modifier = Modifier.clickable { more = false; onMove(curr) })
-                ListItem(headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.FileCopy, contentDescription = null) }, modifier = Modifier.clickable { more = false; onCopy(curr) })
+                ListItem(
+                    headlineContent = { Text("Details", fontWeight = FontWeight.SemiBold) },
+                    leadingContent = { Icon(imageVector = Icons.Outlined.Info, contentDescription = null) },
+                    modifier = Modifier.clickable { more = false; meta = true }
+                )
+                ListItem(
+                    headlineContent = { Text("Move to Album", fontWeight = FontWeight.SemiBold) },
+                    leadingContent = { Icon(imageVector = Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = null) },
+                    modifier = Modifier.clickable { more = false; onMove(curr) }
+                )
+                ListItem(
+                    headlineContent = { Text("Copy to Album", fontWeight = FontWeight.SemiBold) },
+                    leadingContent = { Icon(imageVector = Icons.Outlined.FileCopy, contentDescription = null) },
+                    modifier = Modifier.clickable { more = false; onCopy(curr) }
+                )
                 if (curr.isVideo) {
-                    ListItem(headlineContent = { Text("Open In", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null) }, modifier = Modifier.clickable { more = false; ctx.startActivity(Intent(Intent.ACTION_VIEW).apply { setDataAndType(curr.uri, "video/*"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }) })
+                    ListItem(
+                        headlineContent = { Text("Open In", fontWeight = FontWeight.SemiBold) },
+                        leadingContent = { Icon(imageVector = Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null) },
+                        modifier = Modifier.clickable {
+                            more = false
+                            ctx.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(curr.uri, "video/*")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            })
+                        }
+                    )
                 }
-                ListItem(headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) }, leadingContent = { Icon(imageVector = Icons.Outlined.Wallpaper, contentDescription = null) }, modifier = Modifier.clickable { more = false; onWallpaper(curr) })
+                ListItem(
+                    headlineContent = { Text("Set as Wallpaper", fontWeight = FontWeight.SemiBold) },
+                    leadingContent = { Icon(imageVector = Icons.Outlined.Wallpaper, contentDescription = null) },
+                    modifier = Modifier.clickable { more = false; onWallpaper(curr) }
+                )
             }
         }
     }
@@ -1943,11 +3792,20 @@ fun FullscreenMediaPager(
 @SuppressLint("ClickableViewAccessibility")
 @OptIn(UnstableApi::class)
 @Composable
-fun VideoPreviewPage(item: MediaItem, videoItems: List<MediaItem>, isCurrentPage: Boolean, showControls: Boolean, sharedPlayer: Player, onTap: () -> Unit, onPlay: () -> Unit) {
+fun VideoPreviewPage(
+    item: MediaItem,
+    videoItems: List<MediaItem>,
+    isCurrentPage: Boolean,
+    showControls: Boolean,
+    sharedPlayer: Player,
+    onTap: () -> Unit,
+    onPlay: () -> Unit
+) {
     val ctx = LocalContext.current
     var m by rememberSaveable(item.id) { mutableStateOf(true) }
 
     LaunchedEffect(m) { sharedPlayer.volume = if (m) 0f else 1f }
+
     LaunchedEffect(isCurrentPage) {
         if (!isCurrentPage) {
             sharedPlayer.pause()
@@ -1974,12 +3832,21 @@ fun VideoPreviewPage(item: MediaItem, videoItems: List<MediaItem>, isCurrentPage
             },
             modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onTap = { onTap() }) }
         )
-        if (showControls) Box(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(bottom = 120.dp)) {
-            Surface(modifier = Modifier.align(Alignment.Center).clickable { sharedPlayer.pause(); onPlay() }, shape = RoundedCornerShape(50.dp), color = Color.Black.copy(alpha = 0.55f)) {
-                Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(text = "Play video", color = Color.White, fontSize = 14.sp)
+        if (showControls) {
+            Box(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(bottom = 120.dp)) {
+                Surface(
+                    modifier = Modifier.align(Alignment.Center).clickable { sharedPlayer.pause(); onPlay() },
+                    shape = RoundedCornerShape(50.dp),
+                    color = Color.Black.copy(alpha = 0.55f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(text = "Play video", color = Color.White, fontSize = 14.sp)
+                    }
                 }
             }
         }
@@ -1988,13 +3855,134 @@ fun VideoPreviewPage(item: MediaItem, videoItems: List<MediaItem>, isCurrentPage
 
 @Composable
 fun PremiumViewerAction(icon: ImageVector, label: String, tint: Color = Color.White, onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) { Surface(modifier = Modifier.size(52.dp).clip(CircleShape).clickable(onClick = onClick), shape = CircleShape, color = Color.White.copy(alpha = 0.12f), border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))) { Box(contentAlignment = Alignment.Center) { Icon(imageVector = icon, contentDescription = label, tint = tint, modifier = Modifier.size(22.dp)) } }; Spacer(modifier = Modifier.height(8.dp)); Text(text = label, color = tint.copy(alpha = 0.95f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold) }
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Surface(
+            modifier = Modifier
+                .size(52.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onClick),
+            shape = CircleShape,
+            color = Color.White.copy(alpha = 0.12f),
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(imageVector = icon, contentDescription = label, tint = tint, modifier = Modifier.size(22.dp))
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = label,
+            color = tint.copy(alpha = 0.95f),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
 }
 
 @Composable
 fun ZoomableImagePage(item: MediaItem, onTap: () -> Unit, onDismiss: () -> Unit, onZoomChanged: (Boolean) -> Unit, onControlsVisibilityChange: (Boolean) -> Unit) {
-    val ctx = LocalContext.current; val d = LocalDensity.current; val hap = LocalHapticFeedback.current; val conf = LocalConfiguration.current; val wPx = with(d) { conf.screenWidthDp.dp.roundToPx() }; val hPx = with(d) { conf.screenHeightDp.dp.roundToPx() }; val thr = remember(conf.screenHeightDp, d) { with(d) { conf.screenHeightDp.dp.toPx() * 0.25f } }; var sc by remember { mutableFloatStateOf(1f) }; var oX by remember { mutableFloatStateOf(0f) }; var oY by remember { mutableFloatStateOf(0f) }; var bA by remember { mutableFloatStateOf(1f) }; LaunchedEffect(sc) { onZoomChanged(sc > 1.05f) }
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = bA)).graphicsLayer { val ds = 1f - (abs(oY) / 2200f); scaleX = sc * ds; scaleY = scaleX; alpha = (1f - (abs(oY) / 850f)).coerceIn(0f, 1f); translationX = oX; translationY = oY }.pointerInput(Unit) { detectTapGestures(onTap = { onTap() }, onDoubleTap = { sc = if (sc > 1f) 1f else 2.5f; oX = 0f; oY = 0f }, onLongPress = { hap.performHapticFeedback(HapticFeedbackType.LongPress) }) }.pointerInput(Unit) { awaitEachGesture { awaitFirstDown(requireUnconsumed = false); do { val event = awaitPointerEvent(); val zoom = event.calculateZoom(); val pan = event.calculatePan(); if (abs(zoom - 1f) > 0.005f) sc = (sc * zoom).coerceIn(1f, 4f); if (sc > 1.05f) { event.changes.forEach { if (it.positionChange() != Offset.Zero) it.consume() }; val mx = (size.width * (sc - 1)) / 2f; val my = (size.height * (sc - 1)) / 2f; oX = (oX + pan.x).coerceIn(-mx, mx); oY = (oY + pan.y).coerceIn(-my, my) } else { val isV = abs(pan.y) > abs(pan.x); if (isV && event.changes.size == 1) { oY += pan.y; bA = (1f - abs(oY) / 900f).coerceIn(0.35f, 1f); event.changes.forEach { if (it.positionChange() != Offset.Zero) it.consume() } } } } while (event.changes.any { it.pressed }); if (sc <= 1.05f) { if (abs(oY) > thr) { hap.performHapticFeedback(HapticFeedbackType.LongPress); onDismiss() } else { oY = 0f; bA = 1f } } } }, contentAlignment = Alignment.Center) {
-        AsyncImage(model = remember(item.id, wPx, hPx) { ImageRequest.Builder(ctx).data(item.uri).size(Size(wPx, hPx)).precision(Precision.INEXACT).networkCachePolicy(CachePolicy.ENABLED).memoryCacheKey("full_${item.id}").memoryCachePolicy(CachePolicy.ENABLED).crossfade(false).error(android.R.drawable.ic_menu_report_image).build() }, placeholder = null, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+    val ctx = LocalContext.current
+    val d = LocalDensity.current
+    val hap = LocalHapticFeedback.current
+    val conf = LocalConfiguration.current
+    val wPx = with(d) { conf.screenWidthDp.dp.roundToPx() }
+    val hPx = with(d) { conf.screenHeightDp.dp.roundToPx() }
+    val thr = remember(conf.screenHeightDp, d) { with(d) { conf.screenHeightDp.dp.toPx() * 0.25f } }
+
+    var sc by remember { mutableFloatStateOf(1f) }
+    var oX by remember { mutableFloatStateOf(0f) }
+    var oY by remember { mutableFloatStateOf(0f) }
+    var bA by remember { mutableFloatStateOf(1f) }
+
+    LaunchedEffect(sc) { onZoomChanged(sc > 1.05f) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = bA))
+            .graphicsLayer {
+                val ds = 1f - (abs(oY) / 2200f)
+                scaleX = sc * ds
+                scaleY = scaleX
+                alpha = (1f - (abs(oY) / 850f)).coerceIn(0f, 1f)
+                translationX = oX
+                translationY = oY
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onDoubleTap = {
+                        sc = if (sc > 1f) 1f else 2.5f
+                        oX = 0f
+                        oY = 0f
+                    },
+                    onLongPress = { hap.performHapticFeedback(HapticFeedbackType.LongPress) }
+                )
+            }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val zoom = event.calculateZoom()
+                        val pan = event.calculatePan()
+                        if (abs(zoom - 1f) > 0.005f) {
+                            sc = (sc * zoom).coerceIn(1f, 4f)
+                        }
+                        if (sc > 1.05f) {
+                            event.changes.forEach {
+                                if (it.positionChange() != Offset.Zero) {
+                                    it.consume()
+                                }
+                            }
+                            val mx = (size.width * (sc - 1)) / 2f
+                            val my = (size.height * (sc - 1)) / 2f
+                            oX = (oX + pan.x).coerceIn(-mx, mx)
+                            oY = (oY + pan.y).coerceIn(-my, my)
+                        } else {
+                            val isV = abs(pan.y) > abs(pan.x)
+                            if (isV && event.changes.size == 1) {
+                                oY += pan.y
+                                bA = (1f - abs(oY) / 900f).coerceIn(0.35f, 1f)
+                                event.changes.forEach {
+                                    if (it.positionChange() != Offset.Zero) {
+                                        it.consume()
+                                    }
+                                }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+
+                    if (sc <= 1.05f) {
+                        if (abs(oY) > thr) {
+                            hap.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onDismiss()
+                        } else {
+                            oY = 0f
+                            bA = 1f
+                        }
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        AsyncImage(
+            model = remember(item.id, wPx, hPx) {
+                ImageRequest.Builder(ctx)
+                    .data(item.uri)
+                    .size(Size(wPx, hPx))
+                    .precision(Precision.INEXACT)
+                    .networkCachePolicy(CachePolicy.ENABLED)
+                    .memoryCacheKey("full_${item.id}")
+                    .memoryCachePolicy(CachePolicy.ENABLED)
+                    .crossfade(false)
+                    .error(android.R.drawable.ic_menu_report_image)
+                    .build()
+            },
+            placeholder = null,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }
