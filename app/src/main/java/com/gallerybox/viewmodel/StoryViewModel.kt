@@ -213,9 +213,7 @@ class StoryViewModel @Inject constructor(
         mediaList: List<MediaItem>,
         force: Boolean = false
     ) {
-        if (_isGenerating.value) {
-            return
-        }
+        if (_isGenerating.value) return
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -230,7 +228,10 @@ class StoryViewModel @Inject constructor(
                     0L
                 )
 
-                if (!force && System.currentTimeMillis() - lastScanned < DAILY_REFRESH_MS) {
+                if (
+                    !force &&
+                    System.currentTimeMillis() - lastScanned < DAILY_REFRESH_MS
+                ) {
                     return@launch
                 }
 
@@ -247,6 +248,9 @@ class StoryViewModel @Inject constructor(
                     return@launch
                 }
 
+                // ---------------------------------------------------------
+                // 2. Determine whether there are multiple meaningful sources.
+                // ---------------------------------------------------------
                 val sourceKeys = uniqueMedia
                     .map { storySourceKey(it) }
                     .filter { it.isNotBlank() }
@@ -254,101 +258,283 @@ class StoryViewModel @Inject constructor(
 
                 val useSourceBoundary = sourceKeys.size > 1
 
-                val nameCounts = mutableMapOf<String, Int>()
+                // ---------------------------------------------------------
+                // 3. FIRST: create natural TIME clusters.
+                //
+                // Time is the PRIMARY Story event.
+                // Do not split clusters because of media count.
+                // ---------------------------------------------------------
+                val chronologicalMedia =
+                    uniqueMedia.sortedBy { it.dateAdded }
 
-                for (item in uniqueMedia) {
-                    val nameKey = normalizeStoryName(item.name)
+                val timeClusters =
+                    mutableListOf<List<MediaItem>>()
 
-                    if (nameKey.isNotBlank()) {
-                        nameCounts[nameKey] = (nameCounts[nameKey] ?: 0) + 1
+                var currentTimeCluster =
+                    mutableListOf<MediaItem>()
+
+                var lastItemTime = 0L
+                var lastItemDay = -1
+                var lastItemYear = -1
+
+                val calendar =
+                    Calendar.getInstance()
+
+                for (item in chronologicalMedia) {
+
+                    val timeMs =
+                        item.dateAdded * 1000L
+
+                    calendar.timeInMillis = timeMs
+
+                    val currentDay =
+                        calendar.get(Calendar.DAY_OF_YEAR)
+
+                    val currentYear =
+                        calendar.get(Calendar.YEAR)
+
+                    if (currentTimeCluster.isEmpty()) {
+
+                        currentTimeCluster.add(item)
+
+                        lastItemTime = timeMs
+                        lastItemDay = currentDay
+                        lastItemYear = currentYear
+
+                        continue
                     }
-                }
 
-                val repeatedNameKeys = nameCounts
-                    .filterValues { count -> count >= MIN_NAME_OCCURRENCES }
-                    .keys
+                    val timeDiff =
+                        abs(timeMs - lastItemTime)
 
-                val logicalGroups = uniqueMedia.groupBy { item ->
-                    val sourcePart = if (useSourceBoundary) {
-                        storySourceKey(item)
-                    } else {
-                        COMMON_SOURCE_KEY
-                    }
+                    val isSameDay =
+                        currentDay == lastItemDay &&
+                                currentYear == lastItemYear
 
-                    val normalizedName = normalizeStoryName(item.name)
-
-                    val namePart = if (
-                        normalizedName.isNotBlank() &&
-                        repeatedNameKeys.contains(normalizedName)
+                    if (
+                        isSameDay &&
+                        timeDiff <= EVENT_THRESHOLD_MS
                     ) {
-                        "NAME:$normalizedName"
-                    } else {
-                        "TIME_ONLY"
-                    }
 
-                    "$sourcePart|$namePart"
+                        currentTimeCluster.add(item)
+                        lastItemTime = timeMs
+
+                    } else {
+
+                        timeClusters.add(
+                            currentTimeCluster
+                                .distinctBy { it.id }
+                        )
+
+                        currentTimeCluster =
+                            mutableListOf(item)
+
+                        lastItemTime = timeMs
+                        lastItemDay = currentDay
+                        lastItemYear = currentYear
+                    }
                 }
 
-                val clusters = mutableListOf<List<MediaItem>>()
+                if (currentTimeCluster.isNotEmpty()) {
 
-                for ((_, groupItems) in logicalGroups) {
-                    val chronologicalMedia = groupItems.sortedBy { it.dateAdded }
+                    timeClusters.add(
+                        currentTimeCluster
+                            .distinctBy { it.id }
+                    )
+                }
 
-                    var currentCluster = mutableListOf<MediaItem>()
-                    var lastItemTime = 0L
-                    var lastItemDay = -1
-                    var lastItemYear = -1
+                // ---------------------------------------------------------
+                // 4. Refine each natural time cluster.
+                //
+                // IMPORTANT:
+                //
+                // Album/source is only used to PREVENT unrelated albums
+                // from being mixed into the same Story.
+                //
+                // It does NOT globally group all Disha Stories together.
+                //
+                // Name is only used when it actually forms a repeated
+                // name inside the natural time event.
+                //
+                // Random/single names remain normal time-based media.
+                // ---------------------------------------------------------
+                val refinedClusters =
+                    mutableListOf<List<MediaItem>>()
 
-                    val calendar = Calendar.getInstance()
+                for (timeCluster in timeClusters) {
 
-                    for (item in chronologicalMedia) {
-                        val timeMs = item.dateAdded * 1000L
-                        calendar.timeInMillis = timeMs
+                    if (timeCluster.isEmpty()) {
+                        continue
+                    }
 
-                        val currentDay = calendar.get(Calendar.DAY_OF_YEAR)
-                        val currentYear = calendar.get(Calendar.YEAR)
+                    // -----------------------------------------------------
+                    // If there is only one common source, keep the entire
+                    // natural time cluster exactly as it is.
+                    // -----------------------------------------------------
 
-                        if (currentCluster.isEmpty()) {
-                            currentCluster.add(item)
-                            lastItemTime = timeMs
-                            lastItemDay = currentDay
-                            lastItemYear = currentYear
-                        } else {
-                            val timeDiff = abs(timeMs - lastItemTime)
-                            val isSameDay = currentDay == lastItemDay && currentYear == lastItemYear
+                    if (!useSourceBoundary) {
 
-                            if (isSameDay && timeDiff <= EVENT_THRESHOLD_MS) {
-                                currentCluster.add(item)
-                                lastItemTime = timeMs
-                            } else {
-                                clusters.add(currentCluster.distinctBy { it.id })
-                                currentCluster = mutableListOf(item)
-                                lastItemTime = timeMs
-                                lastItemDay = currentDay
-                                lastItemYear = currentYear
+                        refinedClusters.add(
+                            timeCluster
+                                .distinctBy { it.id }
+                        )
+
+                        continue
+                    }
+
+                    // -----------------------------------------------------
+                    // Multiple sources exist.
+                    //
+                    // Split THIS natural time event by source only.
+                    //
+                    // This prevents:
+                    //
+                    // Disha + Bhakti + Sharma
+                    //
+                    // from entering one Story.
+                    //
+                    // But Disha Stories remain globally interleaved later.
+                    // -----------------------------------------------------
+
+                    val sourceGroups =
+                        timeCluster.groupBy {
+                            storySourceKey(it)
+                        }
+
+                    for ((_, sourceItems) in sourceGroups) {
+
+                        if (sourceItems.isEmpty()) {
+                            continue
+                        }
+
+                        // -------------------------------------------------
+                        // Count names ONLY inside this source + time event.
+                        // -------------------------------------------------
+
+                        val nameCounts =
+                            sourceItems
+                                .map {
+                                    normalizeStoryName(it.name)
+                                }
+                                .filter {
+                                    it.isNotBlank()
+                                }
+                                .groupingBy {
+                                    it
+                                }
+                                .eachCount()
+
+                        val repeatedNames =
+                            nameCounts
+                                .filterValues {
+                                    it >= MIN_NAME_OCCURRENCES
+                                }
+                                .keys
+
+                        // -------------------------------------------------
+                        // If there is NO repeated name, keep the complete
+                        // source/time cluster.
+                        //
+                        // This is the important fallback.
+                        // -------------------------------------------------
+
+                        if (repeatedNames.isEmpty()) {
+
+                            refinedClusters.add(
+                                sourceItems
+                                    .distinctBy { it.id }
+                            )
+
+                            continue
+                        }
+
+                        // -------------------------------------------------
+                        // Repeated names exist.
+                        //
+                        // Keep matching names together, but DO NOT split
+                        // every random/singleton filename into separate
+                        // Stories.
+                        // -------------------------------------------------
+
+                        val repeatedNameItems =
+                            sourceItems.filter {
+                                repeatedNames.contains(
+                                    normalizeStoryName(it.name)
+                                )
                             }
+
+                        val normalTimeItems =
+                            sourceItems.filter {
+                                !repeatedNames.contains(
+                                    normalizeStoryName(it.name)
+                                )
+                            }
+
+                        // Each repeated name becomes a refined group.
+                        repeatedNameItems
+                            .groupBy {
+                                normalizeStoryName(it.name)
+                            }
+                            .values
+                            .forEach { nameItems ->
+
+                                if (nameItems.isNotEmpty()) {
+
+                                    refinedClusters.add(
+                                        nameItems
+                                            .distinctBy { it.id }
+                                    )
+                                }
+                            }
+
+                        // Random/non-repeated files remain together.
+                        if (normalTimeItems.isNotEmpty()) {
+
+                            refinedClusters.add(
+                                normalTimeItems
+                                    .distinctBy { it.id }
+                            )
                         }
                     }
-
-                    if (currentCluster.isNotEmpty()) {
-                        clusters.add(currentCluster.distinctBy { it.id })
-                    }
                 }
 
-                val validClusters = clusters
-                    .map { cluster ->
-                        cluster
-                            .filter { it.id > 0 }
-                            .distinctBy { it.id }
-                    }
-                    .filter { it.isNotEmpty() }
+                // ---------------------------------------------------------
+                // 5. Validate final clusters.
+                // ---------------------------------------------------------
+                val validClusters =
+                    refinedClusters
+                        .map { cluster ->
+                            cluster
+                                .filter { it.id > 0 }
+                                .distinctBy { it.id }
+                        }
+                        .filter {
+                            it.isNotEmpty()
+                        }
 
-                _generationProgress.value = uniqueMedia.size
+                _generationProgress.value =
+                    uniqueMedia.size
+
                 yield()
 
-                val selectedClusters = validClusters
-                    .shuffled()
-                    .take(MAX_AUTO_STORIES)
+                // ---------------------------------------------------------
+                // 6. Maximum 30 STORIES.
+                //
+                // This is NOT a media limit.
+                //
+                // If there are:
+                // 5 clusters  -> 5 Stories
+                // 20 clusters -> 20 Stories
+                // 30 clusters -> 30 Stories
+                // 100 clusters -> 30 Stories
+                //
+                // A cluster itself can contain:
+                // 1, 3, 7, 19, 97, 257, etc.
+                // ---------------------------------------------------------
+                val selectedClusters =
+                    validClusters
+                        .shuffled()
+                        .take(MAX_AUTO_STORIES)
 
                 val finalClustersToSave = selectedClusters
                     .sortedByDescending { cluster ->
@@ -437,9 +623,7 @@ class StoryViewModel @Inject constructor(
         baseName = baseName.replace(Regex("""\s*\(\d+\)\s*$"""), "")
         baseName = baseName.replace(Regex("""\s*-\s*copy(?:\s*\(\d+\))?\s*$"""), "")
 
-        return baseName
-            .trim()
-            .lowercase(Locale.ROOT)
+        return baseName.trim().lowercase(Locale.ROOT)
     }
 
     private fun buildEntity(
