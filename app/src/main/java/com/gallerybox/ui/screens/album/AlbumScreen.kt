@@ -12,9 +12,9 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
+import android.provider.MediaStore
 import android.text.format.Formatter
 import android.view.MotionEvent
-import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -560,6 +560,7 @@ fun AlbumScreen(
         }
         (sortedVirtualAlbums + sortedUserAlbums).toImmutableList()
     }
+
     val sdCardAlbums = remember(allMedia) {
         allMedia.filter { item ->
             if (item.volumeName.isNotBlank()) {
@@ -571,7 +572,6 @@ fun AlbumScreen(
             }
         }.map { it.bucketId }.toSet()
     }
-
     val dynamicList = remember { mutableStateListOf<Album>() }
 
     LaunchedEffect(displayAlbums) {

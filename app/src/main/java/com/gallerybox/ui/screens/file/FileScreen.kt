@@ -121,8 +121,7 @@ fun DuplicatesScreen(
     val sizeToDelete: Long by remember(selectedIds.size) { derivedStateOf { selectedIds.values.sumOf { it } } }
     var scanTrigger by remember { mutableIntStateOf(1) }
 
-    // Configurable Burst Window
-    val burstTimeWindowMs = 5000L
+    val burstTimeWindowSec = 5L
 
     val intentSenderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         val isGranted = result.resultCode == Activity.RESULT_OK
@@ -154,7 +153,7 @@ fun DuplicatesScreen(
         }
     }
 
-    LaunchedEffect(scanTrigger) {
+    LaunchedEffect(scanTrigger, allMedia.isNotEmpty()) {
         if (allMedia.isNotEmpty() && scanState != ScanState.SCANNING) {
             scanState = ScanState.SCANNING
             scannedCount = 0
@@ -187,7 +186,6 @@ fun DuplicatesScreen(
                     }
                 }
 
-                // Advanced Video Content Hashing
                 val videoCandidates = mediaSnapshot.filter { it.isVideo && !processedIds.contains(it.id) }
                 val videoGroups = videoCandidates.groupBy {
                     val partialVideoHash = calculatePartialHash(it.path)
@@ -224,7 +222,7 @@ fun DuplicatesScreen(
                         val nameMatch = curr.name.contains("edit", true) || curr.name.contains("copy", true) || curr.name.contains("(1)")
                         var isSimilar = false
 
-                        if (timeDiff < burstTimeWindowMs || nameMatch) {
+                        if (timeDiff < burstTimeWindowSec || nameMatch) {
                             val hAnchor = getHash(anchor)
                             val hCurr = getHash(curr)
                             if (hAnchor != null && hCurr != null && hammingDistance(hAnchor, hCurr) <= 10) {
@@ -561,7 +559,6 @@ fun MoveCopyScreen(
         viewModel.forceSync()
     }
 
-    // Status mapping driven directly by ViewModel state
     LaunchedEffect(fileOpState) {
         when (val state = fileOpState) {
             is FileOperationState.Processing -> {
@@ -601,7 +598,6 @@ fun MoveCopyScreen(
             when (event) {
                 is GalleryEvent.RequestPermission -> intentSenderLauncher.launch(IntentSenderRequest.Builder(event.intentSender).build())
 
-                // FIX: Added OperationSuccess to properly close the screen after permission grants
                 is GalleryEvent.OperationSuccess -> {
                     isProcessing = false
                     isWaitingForPermission = false
@@ -684,7 +680,6 @@ fun MoveCopyScreen(
                                 LinearProgressIndicator(progress = { currentProgress }, modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape), color = MaterialTheme.colorScheme.primary, trackColor = MaterialTheme.colorScheme.surfaceVariant)
                                 Spacer(Modifier.height(8.dp))
 
-                                // FORMATTED PROGRESS TEXT APPLIED HERE
                                 val percent = (currentProgress * 100).toInt()
                                 val actionVerb = if (operationMode == OperationMode.MOVE) "Moving" else "Copying"
                                 Text(
@@ -896,6 +891,7 @@ fun SlideshowScreen(albumId: String?, viewModel: GalleryViewModel = hiltViewMode
     var showControls by remember { mutableStateOf(false) }
     var showSpeedMenu by remember { mutableStateOf(false) }
     var isTouched by remember { mutableStateOf(false) }
+    var isAutoScrolling by remember { mutableStateOf(false) }
 
     DisposableEffect(showControls) {
         val window = activity?.window
@@ -916,30 +912,35 @@ fun SlideshowScreen(albumId: String?, viewModel: GalleryViewModel = hiltViewMode
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
-    // Auto-advance logic
     LaunchedEffect(isPlaying, slideshowItems.size, slideDelayMs, isTouched) {
         if (!isPlaying || slideshowItems.isEmpty() || isTouched) return@LaunchedEffect
         while (isActive) {
             delay(slideDelayMs)
             if (!isActive || isTouched) break
             if (!pagerState.isScrollInProgress) {
-                pagerState.animateScrollToPage((pagerState.currentPage + 1) % slideshowItems.size, animationSpec = tween(1200, easing = FastOutSlowInEasing))
+                isAutoScrolling = true
+                try {
+                    pagerState.animateScrollToPage(
+                        (pagerState.currentPage + 1) % slideshowItems.size,
+                        animationSpec = tween(1200, easing = FastOutSlowInEasing)
+                    )
+                } finally {
+                    isAutoScrolling = false
+                }
             }
         }
     }
 
-    // Pause on manual swipe
     LaunchedEffect(pagerState.isScrollInProgress) {
-        if (pagerState.isScrollInProgress) {
+        if (pagerState.isScrollInProgress && !isAutoScrolling) {
             isPlaying = false
             showControls = true
         }
     }
 
-    // Auto-resume after touch interaction ends
     LaunchedEffect(isTouched) {
         if (!isTouched && !isPlaying && !showSpeedMenu) {
-            delay(3000) // Wait 3 seconds before auto-resuming
+            delay(3000)
             isPlaying = true
             showControls = false
         }
@@ -961,7 +962,7 @@ fun SlideshowScreen(albumId: String?, viewModel: GalleryViewModel = hiltViewMode
                     awaitFirstDown()
                     isTouched = true
                     showControls = !showControls
-                    if (showControls && !isPlaying) isPlaying = false
+                    if (showControls) isPlaying = false
                     do {
                         val event = awaitPointerEvent()
                     } while (event.changes.any { it.pressed })
@@ -980,7 +981,6 @@ fun SlideshowScreen(albumId: String?, viewModel: GalleryViewModel = hiltViewMode
                 val item = slideshowItems[safePage]
                 val scale = remember { Animatable(1f) }
 
-                // Crossfade Logic via graphicsLayer
                 val pageOffset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
                 val alphaValue = 1f - abs(pageOffset).coerceIn(0f, 1f)
 
@@ -999,8 +999,8 @@ fun SlideshowScreen(albumId: String?, viewModel: GalleryViewModel = hiltViewMode
                         .bitmapConfig(Bitmap.Config.RGB_565)
                         .memoryCachePolicy(CachePolicy.ENABLED)
                         .diskCachePolicy(CachePolicy.ENABLED)
-                        .crossfade(1000) // Added strong built-in crossfade for initial load
-                        .allowHardware(true) // Optimized for low end
+                        .crossfade(1000)
+                        .allowHardware(true)
                         .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
