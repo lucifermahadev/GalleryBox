@@ -2300,7 +2300,6 @@ fun StatelessAlbumGrid(
                         canDrag = canDrag,
                         isSdCard = sdCardAlbums.contains(album.id),
                         deviceTier = deviceTier,
-                        isScrollingFast = isScrollingFast,
                         dragModifier = dragModifier,
                         thumbSize = dynamicThumbSize,
                         onClick = { onAlbumClick(album) },
@@ -2547,7 +2546,6 @@ fun StatelessMediaGrid(
                                 isSelected = itemSelected,
                                 isSelectionMode = isSelectionMode,
                                 deviceTier = deviceTier,
-                                isScrollingFast = isScrollingFast,
                                 onClick = {
                                     if (isSelectionMode) {
                                         onToggleSelection(currentItem)
@@ -2583,7 +2581,7 @@ fun StatelessMediaGrid(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun OptimizedAlbumTile(
-    album: Album, previews: ImmutableList<Uri>, isSelected: Boolean, isSelectionMode: Boolean, canDrag: Boolean, isSdCard: Boolean, deviceTier: DeviceTier, isScrollingFast: Boolean,
+    album: Album, previews: ImmutableList<Uri>, isSelected: Boolean, isSelectionMode: Boolean, canDrag: Boolean, isSdCard: Boolean, deviceTier: DeviceTier,
     thumbSize: Int, dragModifier: Modifier = Modifier, onClick: () -> Unit, onLongClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -2649,12 +2647,14 @@ private fun OptimizedAlbumTile(
                             .crossfade(120)
                             .build()
                     }
+                    val surfaceColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                    val placeholderPainter = remember(surfaceColor) { ColorPainter(surfaceColor) }
                     AsyncImage(
                         model = request,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         filterQuality = FilterQuality.Low,
-                        placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceContainerHighest),
+                        placeholder = placeholderPainter,
                         modifier = Modifier.fillMaxSize()
                     )
                     Box(
@@ -2721,7 +2721,7 @@ private fun OptimizedAlbumTile(
 
 @Composable
 fun ModernMediaGridTile(
-    modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, deviceTier: DeviceTier, isScrollingFast: Boolean,
+    modifier: Modifier = Modifier, item: MediaItem, thumbSize: Int, isSelected: Boolean, isSelectionMode: Boolean, deviceTier: DeviceTier,
     onClick: () -> Unit, onToggleFavorite: () -> Unit
 ) {
     val animatedRadius = if (isSelected) 16.dp else 12.dp
@@ -2737,12 +2737,8 @@ fun ModernMediaGridTile(
             .background(MaterialTheme.colorScheme.surfaceContainerHighest)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
     ) {
-        val effectiveSize = remember(thumbSize, isScrollingFast, deviceTier) {
-            if (isScrollingFast) {
-                (thumbSize * 0.55f).toInt().coerceIn(96, 240)
-            } else {
-                thumbSize.coerceIn(160, 480)
-            }
+        val effectiveSize = remember(thumbSize) {
+            thumbSize.coerceIn(160, 480)
         }
 
         val request = remember(item.id, effectiveSize, deviceTier) {
@@ -2753,7 +2749,7 @@ fun ModernMediaGridTile(
                 .diskCacheKey("${item.id}_thumb_$effectiveSize")
                 .bitmapConfig(if (deviceTier == DeviceTier.LOW) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
                 .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(if (isScrollingFast) CachePolicy.READ_ONLY else CachePolicy.ENABLED)
+                .diskCachePolicy(CachePolicy.ENABLED)
                 .networkCachePolicy(CachePolicy.DISABLED)
                 .precision(Precision.INEXACT)
                 .allowHardware(deviceTier != DeviceTier.LOW)
@@ -2761,9 +2757,12 @@ fun ModernMediaGridTile(
                 .build()
         }
 
+        val surfaceColor = MaterialTheme.colorScheme.surfaceContainerHighest
+        val placeholder = remember(surfaceColor) { ColorPainter(surfaceColor) }
+
         AsyncImage(
             model = request,
-            placeholder = null,
+            placeholder = placeholder,
             contentDescription = null,
             contentScale = ContentScale.Crop,
             filterQuality = FilterQuality.Low,

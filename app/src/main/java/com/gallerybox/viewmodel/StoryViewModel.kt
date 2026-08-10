@@ -347,8 +347,16 @@ class StoryViewModel @Inject constructor(
                 _generationProgress.value = 0
                 _generationTotal.value = mediaList.size
 
+                val manualMediaIds = dao.getStoriesSync()
+                    .filter { it.storyType == "MANUAL" }
+                    .flatMap { entity ->
+                        entity.mediaIdsJson.removePrefix("[").removeSuffix("]")
+                            .split(",").mapNotNull { it.trim().toLongOrNull() }
+                    }
+                    .toSet()
+
                 val uniqueMedia = mediaList
-                    .filter { it.id > 0 }
+                    .filter { it.id > 0 && it.id !in manualMediaIds }
                     .distinctBy { it.id }
 
                 if (uniqueMedia.isEmpty()) {
@@ -423,6 +431,13 @@ class StoryViewModel @Inject constructor(
 
                     if (items.isEmpty()) {
                         continue
+                    }
+
+                    if (pendingSmall.isNotEmpty()) {
+                        val gapMs = abs((items.first().dateAdded - pendingSmall.last().dateAdded)) * 1000L
+                        if (gapMs > MAX_MERGE_GAP_MS) {
+                            pendingSmall = mutableListOf() // too stale/unrelated — discard instead of stitching
+                        }
                     }
 
                     /*
@@ -532,14 +547,9 @@ class StoryViewModel @Inject constructor(
                 _generationProgress.value = uniqueMedia.size
                 yield()
 
-                val selectedClusters = validClusters
-                    .shuffled()
+                val finalClustersToSave = validClusters
+                    .sortedByDescending { cluster -> cluster.maxOfOrNull { it.dateAdded } ?: 0L }
                     .take(MAX_AUTO_STORIES)
-
-                val finalClustersToSave = selectedClusters
-                    .sortedByDescending { cluster ->
-                        cluster.maxOfOrNull { it.dateAdded } ?: 0L
-                    }
 
                 val generationId = System.currentTimeMillis()
 
@@ -641,5 +651,6 @@ class StoryViewModel @Inject constructor(
         const val EVENT_THRESHOLD_MS = 60L * 60L * 1000L
         const val DAILY_REFRESH_MS = 24L * 60L * 60L * 1000L
         const val PERIODIC_CHECK_MS = 60L * 60L * 1000L
+        const val MAX_MERGE_GAP_MS = 3L * 24L * 60L * 60L * 1000L
     }
 }

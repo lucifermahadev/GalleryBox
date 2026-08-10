@@ -73,16 +73,16 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
      * Provides a robust PagingSource to load media directly from MediaStore in chunks.
      * Use this in the ViewModel instead of `fetchAllMedia()` to prevent memory explosion on large galleries.
      */
-    fun getMediaPagingSource(): PagingSource<Int, MediaItem> {
+    fun getMediaPagingSource(): PagingSource<GalleryPagingSource.Cursor, MediaItem> {
         return GalleryPagingSource(context, this)
     }
 
     @Deprecated("Loads entire gallery into memory. Use getMediaPagingSource() for UI displaying.")
-    suspend fun fetchAllMedia(): List<MediaItem> = fetchMedia(null, limit = null, offset = null)
+    suspend fun fetchAllMedia(): List<MediaItem> = fetchMedia(null, null, null, null)
 
-    suspend fun fetchIncrementalMedia(lastGeneration: Long): List<MediaItem> = fetchMedia(lastGeneration, limit = null, offset = null)
+    suspend fun fetchIncrementalMedia(lastGeneration: Long): List<MediaItem> = fetchMedia(lastGeneration, null, null, null)
 
-    suspend fun fetchMedia(minGeneration: Long?, limit: Int?, offset: Int?): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun fetchMedia(minGeneration: Long?, afterDateAdded: Long?, afterId: Long?, limit: Int?): List<MediaItem> = withContext(Dispatchers.IO) {
         val mediaList = mutableListOf<MediaItem>()
         val resolver = context.contentResolver
 
@@ -126,22 +126,27 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
             args.add(minGeneration.toString())
         }
 
-        val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && limit != null && offset != null) {
+        // Keyset instead of OFFSET: strictly "older than the last row we saw"
+        if (afterDateAdded != null && afterId != null) {
+            sel += " AND (${MediaStore.Files.FileColumns.DATE_ADDED} < ? OR " +
+                    "(${MediaStore.Files.FileColumns.DATE_ADDED} = ? AND ${MediaStore.Files.FileColumns._ID} < ?))"
+            args.add(afterDateAdded.toString())
+            args.add(afterDateAdded.toString())
+            args.add(afterId.toString())
+        }
+
+        val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && limit != null) {
             val bundle = Bundle().apply {
                 putInt(android.content.ContentResolver.QUERY_ARG_LIMIT, limit)
-                putInt(android.content.ContentResolver.QUERY_ARG_OFFSET, offset)
-                putStringArray(android.content.ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Files.FileColumns.DATE_ADDED))
+                putStringArray(android.content.ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Files.FileColumns.DATE_ADDED, MediaStore.Files.FileColumns._ID))
                 putInt(android.content.ContentResolver.QUERY_ARG_SORT_DIRECTION, android.content.ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
                 putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, sel)
                 putStringArray(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args.toTypedArray())
             }
             resolver.query(uri, proj.toTypedArray(), bundle, null)
         } else {
-            val sortOrder = if (limit != null && offset != null) {
-                "${MediaStore.Files.FileColumns.DATE_ADDED} DESC LIMIT $limit OFFSET $offset"
-            } else {
-                "${MediaStore.Files.FileColumns.DATE_ADDED} DESC"
-            }
+            val sortOrder = "${MediaStore.Files.FileColumns.DATE_ADDED} DESC, ${MediaStore.Files.FileColumns._ID} DESC" +
+                    if (limit != null) " LIMIT $limit" else ""
             resolver.query(uri, proj.toTypedArray(), sel, if (args.isEmpty()) null else args.toTypedArray(), sortOrder)
         }
 
@@ -321,27 +326,32 @@ class GalleryEngine @Inject constructor(@ApplicationContext private val context:
 class GalleryPagingSource(
     private val context: Context,
     private val engine: GalleryEngine
-) : PagingSource<Int, MediaItem>() {
-    override suspend fun load(params: LoadParams<Int>): LoadResult<Int, MediaItem> {
-        val offset = params.key ?: 0
+) : PagingSource<GalleryPagingSource.Cursor, MediaItem>() {
+
+    data class Cursor(val dateAdded: Long, val id: Long)
+
+    override suspend fun load(params: LoadParams<Cursor>): LoadResult<Cursor, MediaItem> {
+        val after = params.key
         return try {
-            val media = engine.fetchMedia(minGeneration = null, limit = params.loadSize, offset = offset)
+            val media = engine.fetchMedia(
+                minGeneration = null,
+                afterDateAdded = after?.dateAdded,
+                afterId = after?.id,
+                limit = params.loadSize
+            )
+            val last = media.lastOrNull()
             LoadResult.Page(
                 data = media,
-                prevKey = if (offset == 0) null else maxOf(0, offset - params.loadSize),
-                nextKey = if (media.isEmpty()) null else offset + params.loadSize
+                prevKey = null, // DESC-only feed; no meaningful "newer" page to prepend
+                nextKey = if (media.isEmpty() || media.size < params.loadSize) null
+                else Cursor(last!!.dateAdded, last.id)
             )
         } catch (e: Exception) {
             LoadResult.Error(e)
         }
     }
 
-    override fun getRefreshKey(state: PagingState<Int, MediaItem>): Int? {
-        return state.anchorPosition?.let { anchorPosition ->
-            val anchorPage = state.closestPageToPosition(anchorPosition)
-            anchorPage?.prevKey?.plus(state.config.pageSize) ?: anchorPage?.nextKey?.minus(state.config.pageSize)
-        }
-    }
+    override fun getRefreshKey(state: PagingState<Cursor, MediaItem>): Cursor? = null
 }
 
 class VideoPlaybackService : MediaSessionService() {

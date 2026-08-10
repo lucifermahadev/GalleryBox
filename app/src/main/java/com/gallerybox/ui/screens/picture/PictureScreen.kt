@@ -2059,7 +2059,6 @@ fun GalleryGridContent(
                             isSelected = selectedIds.contains(mediaId),
                             isSelectionMode = isSelectionMode,
                             deviceTier = deviceTier,
-                            isScrollingFast = isScrollingFast,
                             onClick = { onItemClick(mediaItem) },
                             onLongClick = { onItemLongClick(mediaItem) }
                         )
@@ -2087,7 +2086,6 @@ fun ModernMediaGridTile(
     isSelected: Boolean,
     isSelectionMode: Boolean,
     deviceTier: DeviceTier,
-    isScrollingFast: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -2113,9 +2111,7 @@ fun ModernMediaGridTile(
                 }
             )
     ) {
-        val effectiveSize = remember(thumbSize, deviceTier) {
-            thumbSize.coerceIn(160, 480)
-        }
+        val effectiveSize = remember(thumbSize) { thumbSize.coerceIn(160, 480) }
 
         val request = remember(item.id, effectiveSize, deviceTier) {
             ImageRequest.Builder(context)
@@ -2129,13 +2125,16 @@ fun ModernMediaGridTile(
                 .networkCachePolicy(CachePolicy.DISABLED)
                 .precision(Precision.INEXACT)
                 .allowHardware(deviceTier != DeviceTier.LOW)
-                .crossfade(120)
+                .crossfade(0)
                 .build()
         }
 
+        val placeholderColor = MaterialTheme.colorScheme.surfaceContainerHighest
+        val placeholder = remember(placeholderColor) { ColorPainter(placeholderColor) }
+
         AsyncImage(
             model = request,
-            placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceContainerHighest),
+            placeholder = placeholder,
             contentDescription = null,
             contentScale = ContentScale.Crop,
             filterQuality = FilterQuality.Low,
@@ -2278,6 +2277,12 @@ fun FullscreenMediaPager(
             sharedPlayer.setMediaItems(videoList.map { Media3Item.fromUri(it.uri) })
             sharedPlayer.playWhenReady = false
             sharedPlayer.prepare()
+
+            val initialItem = mediaList.getOrNull(safeInitialPage)
+            if (initialItem != null && initialItem.isVideo) {
+                val idx = videoList.indexOfFirst { it.id == initialItem.id }
+                if (idx >= 0) sharedPlayer.seekTo(idx, 0)
+            }
         }
     }
 
@@ -2521,8 +2526,12 @@ fun VideoPreviewPage(
         sharedPlayer.volume = if (m) 0f else 1f
     }
 
-    LaunchedEffect(isCurrentPage) {
-        if (!isCurrentPage) {
+    LaunchedEffect(isCurrentPage, videoIndex) {
+        if (isCurrentPage) {
+            if (videoIndex >= 0 && sharedPlayer.currentMediaItemIndex != videoIndex) {
+                sharedPlayer.seekTo(videoIndex, 0)
+            }
+        } else {
             sharedPlayer.pause()
         }
     }

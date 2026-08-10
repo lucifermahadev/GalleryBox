@@ -10,4 +10,6 @@ plugins {
 
     id("com.google.dagger.hilt.android") version "2.57" apply false
     id("com.google.gms.google-services") version "4.4.2" apply false
+
+    id("com.google.android.gms.oss-licenses-plugin") version "0.13.0" apply false
 }

@@ -7,6 +7,7 @@ plugins {
     id("com.google.gms.google-services")
     id("kotlin-parcelize")
     id("org.jetbrains.kotlin.plugin.serialization")
+    id("com.google.android.gms.oss-licenses-plugin")
 }
 
 configurations.all {
@@ -127,6 +128,7 @@ dependencies {
     implementation(libs.androidx.compose.runtime.livedata)
     implementation(libs.androidx.foundation)
     implementation(libs.androidx.ui)
+    implementation(libs.firebase.database)
 
 
     // KotlinX & Serialization
@@ -207,6 +209,8 @@ dependencies {
     implementation("androidx.media3:media3-effect:$media3Version")
     implementation("androidx.media3:media3-transformer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-rtsp:${media3Version}")
+
+    implementation("com.google.android.gms:play-services-oss-licenses:17.3.0")
 
     // Coil & Image Processing
     val coilVersion = "2.7.0"
