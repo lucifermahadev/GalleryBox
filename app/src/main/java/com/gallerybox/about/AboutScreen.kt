@@ -7,9 +7,12 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,11 +28,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.gallerybox.R
 
 enum class AboutTab(val title: String) {
     ABOUT("About"),
@@ -120,147 +126,91 @@ fun AboutScreen(
 
 @Composable
 private fun AboutAppContent() {
-    val scrollState = rememberScrollState()
+    val features = remember { getFeatureList() }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(scrollState)
-            .padding(24.dp)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Header Section
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-            Box(
-                modifier = Modifier
-                    .size(80.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.PhotoLibrary,
-                    contentDescription = "App Logo",
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(40.dp)
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
+        item {
             Text(
-                text = "GalleryBox",
-                style = MaterialTheme.typography.headlineMedium,
+                text = "📱 GalleryBox — Complete Feature List",
+                style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(bottom = 8.dp)
             )
-            Text(
-                text = "Music & Video Editor",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Text(
-                    text = "Version 1.0.0",
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        items(features) { feature ->
+            FeatureSectionCard(feature)
+        }
 
-        Text(
-            text = "An all-in-one, offline-first media management and entertainment suite designed for privacy, speed, and simplicity. Take full control of your photos, videos, and music natively on your device.",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            lineHeight = 24.sp
-        )
+        item {
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(
+                text = "👨‍💻 Developer & Open Source",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            DeveloperProfileCard()
+        }
 
-        Spacer(modifier = Modifier.height(32.dp))
-        Text("Key Features", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(16.dp))
-
-        FeatureItem(
-            icon = Icons.Outlined.Collections,
-            title = "Smart Organization",
-            description = "Seamlessly browse, search, and organize media. Manage albums, favorites, and deleted items through a secure local Trash."
-        )
-        FeatureItem(
-            icon = Icons.Outlined.PlayCircleOutline,
-            title = "Playback & Entertainment",
-            description = "Built-in, high-performance music and video players featuring playlists, sleep timers, and custom audio effects."
-        )
-        FeatureItem(
-            icon = Icons.Outlined.Brush,
-            title = "Creative Editor",
-            description = "Enhance your media with advanced editing tools. Apply professional filters, text layers, and Unicode emoji stickers."
-        )
-        FeatureItem(
-            icon = Icons.Outlined.Shield,
-            title = "Privacy Guaranteed",
-            description = "100% offline architecture. Protect your sensitive media using biometric authentication. No cloud uploads, no tracking."
-        )
-
-        Spacer(modifier = Modifier.height(32.dp))
-        Text("Developer", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(16.dp))
-
-        DeveloperProfileCard()
-
-        Spacer(modifier = Modifier.height(32.dp))
-        Text(
-            text = "© 2026 Ishan Mall. All rights reserved.",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.outline,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(16.dp))
+        item {
+            Spacer(modifier = Modifier.height(32.dp))
+            Text(
+                text = "© 2026 Ishan Mall. All rights reserved.\nLicensed under Apache 2.0",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+        }
     }
 }
 
 @Composable
-private fun FeatureItem(icon: ImageVector, title: String, description: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.Top
+private fun FeatureSectionCard(section: FeatureSection) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLowest
+        ),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.secondaryContainer),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = title,
-                tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                modifier = Modifier.size(24.dp)
-            )
-        }
-        Spacer(modifier = Modifier.width(16.dp))
-        Column {
+        Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = title,
+                text = "${section.emoji} ${section.title}",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
             )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                lineHeight = 20.sp
-            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            section.items.forEach { item ->
+                Row(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(
+                        text = "•",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Text(
+                        text = item,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
         }
     }
 }
@@ -279,20 +229,15 @@ private fun DeveloperProfileCard() {
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
+                Image(
+                    painter = painterResource(id = R.drawable.isha_ndisha_1785611777_3954320604862031420_77465641188),
+                    contentDescription = "Ishan Mall",
+                    contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .size(56.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "IM",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                }
+                        .background(MaterialTheme.colorScheme.primaryContainer)
+                )
                 Spacer(modifier = Modifier.width(16.dp))
                 Column {
                     Text(
@@ -311,28 +256,74 @@ private fun DeveloperProfileCard() {
             }
 
             Spacer(modifier = Modifier.height(20.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(bottom = 16.dp))
 
-            // Social Links
-            SocialLinkItem(
-                icon = Icons.Outlined.CameraAlt,
-                platform = "Instagram",
-                handle = "isha.ndisha",
-                onClick = {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://instagram.com/isha.ndisha"))
-                    context.startActivity(intent)
+            // GitHub Open Source Disclaimer
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Open Source Code",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "The entire source code for this application is freely available. You can use and modify it under the Apache 2.0 License, provided that you give proper credit to the original developer wherever the code is utilized.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        lineHeight = 18.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    SocialLinkItem(
+                        icon = Icons.Outlined.Code,
+                        platform = "GitHub Repository",
+                        handle = "github.com/ishanmall",
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/ishanmall"))
+                            context.startActivity(intent)
+                        }
+                    )
                 }
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            SocialLinkItem(
-                icon = Icons.Outlined.PlayArrow,
-                platform = "YouTube",
-                handle = "@ishanmall9527",
-                onClick = {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://youtube.com/@ishanmall9527"))
-                    context.startActivity(intent)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Portfolio Disclaimer
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Developer Portfolio",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Visit my official website for detailed developer information, professional experience, education, training, certificates, and contact details.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        lineHeight = 18.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    SocialLinkItem(
+                        icon = Icons.Outlined.Language,
+                        platform = "Official Website",
+                        handle = "portfolio-b1973.web.app",
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://portfolio-b1973.web.app/"))
+                            context.startActivity(intent)
+                        }
+                    )
                 }
-            )
+            }
         }
     }
 }
@@ -350,20 +341,20 @@ private fun SocialLinkItem(icon: ImageVector, platform: String, handle: String, 
         Icon(
             imageVector = icon,
             contentDescription = platform,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp)
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(22.dp)
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column {
             Text(
                 text = platform,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text(
                 text = handle,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface
             )
         }
@@ -398,6 +389,111 @@ private fun LegalTextContent(text: String) {
         }
     }
 }
+
+// --- Data Models ---
+
+data class FeatureSection(val title: String, val emoji: String, val items: List<String>)
+
+private fun getFeatureList(): List<FeatureSection> = listOf(
+    FeatureSection("Pictures / Gallery", "🖼️", listOf(
+        "All photos and videos in one place", "Samsung Gallery-style interface", "4×4 default grid",
+        "Adjustable grid size from 1 to 10 columns", "Reverse grid-size control", "Photo/video thumbnails",
+        "Fast MediaStore scanning", "Automatic media synchronization", "Latest media shown first",
+        "Search media", "Selection mode", "Multi-select", "Share", "Delete", "Move", "Copy", "Slideshow",
+        "Favorite/unfavorite", "Hide media", "Recently added/media section", "Video filtering",
+        "Favorite filtering", "Storage information"
+    )),
+    FeatureSection("Albums", "📂", listOf(
+        "Automatic albums from device folders (Camera, Screenshots, Downloads, WhatsApp, Videos, etc.)",
+        "Create custom albums", "Rename albums", "Delete albums", "Move media between albums",
+        "Copy media between albums", "Merge albums", "Pin albums", "Hide albums", "Drag-and-drop album reordering",
+        "Album thumbnails", "Latest image/video as album thumbnail", "Album media count",
+        "Empty-album handling", "Virtual albums"
+    )),
+    FeatureSection("Smart / Special Albums", "⭐", listOf(
+        "Recent", "Favorites", "Camera", "Video", "Screenshot", "Download", "WhatsApp",
+        "Custom albums", "Hidden albums", "Pinned albums", "Inside albums: All, Photos, Videos",
+        "Synchronized with actual bucketId/MediaStore data"
+    )),
+    FeatureSection("Trash / Recycle Bin", "🗑️", listOf(
+        "Deleted media goes to Trash", "30-day automatic expiration", "Restore deleted media",
+        "Permanently delete", "Multi-select deletion", "Trash count", "Automatic cleanup of expired items"
+    )),
+    FeatureSection("Favorites", "❤️", listOf(
+        "Favorite photos", "Favorite videos", "Favorite status synchronized globally",
+        "Favorites album automatically updates (disappears when empty)", "Favorite from picture view or album view"
+    )),
+    FeatureSection("Hidden Media", "🔒", listOf(
+        "Hide individual photos/videos", "Hidden media stored separately", "Unhide media",
+        "Hidden media excluded from normal gallery", "Hidden albums", "Hidden album management"
+    )),
+    FeatureSection("SD Card / External Storage", "💾", listOf(
+        "SD-card support", "Storage Access Framework", "Browse SD-card media", "Create albums on SD card",
+        "Move media", "Copy media", "Rename", "Delete", "Manage external-storage content"
+    )),
+    FeatureSection("Duplicate Detection", "🔍", listOf(
+        "Duplicate media detection", "MD5/hash-based comparison", "Identify duplicate files",
+        "Help clean duplicate photos/videos"
+    )),
+    FeatureSection("Stories", "📖", listOf(
+        "Automatic story generation", "Time-based clustering", "Location-based clustering", "Story grouping",
+        "Manual stories", "Add photos/videos to stories", "Story thumbnails", "Story viewing", "Story management"
+    )),
+    FeatureSection("Music Player", "🎧", listOf(
+        "Offline local music player", "Songs, Albums, Artists, Playlists", "Queue, Shuffle, Repeat",
+        "Play/Pause, Previous/Next, Seek bar", "Mini Player & Full Music Player", "Background playback",
+        "Sleep Timer", "Playback Speed & Pitch Changer", "Equalizer, Bass Boost, Virtualizer"
+    )),
+    FeatureSection("Duo Music Player", "🎧🎧", listOf(
+        "Two music tracks/players", "Independent playback controls", "Two-track playback interface",
+        "Separate seek controls", "Play/Pause controls", "Track selection",
+        "Switch/change either track", "Independent music experience"
+    )),
+    FeatureSection("Radio", "📻", listOf(
+        "Radio section", "Radio station browsing", "Play/pause", "Station switching",
+        "Background playback", "Radio mini-player", "Full radio player"
+    )),
+    FeatureSection("Video Player", "🎬", listOf(
+        "Offline video playback", "Play/pause, Seek bar, Previous/next", "Video rotation (0° / 90°)",
+        "Full-screen playback", "Video sound & controls", "Local video playback"
+    )),
+    FeatureSection("Basic Video Editor", "✂️", listOf(
+        "Video editing & trimming/cutting", "Export & Media3 Transformer", "Shader-based effects",
+        ".cube LUT support & presets", "Frames", "Stickers/assets"
+    )),
+    FeatureSection("Live Wallpaper ⭐ NEW", "🎨", listOf(
+        "Set local videos, photos, or GIFs as live wallpaper", "Preview wallpaper before applying",
+        "Crop/fit video", "Mute/unmute wallpaper audio", "Choose wallpaper source from GalleryBox",
+        "Apply to Home Screen and/or Lock Screen (where supported)", "Offline operation, Android WallpaperService implementation",
+        "Battery-conscious playback (Pauses when required by device)"
+    )),
+    FeatureSection("Storage Management", "📱", listOf(
+        "Internal & SD-card information", "Used & Free storage", "Media statistics (Photo, Video, Music count)",
+        "Storage indicator", "MediaStore synchronization"
+    )),
+    FeatureSection("Smart Media Classification", "🏷️", listOf(
+        "Camera", "Screenshots", "Downloads", "WhatsApp", "Videos", "Favorites", "Recent",
+        "Other automatically detected categories"
+    )),
+    FeatureSection("Offline Database", "🗄️", listOf(
+        "Trash", "Stories", "Favorites", "Hidden media", "Hidden albums", "Pinned albums",
+        "Smart tags", "Album metadata", "Everything remains local on the device"
+    )),
+    FeatureSection("Privacy", "🔐", listOf(
+        "100% offline", "No Google login or account required", "No cloud gallery or automatic upload",
+        "No Google Photos dependency", "Local media processing & database", "User-controlled storage permissions"
+    )),
+    FeatureSection("Gallery Navigation", "🎯", listOf(
+        "Primary structure: Pictures → Albums → Stories → Music → Live Wallpaper",
+        "Additional sections: Favorites, Trash, Hidden, Settings, Storage, Media Player, Video Editor, Live Wallpaper"
+    )),
+    FeatureSection("Biometric App Lock", "🔒", listOf(
+        "Fingerprint & Face unlock (where supported)", "Device PIN/pattern/password fallback",
+        "Lock the entire GalleryBox app automatically", "Re-lock when returning to the app",
+        "Android BiometricPrompt integration", "No biometric data stored by GalleryBox",
+        "Works completely offline", "Enable/disable App Lock from Settings"
+    ))
+)
 
 // --- Raw Legal Texts ---
 
@@ -464,7 +560,7 @@ Any updated version will be made available within GalleryBox or through the appl
 13. Contact
 For questions regarding these Terms of Use:
 Developer: Ishan Mall
-Email: ishanmall789@gmail.com
+Website: https://portfolio-b1973.web.app
 © 2026 Ishan Mall. All rights reserved.
 """.trimIndent()
 
@@ -563,7 +659,7 @@ The latest version will be made available within GalleryBox or through its offic
 16. Contact
 If you have questions, concerns, or requests regarding this Privacy Policy, contact:
 Developer: Ishan Mall
-Email: ishanmall789@gmail.com
+Website: https://portfolio-b1973.web.app
 © 2026 Ishan Mall. All rights reserved.
 """.trimIndent()
 
