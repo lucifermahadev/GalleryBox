@@ -34,6 +34,7 @@ import androidx.media3.effect.*
 import androidx.media3.transformer.*
 import com.caverock.androidsvg.SVG
 import com.gallerybox.data.*
+import com.google.common.collect.ImmutableList
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
 import java.io.File
@@ -269,13 +270,18 @@ class LutEngine @Inject constructor(@ApplicationContext private val context: Con
             pixels[i] = (a shl 24) or (finalR shl 16) or (finalG shl 8) or finalB
         }
 
-        return Bitmap.createBitmap(pixels, w, h, src.config ?: Bitmap.Config.ARGB_8888)
+        // FIX 3: Initialize a mutable bitmap manually, guaranteeing we don't throw an Immutable exception later.
+        val bmp = Bitmap.createBitmap(w, h, src.config ?: Bitmap.Config.ARGB_8888)
+        bmp.setPixels(pixels, 0, w, 0, 0, w, h)
+        return bmp
     }
 }
 
 @Singleton
 class StickerEngine @Inject constructor(@ApplicationContext private val context: Context) {
     private val stickerCache = LruCache<String, Bitmap>(80)
+
+    private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private fun getDiskCacheFile(key: String): File {
         return File(context.cacheDir, "sticker_$key.png")
@@ -309,7 +315,8 @@ class StickerEngine @Inject constructor(@ApplicationContext private val context:
             val docHeight = if (svg.documentHeight > 0) svg.documentHeight else 500f
             val aspect = docWidth / docHeight
 
-            val w = (targetBaseResolution * 0.25f).toInt()
+            // FIX 2: Maps UI 150dp bounding box to final export pixel resolution correctly.
+            val w = (targetBaseResolution * 0.4166f).toInt()
             val h = (w / aspect).toInt()
 
             svg.documentWidth = w.toFloat()
@@ -321,7 +328,7 @@ class StickerEngine @Inject constructor(@ApplicationContext private val context:
 
             stickerCache.put(cacheKey, bmp)
 
-            CoroutineScope(Dispatchers.IO).launch {
+            engineScope.launch {
                 try {
                     FileOutputStream(diskFile).use { out ->
                         bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
@@ -358,7 +365,8 @@ class TextEngine @Inject constructor() {
         return try {
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG).apply {
                 color = layer.color
-                textSize = (targetBaseResolution * (layer.size / 100f)).coerceAtLeast(12f)
+                // FIX 2: Normalize text sizes relative to a 1080px baseline so they match what the UI draws.
+                textSize = (layer.size * 3f * (targetBaseResolution / 1080f)).coerceAtLeast(12f)
                 typeface = Typeface.DEFAULT_BOLD
                 isSubpixelText = true
                 isLinearText = true
@@ -518,16 +526,39 @@ class PhotoEditorEngine @Inject constructor(
 
                 val activeStickers = state.stickers.filter { it.isVisible }.sortedBy { it.zIndex }
                 for (s in activeStickers) {
-                    val bmp = stickerEngine.getStickerBitmap(s.assetPath, resV)
-                    if (bmp != null) {
-                        matrix.reset()
-                        matrix.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
-                        matrix.postScale(s.scale, s.scale)
-                        matrix.postRotate(s.rotation)
-                        matrix.postTranslate(s.x * out.width, s.y * out.height)
-
-                        overlayPaint.alpha = (s.opacity * 255).toInt().coerceIn(0, 255)
-                        sCan.drawBitmap(bmp, matrix, overlayPaint)
+                    if (s.assetPath.isEmpty() && s.emoji.isNotEmpty()) {
+                        val textLayerEquiv = TextLayer(
+                            id = s.id,
+                            text = s.emoji,
+                            color = android.graphics.Color.BLACK,
+                            size = 150f * s.scale,
+                            x = s.x,
+                            y = s.y,
+                            rotation = s.rotation,
+                            opacity = s.opacity,
+                            isVisible = s.isVisible,
+                            zIndex = s.zIndex
+                        )
+                        val bmp = textEngine.getTextBitmap(textLayerEquiv, out.width)
+                        if (bmp != null) {
+                            matrix.reset()
+                            matrix.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
+                            matrix.postRotate(s.rotation)
+                            matrix.postTranslate(s.x * out.width, s.y * out.height)
+                            overlayPaint.alpha = (s.opacity * 255).toInt().coerceIn(0, 255)
+                            sCan.drawBitmap(bmp, matrix, overlayPaint)
+                        }
+                    } else {
+                        val bmp = stickerEngine.getStickerBitmap(s.assetPath, out.width)
+                        if (bmp != null) {
+                            matrix.reset()
+                            matrix.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
+                            matrix.postScale(s.scale, s.scale)
+                            matrix.postRotate(s.rotation)
+                            matrix.postTranslate(s.x * out.width, s.y * out.height)
+                            overlayPaint.alpha = (s.opacity * 255).toInt().coerceIn(0, 255)
+                            sCan.drawBitmap(bmp, matrix, overlayPaint)
+                        }
                     }
                 }
 
@@ -615,7 +646,9 @@ class VideoEditorEngine @Inject constructor(@ApplicationContext private val cont
 @Singleton
 class ExportEngine @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val photoEngine: PhotoEditorEngine
+    private val photoEngine: PhotoEditorEngine,
+    private val stickerEngine: StickerEngine,
+    private val textEngine: TextEngine
 ) {
     private var activeTransformer: Transformer? = null
 
@@ -732,17 +765,66 @@ class ExportEngine @Inject constructor(
                 val sx = if (state.flipHorizontal) -1f else 1f
                 val sy = if (state.flipVertical) -1f else 1f
 
-                if (state.rotationDegrees != 0f || sx != 1f || sy != 1f) {
+                val totalRotation = state.rotationDegrees + state.straightenDegrees
+
+                if (totalRotation != 0f || sx != 1f || sy != 1f) {
                     val transformBuilder = ScaleAndRotateTransformation.Builder()
-                    transformBuilder.setRotationDegrees(state.rotationDegrees)
+                    transformBuilder.setRotationDegrees(totalRotation)
                     transformBuilder.setScale(sx, sy)
                     effs.add(transformBuilder.build())
                 }
 
-                val transformerBuilder = Transformer.Builder(context)
-                val mimeType = if (useH265) MimeTypes.VIDEO_H265 else MimeTypes.VIDEO_H264
-                transformerBuilder.setVideoMimeType(mimeType)
-                activeTransformer = transformerBuilder.build()
+                // FIX 4: Video Overlay Export Engine Mapping
+                if (state.stickers.any { it.isVisible } || state.textLayers.any { it.isVisible }) {
+                    val overlayBmp = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+                    val canvas = Canvas(overlayBmp)
+                    val matrix = Matrix()
+                    val overlayPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG)
+
+                    val activeStickers = state.stickers.filter { it.isVisible }.sortedBy { it.zIndex }
+                    for (s in activeStickers) {
+                        if (s.assetPath.isEmpty() && s.emoji.isNotEmpty()) {
+                            val textLayerEquiv = TextLayer(
+                                id = s.id, text = s.emoji, color = android.graphics.Color.BLACK,
+                                size = 150f * s.scale, x = s.x, y = s.y, rotation = s.rotation, opacity = s.opacity, isVisible = s.isVisible, zIndex = s.zIndex
+                            )
+                            val bmp = textEngine.getTextBitmap(textLayerEquiv, targetWidth)
+                            if (bmp != null) {
+                                matrix.reset()
+                                matrix.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
+                                matrix.postRotate(s.rotation)
+                                matrix.postTranslate(s.x * targetWidth, s.y * targetHeight)
+                                overlayPaint.alpha = (s.opacity * 255).toInt().coerceIn(0, 255)
+                                canvas.drawBitmap(bmp, matrix, overlayPaint)
+                            }
+                        } else {
+                            val bmp = stickerEngine.getStickerBitmap(s.assetPath, targetWidth)
+                            if (bmp != null) {
+                                matrix.reset()
+                                matrix.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
+                                matrix.postScale(s.scale, s.scale)
+                                matrix.postRotate(s.rotation)
+                                matrix.postTranslate(s.x * targetWidth, s.y * targetHeight)
+                                overlayPaint.alpha = (s.opacity * 255).toInt().coerceIn(0, 255)
+                                canvas.drawBitmap(bmp, matrix, overlayPaint)
+                            }
+                        }
+                    }
+                    val activeTextLayers = state.textLayers.filter { it.isVisible }.sortedBy { it.zIndex }
+                    for (t in activeTextLayers) {
+                        val bmp = textEngine.getTextBitmap(t, targetWidth)
+                        if (bmp != null) {
+                            matrix.reset()
+                            matrix.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
+                            matrix.postRotate(t.rotation)
+                            matrix.postTranslate(t.x * targetWidth, t.y * targetHeight)
+                            overlayPaint.alpha = (t.opacity * 255).toInt().coerceIn(0, 255)
+                            canvas.drawBitmap(bmp, matrix, overlayPaint)
+                        }
+                    }
+                    val bitmapOverlay = BitmapOverlay.createStaticBitmapOverlay(overlayBmp)
+                    effs.add(OverlayEffect(listOf(bitmapOverlay)))
+                }
 
                 val editedMediaItemBuilder = EditedMediaItem.Builder(bldr.build())
                 editedMediaItemBuilder.setEffects(Effects(auds, effs))
@@ -753,49 +835,51 @@ class ExportEngine @Inject constructor(
                 val sequence = EditedMediaItemSequence(editedMediaItem)
                 val seqs = mutableListOf(sequence)
 
-                val p = ProgressHolder()
+                val composition = Composition.Builder(seqs).build()
 
-                suspendCancellableCoroutine<Unit> { cont ->
-                    val listener = object : Transformer.Listener {
-                        override fun onCompleted(c: Composition, r: ExportResult) {
-                            Log.d("EXPORT", "Completed")
+                withContext(Dispatchers.Main) {
+                    suspendCancellableCoroutine<Unit> { cont ->
+                        val transformerBuilder = Transformer.Builder(context)
+                        val mimeType = if (useH265) MimeTypes.VIDEO_H265 else MimeTypes.VIDEO_H264
+                        transformerBuilder.setVideoMimeType(mimeType)
+                        activeTransformer = transformerBuilder.build()
+
+                        val listener = object : Transformer.Listener {
+                            override fun onCompleted(c: Composition, r: ExportResult) {
+                                Log.d("EXPORT", "Completed")
+                                activeTransformer = null
+                                onProgress(1f)
+                                if (cont.isActive) cont.resume(Unit)
+                            }
+
+                            override fun onError(c: Composition, r: ExportResult, e: ExportException) {
+                                Log.e("EXPORT", "Error", e)
+                                activeTransformer = null
+                                if (cont.isActive) cont.resumeWithException(e)
+                            }
+                        }
+
+                        activeTransformer?.addListener(listener)
+
+                        Log.d("EXPORT", "Starting export")
+                        activeTransformer?.start(composition, file.absolutePath)
+
+                        val progressJob = launch {
+                            val p = ProgressHolder()
+                            while (isActive) {
+                                if (activeTransformer?.getProgress(p) == Transformer.PROGRESS_STATE_AVAILABLE) {
+                                    Log.d("EXPORT", "Progress = ${p.progress}")
+                                    onProgress(p.progress / 100f)
+                                }
+                                delay(100)
+                            }
+                        }
+
+                        cont.invokeOnCancellation {
+                            progressJob.cancel()
+                            activeTransformer?.cancel()
                             activeTransformer = null
-                            onProgress(1f)
-                            if (cont.isActive) {
-                                cont.resume(Unit)
-                            }
                         }
-
-                        override fun onError(c: Composition, r: ExportResult, e: ExportException) {
-                            Log.e("EXPORT", "Error", e)
-                            activeTransformer = null
-                            if (cont.isActive) {
-                                cont.resumeWithException(e)
-                            }
-                        }
-                    }
-
-                    activeTransformer?.addListener(listener)
-
-                    val composition = Composition.Builder(seqs).build()
-
-                    Log.d("EXPORT", "Starting export")
-                    activeTransformer?.start(composition, file.absolutePath)
-
-                    CoroutineScope(Dispatchers.Main).launch {
-                        while (cont.isActive) {
-                            val stateProgress = activeTransformer?.getProgress(p)
-                            if (stateProgress == Transformer.PROGRESS_STATE_AVAILABLE) {
-                                Log.d("EXPORT", "Progress = ${p.progress}")
-                                onProgress(p.progress / 100f)
-                            }
-                            delay(100)
-                        }
-                    }
-
-                    cont.invokeOnCancellation {
-                        activeTransformer?.cancel()
-                        activeTransformer = null
                     }
                 }
 

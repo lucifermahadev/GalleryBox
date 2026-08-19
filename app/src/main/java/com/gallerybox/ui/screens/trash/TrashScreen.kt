@@ -457,7 +457,7 @@ fun TrashScreen(
                     }
                 } else {
                     LazyVerticalStaggeredGrid(
-                        columns = StaggeredGridCells.Adaptive(135.dp),
+                        columns = StaggeredGridCells.Fixed(4), // Enforces 4 columns exactly
                         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 120.dp, top = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalItemSpacing = 8.dp,
@@ -765,9 +765,9 @@ fun TrashTile(
     val alpha by animateFloatAsState(if (isSelected) 0.20f else 0f, label = "Alpha")
     val height = remember(item.id) {
         if (item.type == TrashMediaType.Image) {
-            listOf(170.dp, 200.dp, 230.dp).random(Random(item.id xor item.originalPath.hashCode().toLong()))
+            listOf(110.dp, 130.dp, 150.dp).random(Random(item.id xor item.originalPath.hashCode().toLong()))
         } else {
-            145.dp
+            110.dp
         }
     }
 

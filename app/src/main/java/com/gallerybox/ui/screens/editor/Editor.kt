@@ -199,17 +199,23 @@ fun EditorScreen(
                     AnimatedVisibility(selectedLayerId != null && !mediaItem.isVideo) {
                         LayerControlToolbar(
                             onDelete = {
-                                editorViewModel.removeText(selectedLayerId!!)
-                                editorViewModel.removeSticker(selectedLayerId!!)
-                                selectedLayerId = null
+                                selectedLayerId?.let { id ->
+                                    editorViewModel.removeText(id)
+                                    editorViewModel.removeSticker(id)
+                                    selectedLayerId = null
+                                }
                             },
                             onDuplicate = {
-                                editorViewModel.duplicateText(selectedLayerId!!)
-                                editorViewModel.duplicateSticker(selectedLayerId!!)
+                                selectedLayerId?.let { id ->
+                                    editorViewModel.duplicateText(id)
+                                    editorViewModel.duplicateSticker(id)
+                                }
                             },
                             onMoveUp = {
-                                editorViewModel.moveTextLayer(selectedLayerId!!, true)
-                                editorViewModel.moveStickerLayer(selectedLayerId!!, true)
+                                selectedLayerId?.let { id ->
+                                    editorViewModel.moveTextLayer(id, true)
+                                    editorViewModel.moveStickerLayer(id, true)
+                                }
                             }
                         )
                     }
@@ -423,7 +429,13 @@ fun EditorScreen(
                                     parentHeight = h,
                                     selId = selectedLayerId,
                                     onSel = { id -> selectedLayerId = id },
-                                    up = { id, updater -> editorViewModel.updateSticker(id, updater) }
+                                    onDragStart = { editorViewModel.beginGesture() },
+                                    onDragEnd = { editorViewModel.endGesture() },
+                                    up = { id, updater ->
+                                        editorViewModel.updateEditState { s ->
+                                            s.copy(stickers = s.stickers.map { if (it.id == id) updater(it) else it })
+                                        }
+                                    }
                                 )
 
                                 TextOverlay(
@@ -432,7 +444,13 @@ fun EditorScreen(
                                     parentHeight = h,
                                     selId = selectedLayerId,
                                     onSel = { id -> selectedLayerId = id },
-                                    up = { id, updater -> editorViewModel.updateText(id, updater) }
+                                    onDragStart = { editorViewModel.beginGesture() },
+                                    onDragEnd = { editorViewModel.endGesture() },
+                                    up = { id, updater ->
+                                        editorViewModel.updateEditState { s ->
+                                            s.copy(textLayers = s.textLayers.map { if (it.id == id) updater(it) else it })
+                                        }
+                                    }
                                 )
                             }
                         }
@@ -575,8 +593,8 @@ fun EditorVideoPreview(
 
     LaunchedEffect(seekRequest) {
         seekRequest?.let {
-            exo.pause()
-            exo.seekTo(it)
+            try { exo.pause() } catch (e: Exception) {}
+            try { exo.seekTo(it) } catch (e: Exception) {}
             onPos(it)
             ctrlVis = true
         }
@@ -605,17 +623,17 @@ fun EditorVideoPreview(
     LaunchedEffect(state.trimStartMs, state.trimEndMs, exo.duration) {
         while (isActive) {
             if (isPlay) {
-                val pos = exo.currentPosition
+                val pos = try { exo.currentPosition } catch (e: IllegalStateException) { return@LaunchedEffect }
                 onPos(pos)
 
                 // Stop/Loop at Trim End
                 if (state.trimEndMs > 0 && pos >= state.trimEndMs - 50) {
-                    exo.seekTo(state.trimStartMs)
+                    try { exo.seekTo(state.trimStartMs) } catch (e: IllegalStateException) { return@LaunchedEffect }
                     if (!isPlay) onPos(state.trimStartMs)
                 }
                 // Enforce Trim Start
                 if (pos < state.trimStartMs - 50) {
-                    exo.seekTo(state.trimStartMs)
+                    try { exo.seekTo(state.trimStartMs) } catch (e: IllegalStateException) { return@LaunchedEffect }
                     if (!isPlay) onPos(state.trimStartMs)
                 }
                 delay(30)
@@ -684,8 +702,12 @@ fun EditorVideoPreview(
             Box(Modifier.fillMaxSize().background(Color.Black.copy(0.2f)), Alignment.Center) {
                 Surface(
                     modifier = Modifier.size(64.dp).clip(CircleShape).clickable {
-                        onPos(exo.currentPosition)
-                        if (isPlay) exo.pause() else exo.play()
+                        onPos(try { exo.currentPosition } catch (e: Exception) { 0L })
+                        if (isPlay) {
+                            try { exo.pause() } catch (e: Exception) {}
+                        } else {
+                            try { exo.play() } catch (e: Exception) {}
+                        }
                     }.align(Alignment.Center),
                     shape = CircleShape,
                     color = Color.Black.copy(0.5f),
@@ -1142,8 +1164,10 @@ fun TextToolPanel(vm: EditorViewModel) {
 @Composable
 fun StickerToolPanel(vm: EditorViewModel) {
     val sts by vm.stickerItems.collectAsState()
+
     val cats = remember(sts) { sts.map { it.category }.distinct() }
     var selCat by remember { mutableStateOf<String?>(null) }
+
     val ctx = LocalContext.current
     val il = remember { ImageLoader.Builder(ctx).components { add(SvgDecoder.Factory()) }.build() }
 
@@ -1157,14 +1181,34 @@ fun StickerToolPanel(vm: EditorViewModel) {
             }
         }
 
-        LazyVerticalGrid(columns = GridCells.Adaptive(80.dp), modifier = Modifier.fillMaxWidth().height(160.dp).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(cSts) { st ->
-                AsyncImage(
-                    ImageRequest.Builder(ctx).data("file:///android_asset/${st.assetPath}").crossfade(true).build(),
-                    st.name,
-                    il,
-                    Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(0.3f)).clickable { vm.addSticker(st.assetPath) }.padding(12.dp)
-                )
+        if (selCat == "Emoji") {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(56.dp),
+                modifier = Modifier.fillMaxWidth().height(160.dp).padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(cSts) { st ->
+                    Box(
+                        Modifier.size(56.dp).clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(0.3f))
+                            .clickable { vm.addSticker("", st.emoji) },
+                        Alignment.Center
+                    ) {
+                        Text(st.emoji, fontSize = 28.sp)
+                    }
+                }
+            }
+        } else {
+            LazyVerticalGrid(columns = GridCells.Adaptive(80.dp), modifier = Modifier.fillMaxWidth().height(160.dp).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(cSts) { st ->
+                    AsyncImage(
+                        ImageRequest.Builder(ctx).data("file:///android_asset/${st.assetPath}").crossfade(true).build(),
+                        st.name,
+                        il,
+                        Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(0.3f)).clickable { vm.addSticker(st.assetPath) }.padding(12.dp)
+                    )
+                }
             }
         }
     }
@@ -1227,7 +1271,7 @@ fun TrimToolPanel(
     var sliderRange by remember(s.trimStartMs, s.trimEndMs, exoDuration) {
         val start = if (exoDuration > 0) (s.trimStartMs.toFloat() / exoDuration).coerceIn(0f, 1f) else 0f
         val end = if (exoDuration > 0 && s.trimEndMs > 0) (s.trimEndMs.toFloat() / exoDuration).coerceIn(0f, 1f) else 1f
-        mutableStateOf(start..end)
+        mutableStateOf(start..max(start, end))
     }
 
     val playheadPercent = if (exoDuration > 0) (currentPos.toFloat() / exoDuration).coerceIn(0f, 1f) else 0f
@@ -1339,16 +1383,17 @@ fun ExportSettingsDialog(
         return
     }
 
-    var r by remember { mutableStateOf(Pair(min(srcWidth, 1920), min(srcHeight, 1080))) }
-    var f by remember { mutableIntStateOf(30) }
-
-    val allRs = listOf(Pair(1280, 720) to "720p", Pair(1920, 1080) to "1080p", Pair(3840, 2160) to "4K")
     val maxPixels = srcWidth * srcHeight
-    val rs = allRs.filter { (res, _) -> res.first * res.second <= maxPixels * 1.2f }.takeIf { it.isNotEmpty() } ?: listOf(allRs.first())
-
-    if (!rs.any { it.first == r }) {
-        r = rs.last().first
+    val rs = remember(srcWidth, srcHeight) {
+        listOf(Pair(1280, 720) to "720p", Pair(1920, 1080) to "1080p", Pair(3840, 2160) to "4K")
+            .filter { (res, _) -> res.first * res.second <= maxPixels * 1.2f }
+            .ifEmpty { listOf(Pair(1280, 720) to "720p") }
     }
+
+    var r by remember(rs) {
+        mutableStateOf(rs.firstOrNull { it.first.first <= 1920 }?.first ?: rs.first().first)
+    }
+    var f by remember { mutableIntStateOf(30) }
 
     val fs = listOf(24, 30, 60)
 
@@ -1384,6 +1429,8 @@ fun StickerOverlay(
     parentHeight: Float,
     selId: String?,
     onSel: (String) -> Unit,
+    onDragStart: () -> Unit,
+    onDragEnd: () -> Unit,
     up: (String, (StickerLayer) -> StickerLayer) -> Unit
 ) {
     val ctx = LocalContext.current
@@ -1400,9 +1447,16 @@ fun StickerOverlay(
             Modifier
                 .offset { IntOffset((posX - b / 2).toInt(), (posY - b / 2).toInt()) }
                 .size(with(d) { b.toDp() })
-                .graphicsLayer { rotationZ = st.rotation }
+                // Drag detection runs in UNTRANSFORMED (parent) coordinates
                 .pointerInput(st.id) {
-                    detectDragGestures(onDragStart = { onSel(st.id) }) { change, dragAmount ->
+                    detectDragGestures(
+                        onDragStart = {
+                            onSel(st.id)
+                            onDragStart()
+                        },
+                        onDragEnd = onDragEnd,
+                        onDragCancel = onDragEnd
+                    ) { change, dragAmount ->
                         change.consume()
                         up(st.id) {
                             it.copy(
@@ -1412,18 +1466,33 @@ fun StickerOverlay(
                         }
                     }
                 }
+                // Visual rotation happens AFTER pointer input, so dragging is intuitive
+                .graphicsLayer { rotationZ = st.rotation }
                 .pointerInput(st.id) { detectTapGestures { onSel(st.id) } }
         ) {
-            AsyncImage(
-                model = ImageRequest.Builder(ctx).data("file:///android_asset/${st.assetPath}").build(),
-                imageLoader = il,
-                contentDescription = "Sticker",
-                modifier = Modifier.fillMaxSize()
-            )
+            if (st.assetPath.isNotEmpty()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(ctx).data("file:///android_asset/${st.assetPath}").build(),
+                    imageLoader = il,
+                    contentDescription = "Sticker",
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else if (st.emoji.isNotEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = st.emoji,
+                        fontSize = with(d) { (b * 0.75f).toSp() },
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+
             if (isSel) {
                 Box(Modifier.matchParentSize().border(2.dp, Color.White))
 
                 val handleSize = 28.dp
+                var dragVec by remember { mutableStateOf(Offset.Zero) }
+
                 Box(
                     Modifier
                         .align(Alignment.BottomEnd)
@@ -1431,18 +1500,26 @@ fun StickerOverlay(
                         .size(handleSize)
                         .background(Color.White, CircleShape)
                         .pointerInput(st.id) {
-                            detectDragGestures { change, _ ->
+                            detectDragGestures(
+                                onDragStart = {
+                                    onDragStart()
+                                    // Set initial vector to the center-to-corner distance
+                                    dragVec = Offset(b / 2f, b / 2f)
+                                },
+                                onDragEnd = onDragEnd,
+                                onDragCancel = onDragEnd
+                            ) { change, dragAmount ->
                                 change.consume()
-                                val handleSizePx = with(d) { handleSize.toPx() }
-                                val cx = -b / 2 + handleSizePx / 2
-                                val cy = -b / 2 + handleSizePx / 2
-                                val v1 = Offset(change.previousPosition.x - cx, change.previousPosition.y - cy)
-                                val v2 = Offset(change.position.x - cx, change.position.y - cy)
-                                val zoomDelta = (v2.getDistance() / v1.getDistance()).takeIf { !it.isNaN() && it > 0f } ?: 1f
-                                val rotDelta = Math.toDegrees((atan2(v2.y, v2.x) - atan2(v1.y, v1.x)).toDouble()).toFloat()
+                                val newVec = dragVec + dragAmount
+                                val zoomDelta = (newVec.getDistance() / dragVec.getDistance())
+                                    .takeIf { !it.isNaN() && it > 0f } ?: 1f
+                                val rotDelta = Math.toDegrees(
+                                    (atan2(newVec.y, newVec.x) - atan2(dragVec.y, dragVec.x)).toDouble()
+                                ).toFloat()
+                                dragVec = newVec
                                 up(st.id) {
                                     it.copy(
-                                        scale = (it.scale * zoomDelta).coerceIn(0.2f, 5f),
+                                        scale = (it.scale * zoomDelta).coerceIn(0.2f, 10f),
                                         rotation = (it.rotation + rotDelta) % 360f
                                     )
                                 }
@@ -1463,6 +1540,8 @@ fun TextOverlay(
     parentHeight: Float,
     selId: String?,
     onSel: (String) -> Unit,
+    onDragStart: () -> Unit,
+    onDragEnd: () -> Unit,
     up: (String, (TextLayer) -> TextLayer) -> Unit
 ) {
     val d = LocalDensity.current
@@ -1481,9 +1560,16 @@ fun TextOverlay(
                     measuredWidth = it.size.width
                     measuredHeight = it.size.height
                 }
-                .graphicsLayer { rotationZ = t.rotation }
+                // Drag detection runs in UNTRANSFORMED (parent) coordinates
                 .pointerInput(t.id) {
-                    detectDragGestures(onDragStart = { onSel(t.id) }) { change, dragAmount ->
+                    detectDragGestures(
+                        onDragStart = {
+                            onSel(t.id)
+                            onDragStart()
+                        },
+                        onDragEnd = onDragEnd,
+                        onDragCancel = onDragEnd
+                    ) { change, dragAmount ->
                         change.consume()
                         up(t.id) {
                             it.copy(
@@ -1493,13 +1579,18 @@ fun TextOverlay(
                         }
                     }
                 }
+                // Visual rotation happens AFTER pointer input
+                .graphicsLayer { rotationZ = t.rotation }
                 .pointerInput(t.id) { detectTapGestures { onSel(t.id) } }
         ) {
             Text(text = t.text, color = Color(t.color).copy(t.opacity), fontSize = t.size.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
+
             if (isSel && measuredWidth > 0) {
                 Box(Modifier.matchParentSize().border(2.dp, Color.White))
 
                 val handleSize = 28.dp
+                var dragVec by remember { mutableStateOf(Offset.Zero) }
+
                 Box(
                     Modifier
                         .align(Alignment.BottomEnd)
@@ -1507,18 +1598,26 @@ fun TextOverlay(
                         .size(handleSize)
                         .background(Color.White, CircleShape)
                         .pointerInput(t.id) {
-                            detectDragGestures { change, _ ->
+                            detectDragGestures(
+                                onDragStart = {
+                                    onDragStart()
+                                    // Set initial vector to the center-to-corner distance
+                                    dragVec = Offset(measuredWidth / 2f, measuredHeight / 2f)
+                                },
+                                onDragEnd = onDragEnd,
+                                onDragCancel = onDragEnd
+                            ) { change, dragAmount ->
                                 change.consume()
-                                val handleSizePx = with(d) { handleSize.toPx() }
-                                val cx = -measuredWidth / 2f + handleSizePx / 2
-                                val cy = -measuredHeight / 2f + handleSizePx / 2
-                                val v1 = Offset(change.previousPosition.x - cx, change.previousPosition.y - cy)
-                                val v2 = Offset(change.position.x - cx, change.position.y - cy)
-                                val zoomDelta = (v2.getDistance() / v1.getDistance()).takeIf { !it.isNaN() && it > 0f } ?: 1f
-                                val rotDelta = Math.toDegrees((atan2(v2.y, v2.x) - atan2(v1.y, v1.x)).toDouble()).toFloat()
+                                val newVec = dragVec + dragAmount
+                                val zoomDelta = (newVec.getDistance() / dragVec.getDistance())
+                                    .takeIf { !it.isNaN() && it > 0f } ?: 1f
+                                val rotDelta = Math.toDegrees(
+                                    (atan2(newVec.y, newVec.x) - atan2(dragVec.y, dragVec.x)).toDouble()
+                                ).toFloat()
+                                dragVec = newVec
                                 up(t.id) {
                                     it.copy(
-                                        size = (it.size * zoomDelta).coerceIn(10f, 200f),
+                                        size = (it.size * zoomDelta).coerceIn(10f, 400f),
                                         rotation = (it.rotation + rotDelta) % 360f
                                     )
                                 }

@@ -26,7 +26,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.io.File
 import java.util.Collections
 import java.util.UUID
 import javax.inject.Inject
@@ -279,17 +278,13 @@ class EditorViewModel @Inject constructor(
     }
 
     fun setOriginalBitmap(bitmap: Bitmap) {
-        if (originalBitmap != bitmap) {
-            originalBitmap?.recycle()
-            originalBitmap = bitmap
-        }
+        val previous = originalBitmap
+        originalBitmap = bitmap
         viewModelScope.launch {
-            _previewBitmap.value?.let {
-                if (it !== originalBitmap) {
-                    it.recycle()
-                }
-            }
             generatePreview(_currentEditState.value, _thermalLevel.value)
+            if (previous !== bitmap && previous !== _previewBitmap.value) {
+                previous?.recycle()
+            }
         }
     }
 
@@ -314,18 +309,13 @@ class EditorViewModel @Inject constructor(
                 val newPreview = editingEngine.createPreview(
                     bitmap = workingBitmap,
                     state = state,
-                    renderOverlays = false // Prevents double text/sticker overlapping in UI
+                    renderOverlays = false
                 )
-
-                val oldPreview = _previewBitmap.value
 
                 _previewBitmap.value = newPreview
 
                 if (workingBitmap !== src && workingBitmap !== newPreview) {
                     workingBitmap.recycle()
-                }
-                if (oldPreview != null && oldPreview !== originalBitmap && oldPreview !== newPreview) {
-                    oldPreview.recycle()
                 }
             }
         } catch (e: Exception) {
@@ -424,11 +414,14 @@ class EditorViewModel @Inject constructor(
                     }
                 }
             }
+            StickerUnicode.allEmojis.forEachIndexed { i, e ->
+                allItems.add(StickerUiItem(name = "Emoji $i", category = "Emoji", assetPath = "", emoji = e))
+            }
             _stickerItems.value = allItems
         }.onFailure { Log.e(TAG, "Failed to load stickers", it) }
     }
 
-    fun addSticker(assetPath: String) = updateEditState { state ->
+    fun addSticker(assetPath: String, emoji: String = "") = updateEditState { state ->
         val offset = (state.stickers.size % 5) * 0.04f
         val cx = (0.5f + offset).coerceAtMost(0.8f)
         val cy = (0.5f + offset).coerceAtMost(0.8f)
@@ -437,6 +430,7 @@ class EditorViewModel @Inject constructor(
             stickers = state.stickers + StickerLayer(
                 id = UUID.randomUUID().toString(),
                 assetPath = assetPath,
+                emoji = emoji,
                 x = cx,
                 y = cy,
                 scale = 1f,

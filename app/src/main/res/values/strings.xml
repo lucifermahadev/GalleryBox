@@ -7,7 +7,7 @@
     <string name="tab_albums">Albums</string>
     <string name="tab_stories">Stories</string>
     <string name="tab_music">Music</string>
-
+    <string name="video_wallpaper_description">Play any video from your gallery as a live wallpaper</string>
     <string name="header_essential">Essential albums</string>
     <string name="header_other">Other albums</string>
     <string name="album_favorites">Favorites</string>

@@ -179,7 +179,6 @@ object StaticEngine {
 
             val bounds = windowManager.currentWindowMetrics.bounds
 
-            // Use desired dimensions to match the launcher's expected wallpaper canvas size
             val targetWidth = max(wm.desiredMinimumWidth, bounds.width())
             val targetHeight = max(wm.desiredMinimumHeight, bounds.height())
 
@@ -190,7 +189,6 @@ object StaticEngine {
                 scale, offsetX, offsetY, rotation, dimLevel
             ) ?: throw Exception("Failed to create bitmap, possibly OutOfMemory")
 
-            // Handle OEM-specific flag splitting for API 24+
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                 when (flags) {
                     WallpaperManager.FLAG_SYSTEM -> {
@@ -218,7 +216,6 @@ object StaticEngine {
                 onSuccess()
             }
         } catch (e: Exception) {
-            // Improved exception logging
             Log.e("StaticEngine", Log.getStackTraceString(e))
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, e.message ?: "Wallpaper failed", Toast.LENGTH_LONG).show()
@@ -229,21 +226,25 @@ object StaticEngine {
 
 object VideoEngine {
     suspend fun setVideoWallpaper(
-        context: Context, item: MediaItem, playAudio: Boolean, loop: Boolean, scaleMode: String, onSuccess: () -> Unit
+        context: Context, item: MediaItem, playAudio: Boolean, loop: Boolean, scaleMode: String, ignoreBatterySaver: Boolean, onSuccess: () -> Unit
     ) = withContext(Dispatchers.IO) {
         try {
-            val internalFile = File(context.filesDir, "live_wallpaper_video.mp4")
-            if (internalFile.exists()) {
-                internalFile.delete()
-            }
+            // FIX: Generate a unique filename every time to prevent SharedPreferences ignoring identical updates
+            val uniqueName = "live_wp_${System.currentTimeMillis()}.mp4"
+            val finalFile = File(context.filesDir, uniqueName)
 
             context.contentResolver.openInputStream(item.uri)?.use { input ->
-                FileOutputStream(internalFile).use { output ->
+                FileOutputStream(finalFile).use { output ->
                     input.copyTo(output)
                 }
             } ?: throw Exception("Cannot open video stream")
 
-            val safeUri = Uri.fromFile(internalFile).toString()
+            // FIX: Clean up old video wallpaper files so storage doesn't pile up
+            context.filesDir.listFiles { _, name ->
+                name.startsWith("live_wp_") && name.endsWith(".mp4") && name != uniqueName
+            }?.forEach { it.delete() }
+
+            val safeUri = Uri.fromFile(finalFile).toString()
 
             val prefs = context.getSharedPreferences("wallpaper_prefs", Context.MODE_PRIVATE)
             prefs.edit {
@@ -251,17 +252,28 @@ object VideoEngine {
                 putBoolean("wallpaper_video_audio", playAudio)
                 putBoolean("wallpaper_video_loop", loop)
                 putString("wallpaper_video_scale_mode", scaleMode)
+                putBoolean("wallpaper_ignore_battery_saver", ignoreBatterySaver)
+                putLong("wallpaper_update_trigger", System.currentTimeMillis()) // Extra guarantee listener fires
             }
 
             withContext(Dispatchers.Main) {
                 try {
+                    val component = ComponentName(context, VideoWallpaperService::class.java)
                     val intent = Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).apply {
-                        putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT, ComponentName(context, VideoWallpaperService::class.java))
+                        putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT, component)
                     }
                     context.startActivity(intent)
                     onSuccess()
                 } catch (e: Exception) {
-                    Toast.makeText(context, "Live Wallpapers not supported on this device", Toast.LENGTH_SHORT).show()
+                    Log.e("VideoEngine", "Direct live wallpaper intent failed", e)
+                    try {
+                        val fallbackIntent = Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER)
+                        context.startActivity(fallbackIntent)
+                        Toast.makeText(context, "Please select GalleryBox Live Wallpaper from the list", Toast.LENGTH_LONG).show()
+                        onSuccess()
+                    } catch (e2: Exception) {
+                        Toast.makeText(context, "Live Wallpapers not supported on this device", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -282,31 +294,20 @@ class VideoWallpaperService : WallpaperService() {
         private var systemReceiver: BroadcastReceiver? = null
         private var currentSurfaceHolder: SurfaceHolder? = null
         private var retryCount = 0
+        private var pendingUri: String? = null
 
         override fun onCreate(surfaceHolder: SurfaceHolder) {
             super.onCreate(surfaceHolder)
             val prefs = getSharedPreferences("wallpaper_prefs", Context.MODE_PRIVATE)
             prefs.registerOnSharedPreferenceChangeListener(this)
-            initializePlayer(prefs)
-            registerSystemReceivers()
-        }
 
-        private fun initializePlayer(prefs: SharedPreferences) {
-            val videoUriString = prefs.getString("wallpaper_video_uri", null) ?: return
-
-            if (exoPlayer == null) {
-                exoPlayer = ExoPlayer.Builder(applicationContext).build()
-            }
-
-            exoPlayer?.apply {
+            exoPlayer = ExoPlayer.Builder(applicationContext).build().apply {
                 volume = if (prefs.getBoolean("wallpaper_video_audio", false)) 1f else 0f
                 setPlaybackSpeed(1f)
                 repeatMode = if (prefs.getBoolean("wallpaper_video_loop", true)) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
 
                 val scaleModeStr = prefs.getString("wallpaper_video_scale_mode", "Fit")
                 videoScalingMode = if (scaleModeStr == "Fill") C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING else C.VIDEO_SCALING_MODE_SCALE_TO_FIT
-
-                setMediaItem(ExoMediaItem.Builder().setUri(videoUriString.toUri()).setMediaId(videoUriString).build())
 
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
@@ -328,11 +329,24 @@ class VideoWallpaperService : WallpaperService() {
                         }
                     }
                 })
-
-                currentSurfaceHolder?.let { setVideoSurfaceHolder(it) }
-                prepare()
-                playWhenReady = true
             }
+
+            pendingUri = prefs.getString("wallpaper_video_uri", null)
+            registerSystemReceivers()
+        }
+
+        private fun startPlaybackIfReady(forceReload: Boolean = false) {
+            val holder = currentSurfaceHolder ?: return
+            val player = exoPlayer ?: return
+            val uri = pendingUri ?: return
+
+            player.setVideoSurfaceHolder(holder)
+            if (forceReload || player.currentMediaItem?.mediaId != uri || player.playbackState == Player.STATE_IDLE) {
+                player.setMediaItem(ExoMediaItem.Builder().setUri(uri.toUri()).setMediaId(uri).build())
+                player.prepare()
+            }
+            player.playWhenReady = true
+            if (isVisible) player.play()
         }
 
         override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
@@ -345,13 +359,12 @@ class VideoWallpaperService : WallpaperService() {
                     val scaleModeStr = sharedPreferences.getString(key, "Fit")
                     exoPlayer?.videoScalingMode = if (scaleModeStr == "Fill") C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING else C.VIDEO_SCALING_MODE_SCALE_TO_FIT
                 }
-                "wallpaper_video_uri" -> {
-                    val videoUriString = sharedPreferences.getString(key, null)
-                    if (videoUriString != null) {
-                        exoPlayer?.setMediaItem(ExoMediaItem.Builder().setUri(videoUriString.toUri()).setMediaId(videoUriString).build())
-                        exoPlayer?.prepare()
-                        if (isVisible) checkPowerAndPlay()
-                    }
+                "wallpaper_ignore_battery_saver" -> {
+                    checkPowerAndPlay()
+                }
+                "wallpaper_video_uri", "wallpaper_update_trigger" -> {
+                    pendingUri = sharedPreferences.getString("wallpaper_video_uri", null)
+                    startPlaybackIfReady(forceReload = true) // Force immediate reload when preferences change
                 }
             }
         }
@@ -382,7 +395,16 @@ class VideoWallpaperService : WallpaperService() {
 
         private fun checkPowerAndPlay() {
             val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (pm.isPowerSaveMode) exoPlayer?.pause() else if (isVisible) exoPlayer?.play()
+            val prefs = getSharedPreferences("wallpaper_prefs", Context.MODE_PRIVATE)
+            val ignoreBatterySaver = prefs.getBoolean("wallpaper_ignore_battery_saver", false)
+
+            val shouldPauseForPower = pm.isPowerSaveMode && !ignoreBatterySaver
+
+            if (shouldPauseForPower) {
+                exoPlayer?.pause()
+            } else if (isVisible) {
+                exoPlayer?.play()
+            }
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
@@ -397,17 +419,13 @@ class VideoWallpaperService : WallpaperService() {
         override fun onSurfaceCreated(holder: SurfaceHolder) {
             super.onSurfaceCreated(holder)
             currentSurfaceHolder = holder
-            exoPlayer?.setVideoSurfaceHolder(holder)
-            if (exoPlayer?.playbackState == Player.STATE_IDLE) {
-                exoPlayer?.prepare()
-            }
-            if (isVisible) checkPowerAndPlay()
+            startPlaybackIfReady()
         }
 
         override fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
             super.onSurfaceChanged(holder, format, width, height)
             currentSurfaceHolder = holder
-            exoPlayer?.setVideoSurfaceHolder(holder)
+            startPlaybackIfReady()
         }
 
         override fun onSurfaceDestroyed(holder: SurfaceHolder) {
@@ -439,6 +457,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
     var playAudio by remember { mutableStateOf(false) }
     var loopVideo by remember { mutableStateOf(true) }
     var scaleMode by remember { mutableStateOf("Fit") }
+    var ignoreBatterySaver by remember { mutableStateOf(false) }
 
     var showTargetDialog by remember { mutableStateOf(false) }
     var showAdjustments by remember { mutableStateOf(false) }
@@ -468,11 +487,9 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
 
     var dimLevel by remember { mutableFloatStateOf(0f) }
 
-    // Loaded bitmap state for preview matching final output
     var previewBitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
     var imageLoadFailed by remember { mutableStateOf(false) }
 
-    // Tap tracking for Double Tap (Fit) and Triple Tap (Original)
     var tapCount by remember { mutableIntStateOf(0) }
     var lastTapTime by remember { mutableLongStateOf(0L) }
     var tapJob by remember { mutableStateOf<Job?>(null) }
@@ -482,7 +499,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
             try {
                 val request = ImageRequest.Builder(context)
                     .data(item.uri)
-                    .allowHardware(false) // required for direct canvas manipulation matching exactly
+                    .allowHardware(false)
                     .build()
                 val result = context.imageLoader.execute(request)
                 if (result is SuccessResult) {
@@ -704,7 +721,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                     ExoPlayer.Builder(context).build().apply {
                         setMediaItem(ExoMediaItem.fromUri(item.uri))
                         playWhenReady = true
-                        volume = 0f // Preview is muted, sound depends on applied wallpaper config
+                        volume = 0f
                         addListener(object : Player.Listener {
                             override fun onPlayerError(error: PlaybackException) {
                                 playerError = true
@@ -728,7 +745,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                                     useController = false
                                     this.player = player
                                     this.resizeMode = when (scaleMode) {
-                                        "Fill" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                        "Fill" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                                         "Original" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                         else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                     }
@@ -736,7 +753,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                             },
                             update = { view ->
                                 view.resizeMode = when (scaleMode) {
-                                    "Fill" -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                                    "Fill" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                                     "Original" -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                     else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                                 }
@@ -871,6 +888,24 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                             RadioButton(selected = !playAudio, onClick = { playAudio = false }, enabled = !isApplying)
                             Text("No")
                         }
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) {
+                                ignoreBatterySaver = !ignoreBatterySaver
+                            }
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Keep playing in Battery Saver", fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Uses more battery when Battery Saver is on",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(checked = ignoreBatterySaver, onCheckedChange = { ignoreBatterySaver = it }, enabled = !isApplying)
+                        }
                         Spacer(Modifier.height(16.dp))
                         Text(
                             "Note: Live wallpapers are handled by the system picker. Target screens (Home/Lock) will be chosen there.",
@@ -914,7 +949,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                         scope.launch {
                             try {
                                 if (item.isVideo) {
-                                    VideoEngine.setVideoWallpaper(context, item, playAudio, loopVideo, scaleMode) {
+                                    VideoEngine.setVideoWallpaper(context, item, playAudio, loopVideo, scaleMode, ignoreBatterySaver) {
                                         onBack()
                                     }
                                 } else {

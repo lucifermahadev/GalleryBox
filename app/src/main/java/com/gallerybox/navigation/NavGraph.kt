@@ -9,6 +9,11 @@ import android.provider.MediaStore
 import android.util.Base64
 import android.widget.Toast
 import androidx.annotation.RequiresApi
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -39,10 +44,12 @@ import androidx.navigation.compose.*
 import androidx.navigation.navDeepLink
 import androidx.navigation.toRoute
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlin.reflect.KClass
 
+import com.gallerybox.about.AboutScreen
 import com.gallerybox.ui.screens.ScanLibraryScreen
 import com.gallerybox.ui.screens.album.*
 import com.gallerybox.ui.screens.editor.EditorScreen
@@ -57,27 +64,20 @@ import com.gallerybox.ui.screens.wallpaper.WallpaperScreen
 import com.gallerybox.viewmodel.*
 
 sealed interface Route {
-    // Gallery Main
     @Serializable data object Pictures : Route
     @Serializable data object Albums : Route
     @Serializable data object Stories : Route
     @Serializable data object Music : Route
-
-    // Camera Shortcut
     @Serializable data object Camera : Route
-
-    // General Utilities
     @Serializable data object Vault : Route
     @Serializable data object Radio : Route
     @Serializable data object Equalizer : Route
     @Serializable data object DuoMusic : Route
-
+    @Serializable data object About : Route
     @Serializable data object ScanLibrary : Route
     @Serializable data object Trash : Route
     @Serializable data object Hidden : Route
     @Serializable data object Duplicates : Route
-
-    // Core Dynamic Routes
     @Serializable data class VideoPlayer(val uri: String, val position: Long = 0L) : Route
     @Serializable data class AlbumView(val albumId: String) : Route
     @Serializable data class Slideshow(val albumId: String? = null) : Route
@@ -104,11 +104,18 @@ data class BottomTab(
 
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
 @Composable
-fun GalleryNavHost(securityVM: SecurityViewModel = hiltViewModel()) {
+fun GalleryNavHost(
+    securityVM: SecurityViewModel = hiltViewModel(),
+    // HOIST VIEWMODELS HERE: This forces them to fetch data on app launch, creating an instant memory cache.
+    sharedGalleryViewModel: GalleryViewModel = hiltViewModel(),
+    sharedMusicViewModel: MusicViewModel = hiltViewModel(),
+    sharedTrashViewModel: TrashViewModel = hiltViewModel()
+) {
     val isUnlocked by securityVM.isUnlocked.collectAsState()
     var isAppLockEnabled by remember { mutableStateOf(false) }
     var isInitializing by remember { mutableStateOf(true) }
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         isAppLockEnabled = withContext(Dispatchers.IO) { securityVM.isAppLockEnabled() }
@@ -118,11 +125,12 @@ fun GalleryNavHost(securityVM: SecurityViewModel = hiltViewModel()) {
         isInitializing = false
     }
 
-    // Re-check lock setting when returning to app
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                isAppLockEnabled = securityVM.isAppLockEnabled()
+                scope.launch {
+                    isAppLockEnabled = withContext(Dispatchers.IO) { securityVM.isAppLockEnabled() }
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -149,15 +157,23 @@ fun GalleryNavHost(securityVM: SecurityViewModel = hiltViewModel()) {
             }
         )
     } else {
-        GalleryAppContent {
-            securityVM.lock()
-        }
+        GalleryAppContent(
+            sharedGalleryViewModel = sharedGalleryViewModel,
+            sharedMusicViewModel = sharedMusicViewModel,
+            sharedTrashViewModel = sharedTrashViewModel,
+            onLockApp = { securityVM.lock() }
+        )
     }
 }
 
 @RequiresApi(android.os.Build.VERSION_CODES.Q)
 @Composable
-fun GalleryAppContent(onLockApp: () -> Unit) {
+fun GalleryAppContent(
+    sharedGalleryViewModel: GalleryViewModel,
+    sharedMusicViewModel: MusicViewModel,
+    sharedTrashViewModel: TrashViewModel,
+    onLockApp: () -> Unit
+) {
     val navController = rememberNavController()
     val context = LocalContext.current
     val sharedPrefs = remember { context.getSharedPreferences("app_nav_prefs", Context.MODE_PRIVATE) }
@@ -215,10 +231,6 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
         }
     }
 
-    val sharedGalleryViewModel: GalleryViewModel = hiltViewModel()
-    val sharedMusicViewModel: MusicViewModel = hiltViewModel()
-    val sharedTrashViewModel: TrashViewModel = hiltViewModel()
-
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -230,7 +242,11 @@ fun GalleryAppContent(onLockApp: () -> Unit) {
         NavHost(
             navController = navController,
             startDestination = initialStartDestination,
-            modifier = Modifier.padding(padding)
+            modifier = Modifier.padding(padding),
+            enterTransition = { fadeIn(animationSpec = tween(200)) },
+            exitTransition = { fadeOut(animationSpec = tween(200)) },
+            popEnterTransition = { fadeIn(animationSpec = tween(200)) },
+            popExitTransition = { fadeOut(animationSpec = tween(200)) }
         ) {
             mainTabs(
                 nav = navController,
@@ -272,7 +288,12 @@ private fun NavGraphBuilder.mainTabs(
     trashViewModel: TrashViewModel,
     musicViewModel: MusicViewModel
 ) {
-    composable<Route.Pictures> {
+    composable<Route.Pictures>(
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None }
+    ) {
         PictureScreen(
             viewModel = galleryViewModel,
             trashViewModel = trashViewModel,
@@ -287,11 +308,17 @@ private fun NavGraphBuilder.mainTabs(
             onNavigateToScan = { nav.navigate(Route.ScanLibrary) },
             onNavigateToVideoPlayer = navToVid,
             onNavigateToEditor = { uri, id -> nav.navigate(Route.MediaEditor(uri.toSafeRouteArgs(), id)) },
-            onNavigateToMoveCopy = { m, ids, src -> nav.navigate(Route.MoveCopy(m, ids, src?.toSafeRouteArgs())) }
+            onNavigateToMoveCopy = { m, ids, src -> nav.navigate(Route.MoveCopy(m, ids, src?.toSafeRouteArgs())) },
+            onNavigateToAbout = { nav.navigate(Route.About) }
         )
     }
 
-    composable<Route.Albums> {
+    composable<Route.Albums>(
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None }
+    ) {
         AlbumScreen(
             viewModel = galleryViewModel,
             trashViewModel = trashViewModel,
@@ -308,14 +335,24 @@ private fun NavGraphBuilder.mainTabs(
         )
     }
 
-    composable<Route.Stories> {
+    composable<Route.Stories>(
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None }
+    ) {
         StoriesScreen(
             viewModel = galleryViewModel,
             storyViewModel = hiltViewModel()
         )
     }
 
-    composable<Route.Music> {
+    composable<Route.Music>(
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None }
+    ) {
         MusicScreen(
             viewModel = musicViewModel,
             trashViewModel = trashViewModel,
@@ -403,6 +440,7 @@ private fun NavGraphBuilder.toolsAndUtilityGraphs(
     trashViewModel: TrashViewModel,
     musicViewModel: MusicViewModel
 ) {
+    composable<Route.About> { AboutScreen(onNavigateUp = { nav.popBackStack() }) }
     composable<Route.Radio> { RadioScreen(viewModel = hiltViewModel<RadioViewModel>(), onBack = { nav.popBackStack() }) }
     composable<Route.Equalizer> { EqualizerScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
     composable<Route.DuoMusic> { DuoMusicScreen(viewModel = musicViewModel, onBack = { nav.popBackStack() }) }
@@ -514,6 +552,14 @@ fun BottomNavigationBar(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(16.dp))
+                        .then(
+                            if (selected) {
+                                Modifier.background(
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                    RoundedCornerShape(16.dp)
+                                )
+                            } else Modifier
+                        )
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = ripple(bounded = true, radius = 36.dp)

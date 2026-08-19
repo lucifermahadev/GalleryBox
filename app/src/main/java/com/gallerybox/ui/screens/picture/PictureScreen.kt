@@ -395,7 +395,8 @@ fun PictureScreen(
     onNavigateToAlbum: (String) -> Unit,
     onNavigateToVideoPlayer: (String, List<String>) -> Unit,
     onNavigateToEditor: (String, Long) -> Unit,
-    onNavigateToMoveCopy: (String, String, String?) -> Unit
+    onNavigateToMoveCopy: (String, String, String?) -> Unit,
+    onNavigateToAbout: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val deviceTier = remember { getDeviceTier(context) }
@@ -593,6 +594,7 @@ fun PictureScreen(
                                     "slideshow" -> onNavigateToSlideshow()
                                     "duplicates" -> onNavigateToDuplicates()
                                     "trash" -> onNavigateToTrash()
+                                    "about" -> onNavigateToAbout()
                                 }
                             }
                         )
@@ -1413,6 +1415,11 @@ fun ModernTopBar(title: String, scrollBehavior: TopAppBarScrollBehavior, onSearc
                         text = { Text("Trash", color = MaterialTheme.colorScheme.onSurface) },
                         onClick = { onMenuAction("trash"); showMenu = false },
                         leadingIcon = { Icon(imageVector = Icons.Outlined.Delete, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("About", color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = { onMenuAction("about"); showMenu = false },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.Info, contentDescription = null) }
                     )
                 }
             }

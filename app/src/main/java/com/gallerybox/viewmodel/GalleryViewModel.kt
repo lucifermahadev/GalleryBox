@@ -906,6 +906,12 @@ class GalleryViewModel @Inject constructor(
     private suspend fun safeLoadLibrary(forceRefresh: Boolean = false) {
         if (isReloading) return
         val now = System.currentTimeMillis()
+
+        if (!forceRefresh && _rawMedia.value.isNotEmpty() && (now - lastSyncTime < 5000)) {
+            _isBusy.value = false
+            return
+        }
+
         if (now - lastSyncTime < 150 && !forceRefresh) return
 
         val memoryPressure = 1.0 - getMemoryFactor()
