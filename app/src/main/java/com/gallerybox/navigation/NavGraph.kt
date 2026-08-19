@@ -106,7 +106,6 @@ data class BottomTab(
 @Composable
 fun GalleryNavHost(
     securityVM: SecurityViewModel = hiltViewModel(),
-    // HOIST VIEWMODELS HERE: This forces them to fetch data on app launch, creating an instant memory cache.
     sharedGalleryViewModel: GalleryViewModel = hiltViewModel(),
     sharedMusicViewModel: MusicViewModel = hiltViewModel(),
     sharedTrashViewModel: TrashViewModel = hiltViewModel()
@@ -540,8 +539,9 @@ fun BottomNavigationBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding() // Ensures background extends behind system nav bar fixing clipping white area
                 .padding(horizontal = 12.dp)
-                .padding(top = 12.dp, bottom = 16.dp),
+                .padding(top = 16.dp, bottom = 16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -552,14 +552,6 @@ fun BottomNavigationBar(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(16.dp))
-                        .then(
-                            if (selected) {
-                                Modifier.background(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                                    RoundedCornerShape(16.dp)
-                                )
-                            } else Modifier
-                        )
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = ripple(bounded = true, radius = 36.dp)
@@ -574,29 +566,15 @@ fun BottomNavigationBar(
                                 }
                             }
                         }
-                        .padding(vertical = 8.dp),
+                        .padding(vertical = 12.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                            contentDescription = tab.label,
-                            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(24.dp)
-                        )
-
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        Text(
-                            text = tab.label,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                    }
+                    Text(
+                        text = tab.label,
+                        fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = if (selected) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall
+                    )
                 }
             }
         }

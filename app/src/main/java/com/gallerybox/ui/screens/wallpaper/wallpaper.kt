@@ -226,20 +226,24 @@ object StaticEngine {
 
 object VideoEngine {
     suspend fun setVideoWallpaper(
-        context: Context, item: MediaItem, playAudio: Boolean, loop: Boolean, scaleMode: String, ignoreBatterySaver: Boolean, onSuccess: () -> Unit
+        context: Context, item: MediaItem, playAudio: Boolean, loop: Boolean, scaleMode: String, onSuccess: () -> Unit
     ) = withContext(Dispatchers.IO) {
         try {
-            // FIX: Generate a unique filename every time to prevent SharedPreferences ignoring identical updates
             val uniqueName = "live_wp_${System.currentTimeMillis()}.mp4"
             val finalFile = File(context.filesDir, uniqueName)
+            val tempFile = File(context.filesDir, "live_wallpaper_video_new.mp4")
 
             context.contentResolver.openInputStream(item.uri)?.use { input ->
-                FileOutputStream(finalFile).use { output ->
+                FileOutputStream(tempFile).use { output ->
                     input.copyTo(output)
                 }
             } ?: throw Exception("Cannot open video stream")
 
-            // FIX: Clean up old video wallpaper files so storage doesn't pile up
+            if (!tempFile.renameTo(finalFile)) {
+                tempFile.copyTo(finalFile, overwrite = true)
+                tempFile.delete()
+            }
+
             context.filesDir.listFiles { _, name ->
                 name.startsWith("live_wp_") && name.endsWith(".mp4") && name != uniqueName
             }?.forEach { it.delete() }
@@ -252,8 +256,7 @@ object VideoEngine {
                 putBoolean("wallpaper_video_audio", playAudio)
                 putBoolean("wallpaper_video_loop", loop)
                 putString("wallpaper_video_scale_mode", scaleMode)
-                putBoolean("wallpaper_ignore_battery_saver", ignoreBatterySaver)
-                putLong("wallpaper_update_trigger", System.currentTimeMillis()) // Extra guarantee listener fires
+                putLong("wallpaper_update_trigger", System.currentTimeMillis())
             }
 
             withContext(Dispatchers.Main) {
@@ -359,12 +362,9 @@ class VideoWallpaperService : WallpaperService() {
                     val scaleModeStr = sharedPreferences.getString(key, "Fit")
                     exoPlayer?.videoScalingMode = if (scaleModeStr == "Fill") C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING else C.VIDEO_SCALING_MODE_SCALE_TO_FIT
                 }
-                "wallpaper_ignore_battery_saver" -> {
-                    checkPowerAndPlay()
-                }
                 "wallpaper_video_uri", "wallpaper_update_trigger" -> {
                     pendingUri = sharedPreferences.getString("wallpaper_video_uri", null)
-                    startPlaybackIfReady(forceReload = true) // Force immediate reload when preferences change
+                    startPlaybackIfReady(forceReload = true)
                 }
             }
         }
@@ -395,10 +395,7 @@ class VideoWallpaperService : WallpaperService() {
 
         private fun checkPowerAndPlay() {
             val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
-            val prefs = getSharedPreferences("wallpaper_prefs", Context.MODE_PRIVATE)
-            val ignoreBatterySaver = prefs.getBoolean("wallpaper_ignore_battery_saver", false)
-
-            val shouldPauseForPower = pm.isPowerSaveMode && !ignoreBatterySaver
+            val shouldPauseForPower = pm.isPowerSaveMode
 
             if (shouldPauseForPower) {
                 exoPlayer?.pause()
@@ -457,7 +454,6 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
     var playAudio by remember { mutableStateOf(false) }
     var loopVideo by remember { mutableStateOf(true) }
     var scaleMode by remember { mutableStateOf("Fit") }
-    var ignoreBatterySaver by remember { mutableStateOf(false) }
 
     var showTargetDialog by remember { mutableStateOf(false) }
     var showAdjustments by remember { mutableStateOf(false) }
@@ -889,24 +885,6 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                             Text("No")
                         }
                         Spacer(Modifier.height(8.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth().clickable(enabled = !isApplying) {
-                                ignoreBatterySaver = !ignoreBatterySaver
-                            }
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text("Keep playing in Battery Saver", fontWeight = FontWeight.Bold)
-                                Text(
-                                    "Uses more battery when Battery Saver is on",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(checked = ignoreBatterySaver, onCheckedChange = { ignoreBatterySaver = it }, enabled = !isApplying)
-                        }
-                        Spacer(Modifier.height(16.dp))
                         Text(
                             "Note: Live wallpapers are handled by the system picker. Target screens (Home/Lock) will be chosen there.",
                             style = MaterialTheme.typography.bodySmall,
@@ -949,7 +927,7 @@ fun WallpaperScreen(item: MediaItem, onBack: () -> Unit) {
                         scope.launch {
                             try {
                                 if (item.isVideo) {
-                                    VideoEngine.setVideoWallpaper(context, item, playAudio, loopVideo, scaleMode, ignoreBatterySaver) {
+                                    VideoEngine.setVideoWallpaper(context, item, playAudio, loopVideo, scaleMode) {
                                         onBack()
                                     }
                                 } else {
