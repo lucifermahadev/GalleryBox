@@ -461,7 +461,7 @@ private fun getFeatureList(): List<FeatureSection> = listOf(
         "Video editing & trimming/cutting", "Export & Media3 Transformer", "Shader-based effects",
         ".cube LUT support & presets", "Frames", "Stickers/assets"
     )),
-    FeatureSection("Live Wallpaper ⭐ NEW", "🎨", listOf(
+    FeatureSection("Live Wallpaper ", "🎨", listOf(
         "Set local videos, photos, or GIFs as live wallpaper", "Preview wallpaper before applying",
         "Crop/fit video", "Mute/unmute wallpaper audio", "Choose wallpaper source from GalleryBox",
         "Apply to Home Screen and/or Lock Screen (where supported)", "Offline operation, Android WallpaperService implementation",
