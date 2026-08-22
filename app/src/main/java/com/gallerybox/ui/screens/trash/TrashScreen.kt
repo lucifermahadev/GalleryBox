@@ -24,6 +24,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.lazy.staggeredgrid.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -105,6 +106,9 @@ fun TrashScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val haptics = LocalHapticFeedback.current
 
+    val prefs = remember { context.getSharedPreferences("gallery_prefs", Context.MODE_PRIVATE) }
+    var gridColumns by remember { mutableIntStateOf(prefs.getInt("trash_grid_columns", 4)) }
+
     val trashEntities by galleryViewModel.trashBin.collectAsState(initial = emptyList())
     val isGalleryBusy by galleryViewModel.isBusy.collectAsState(initial = false)
     val operationProgress by trashViewModel.operationProgress.collectAsState()
@@ -161,11 +165,13 @@ fun TrashScreen(
     var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
     var showEmptySheet by remember { mutableStateOf(false) }
     var showDeleteSheet by remember { mutableStateOf(false) }
+    var showGridSheet by remember { mutableStateOf(false) }
     var itemForDetails by remember { mutableStateOf<TrashUiItem?>(null) }
 
     val emptySheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val deleteSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val detailsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val gridSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     var currentSort by remember { mutableStateOf(TrashSort.NewestDeleted) }
     var currentFilter by remember { mutableStateOf(TrashFilter.All) }
@@ -362,6 +368,11 @@ fun TrashScreen(
                                     }
                                     DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                                         DropdownMenuItem(
+                                            text = { Text("Grid Size") },
+                                            leadingIcon = { Icon(Icons.Rounded.GridView, contentDescription = null) },
+                                            onClick = { showGridSheet = true; showMenu = false }
+                                        )
+                                        DropdownMenuItem(
                                             text = { Text("Empty Trash", color = MaterialTheme.colorScheme.error) },
                                             leadingIcon = { Icon(Icons.Outlined.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
                                             onClick = { showEmptySheet = true; showMenu = false }
@@ -457,7 +468,7 @@ fun TrashScreen(
                     }
                 } else {
                     LazyVerticalStaggeredGrid(
-                        columns = StaggeredGridCells.Fixed(4), // Enforces 4 columns exactly
+                        columns = StaggeredGridCells.Fixed(gridColumns),
                         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 120.dp, top = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalItemSpacing = 8.dp,
@@ -589,6 +600,82 @@ fun TrashScreen(
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showGridSheet) {
+        ModalBottomSheet(onDismissRequest = { showGridSheet = false }, sheetState = gridSheetState) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .padding(bottom = 32.dp, top = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), MaterialTheme.colorScheme.primary.copy(alpha=0.05f)))),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.GridView,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Column {
+                        Text(
+                            text = "Grid Layout",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Choose columns per row",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Spacer(Modifier.height(24.dp))
+
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(4),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(8) { index ->
+                        val col = index + 1
+                        val isSelected = gridColumns == col
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+                            contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier
+                                .aspectRatio(1f)
+                                .clickable {
+                                    gridColumns = col
+                                    prefs.edit().putInt("trash_grid_columns", col).apply()
+                                    scope.launch { gridSheetState.hide() }.invokeOnCompletion { showGridSheet = false }
+                                }
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = col.toString(),
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
             }

@@ -596,9 +596,12 @@ class GalleryViewModel @Inject constructor(
 
     fun playNextVideo() {
         var next = _currentVideoIndex.value + 1
+        while (next < _videoPlaylist.value.size && isHiddenUri(_videoPlaylist.value[next])) next++
         if (next >= _videoPlaylist.value.size) {
             if (_repeatMode.value == PremiumRepeatMode.ALL && _videoPlaylist.value.isNotEmpty()) {
                 next = 0
+                while (next < _videoPlaylist.value.size && isHiddenUri(_videoPlaylist.value[next])) next++
+                if (next >= _videoPlaylist.value.size) return
             } else {
                 return
             }
@@ -611,16 +614,56 @@ class GalleryViewModel @Inject constructor(
             sharedPlayer?.seekTo(0)
             return
         }
-
         var prev = _currentVideoIndex.value - 1
+        while (prev >= 0 && isHiddenUri(_videoPlaylist.value[prev])) prev--
         if (prev < 0) {
             if (_repeatMode.value == PremiumRepeatMode.ALL && _videoPlaylist.value.isNotEmpty()) {
                 prev = _videoPlaylist.value.lastIndex
+                while (prev >= 0 && isHiddenUri(_videoPlaylist.value[prev])) prev--
+                if (prev < 0) return
             } else {
                 return
             }
         }
         openVideo(_videoPlaylist.value[prev])
+    }
+
+    private fun isHiddenUri(uriStr: String): Boolean {
+        val bucketId = _rawMedia.value.firstOrNull { it.uri.toString() == uriStr }?.bucketId ?: return false
+        return _hiddenAlbums.value.contains(bucketId)
+    }
+
+    private fun purgeHiddenFromPlayback() {
+        val hidden = _hiddenAlbums.value
+        if (hidden.isEmpty()) return
+
+        val bucketByUri = _rawMedia.value.associate { it.uri.toString() to it.bucketId }
+
+        val filteredPlaylist = _videoPlaylist.value.filterNot { uriStr ->
+            bucketByUri[uriStr]?.let { hidden.contains(it) } == true
+        }
+        if (filteredPlaylist.size != _videoPlaylist.value.size) {
+            _videoPlaylist.value = filteredPlaylist
+        }
+
+        val currentUri = _currentVideoUri.value
+        val currentIsHidden = currentUri != null && bucketByUri[currentUri]?.let { hidden.contains(it) } == true
+
+        if (currentIsHidden) {
+            sharedPlayer?.pause()
+            sharedPlayer?.stop()
+            sharedPlayer?.clearMediaItems()
+            _currentVideoUri.value = null
+            _currentVideoIndex.value = 0
+
+            if (_viewerState.value is GalleryViewerState.Open) {
+                _viewerState.value = GalleryViewerState.Closed
+            }
+
+            viewModelScope.launch {
+                _events.send(GalleryEvent.ShowToast("Video hidden — album is no longer visible"))
+            }
+        }
     }
 
     fun setPlaybackSpeed(speed: Float) {
@@ -899,7 +942,6 @@ class GalleryViewModel @Inject constructor(
         }
     }
 
-
     fun refreshData() = forceSync()
 
     @Volatile private var isReloading = false
@@ -1056,7 +1098,18 @@ class GalleryViewModel @Inject constructor(
     fun toggleHiddenAlbum(albumId: String) {
         _hiddenAlbums.update { if (it.contains(albumId)) it - albumId else it + albumId }
         invalidatePagingSources()
+        purgeHiddenFromPlayback()
     }
+
+    fun hideAlbums(albumIds: List<String>) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            engine.hideAlbums(albumIds)
+            _hiddenAlbums.update { it + albumIds }
+        } finally {
+            refreshAfterFileOperation()
+            purgeHiddenFromPlayback()
+        }
+    }.let { Unit }
 
     fun clearDuplicates() { _duplicates.value = emptyList() }
 
@@ -1470,6 +1523,7 @@ class GalleryViewModel @Inject constructor(
         } catch (e: Exception) { Log.e(TAG, "Failed to resolve volume for $bucketId", e) }
         null
     }
+
     fun openViewer(mediaId: Long) {
         val item = _mediaMap.value[mediaId]
 
@@ -1484,7 +1538,6 @@ class GalleryViewModel @Inject constructor(
     }
 
     fun openViewer(item: MediaItem) {
-
         if (item.uri == Uri.EMPTY) {
             _events.trySend(
                 GalleryEvent.ShowToast("Media file is unavailable.")
@@ -1515,6 +1568,7 @@ class GalleryViewModel @Inject constructor(
                 )
         }
     }
+
     fun moveData(ids: List<Long>, targetAlbumId: String) {
         if (!tryBeginFileOperation()) {
             _events.trySend(GalleryEvent.ShowToast("An operation is already in progress"))
@@ -2055,10 +2109,6 @@ class GalleryViewModel @Inject constructor(
 
     fun hideItems(ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {
         try { engine.hideItems(ids) } finally { removeMediaLocally(ids.toSet()) }
-    }.let { Unit }
-
-    fun hideAlbums(albumIds: List<String>) = viewModelScope.launch(Dispatchers.IO) {
-        try { engine.hideAlbums(albumIds) } finally { refreshAfterFileOperation() }
     }.let { Unit }
 
     fun unhideMedia(ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {

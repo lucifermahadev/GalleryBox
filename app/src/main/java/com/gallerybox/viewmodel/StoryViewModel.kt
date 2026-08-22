@@ -5,6 +5,7 @@ package com.gallerybox.viewmodel
 import android.app.Application
 import android.content.Context
 import android.content.ContentUris
+import android.content.SharedPreferences
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.core.content.edit
@@ -36,6 +37,20 @@ class StoryViewModel @Inject constructor(
     private val _events = Channel<GalleryEvent>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
 
+    private val enginePrefs = application.getSharedPreferences("gallery_engine_prefs", Context.MODE_PRIVATE)
+
+    private val _hiddenAlbums = MutableStateFlow(loadHiddenAlbumsFromPrefs())
+    val hiddenAlbums = _hiddenAlbums.asStateFlow()
+
+    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "hidden_albums") {
+            _hiddenAlbums.value = loadHiddenAlbumsFromPrefs()
+        }
+    }
+
+    private fun loadHiddenAlbumsFromPrefs(): Set<String> =
+        enginePrefs.getStringSet("hidden_albums", emptySet()) ?: emptySet()
+
     // Now securely holds the COMPLETE gallery metadata, independent of the Paging UI
     private val _mediaMap = MutableStateFlow<Map<Long, MediaItem>>(emptyMap())
 
@@ -49,7 +64,7 @@ class StoryViewModel @Inject constructor(
     val generationTotal = _generationTotal.asStateFlow()
 
     val stories: StateFlow<List<UiStory>> =
-        combine(dao.getStories(), _mediaMap) { entities, map ->
+        combine(dao.getStories(), _mediaMap, _hiddenAlbums) { entities, map, hidden ->
             entities
                 .mapNotNull { entity ->
                     val ids = try {
@@ -65,6 +80,7 @@ class StoryViewModel @Inject constructor(
 
                     val items = ids
                         .mapNotNull { map[it] }
+                        .filterNot { hidden.contains(it.bucketId) }
                         .sortedBy { it.dateAdded }
 
                     if (items.isEmpty()) {
@@ -92,15 +108,28 @@ class StoryViewModel @Inject constructor(
             )
 
     init {
+        enginePrefs.registerOnSharedPreferenceChangeListener(prefsListener)
         // 1. Initial metadata fetch independent of UI
         loadStoryMedia()
         // 2. Start the watcher for background daily refreshes
         startPeriodicMemoryWatcher()
     }
 
+    override fun onCleared() {
+        super.onCleared()
+        enginePrefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+    }
+
+    /** Filters out items belonging to a currently hidden album. */
+    private fun excludeHidden(items: List<MediaItem>): List<MediaItem> {
+        val hidden = _hiddenAlbums.value
+        if (hidden.isEmpty()) return items
+        return items.filterNot { hidden.contains(it.bucketId) }
+    }
+
     private fun loadStoryMedia() {
         viewModelScope.launch(Dispatchers.IO) {
-            val items = scanMediaStoreMetadata()
+            val items = excludeHidden(scanMediaStoreMetadata())
             _mediaMap.value = items.associateBy { it.id }
 
             if (items.size > 20) {
@@ -128,7 +157,7 @@ class StoryViewModel @Inject constructor(
 
                     if (System.currentTimeMillis() - lastScanned >= DAILY_REFRESH_MS) {
                         // Fetch fresh metadata before daily refresh
-                        val items = scanMediaStoreMetadata()
+                        val items = excludeHidden(scanMediaStoreMetadata())
                         _mediaMap.value = items.associateBy { it.id }
                         triggerOfflineStoryGeneration(
                             items,
@@ -307,7 +336,7 @@ class StoryViewModel @Inject constructor(
                     putLong("last_memory_scan_time", 0L)
                 }
 
-                val items = scanMediaStoreMetadata()
+                val items = excludeHidden(scanMediaStoreMetadata())
                 _mediaMap.value = items.associateBy { it.id }
 
                 triggerOfflineStoryGeneration(
